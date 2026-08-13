@@ -157,3 +157,28 @@ Stage Summary:
 - Auth: JWT sessions with HTTP-only cookies, works identically on Vercel and locally
 - All environment variables configured on Vercel
 - App behaves identically on Vercel as on space-z.ai
+
+---
+Task ID: hardening-1-11
+Agent: orchestrator
+Task: Implement all 12 hardening fixes from code review.
+
+Work Log:
+1. Removed hardcoded credentials from seed; demo creds via SEED_ADMIN_EMAIL/PASSWORD + SEED_DEMO_PASSWORD env vars.
+2. JWT_SECRET mandatory in production (resolveJwtSecret throws on absence in NODE_ENV=production).
+3. Idempotency: reservation-based INSERT pending → execute → complete. Losers poll for completion. Stale pending detection (30s). Closes check-then-execute race.
+4. AssetNetworkAssignment model; ingestion resolves network from assignment, not "most recent". Assets without assignment can't ingest.
+5. Schema validation: Zod schema built from capability fields; strict mode rejects unknown fields. "banana" power_kw now rejected.
+6. Verification policy_version = actual NetworkVersion.version (not hardcoded 1). verifier_version = 1.1.0.
+7. Double-entry ledger: LedgerPosting groups entries; sum(amount)=0 enforced. Account types: asset/liability/revenue. Reward posting: buyer_funds debit + operator_payable credit + platform_revenue credit = 0. Settlement: operator_payable debit + cash credit = 0.
+8. Settlement outbox: createSettlement only creates + emits; worker (processSettlementOutbox) calls provider + finalizes ledger.
+9. DeviceCredential: publicKey → verificationKey. Crypto + registry + verification all updated.
+10. Async ingestion: persist event (queued) + emit outbox; return 202. Worker (processEventOutbox) runs verification + creates attestation.
+11. 13 integration tests (tests/hardening.test.ts): idempotency concurrency, network membership, schema validation, policy version, double-entry balance, async pipeline, settlement outbox, tenant isolation. All pass.
+
+Stage Summary:
+- All 12 hardening items implemented and tested.
+- 13/13 integration tests pass.
+- Lint clean.
+- Deployed to Vercel (iaas-ivory.vercel.app): login + E2E (both templates) verified, all 5 verification checks pass including schema_validation, ledger balanced, settlement completed.
+- GitHub: pectoraux/iaas-platform (latest commit 7a926bf)
