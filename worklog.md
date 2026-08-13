@@ -182,3 +182,23 @@ Stage Summary:
 - Lint clean.
 - Deployed to Vercel (iaas-ivory.vercel.app): login + E2E (both templates) verified, all 5 verification checks pass including schema_validation, ledger balanced, settlement completed.
 - GitHub: pectoraux/iaas-platform (latest commit 7a926bf)
+
+---
+Task ID: hardening-2 (correctness before VPP)
+Agent: orchestrator
+Task: Implement 6 correctness fixes from second code review.
+
+Work Log:
+1. Atomic outbox: emit() accepts tx client; all callers (ingestion, settlement, attestation, contribution, reward, ledger) use db.$transaction for main op + outbox emit. No orphaned events, no missing outbox rows.
+2. Worker claiming: claimEvents()/claimSettlements() use raw SQL `FOR UPDATE SKIP LOCKED`. Two concurrent workers can NEVER claim the same row. 5-minute lease with auto-reclaim of stale leases. New 'processing'/'claiming' status transitions. Tested: 5 events + 2 concurrent workers → each event processed exactly once.
+3. Decimal: all monetary fields Float → Decimal @db.Decimal(20,8). Exact balance validation (sum.equals(0)). Prisma.Decimal arithmetic (plus/times/minus/div/negated/lte/lessThan/equals/isZero). Amounts returned as strings for JSON safety.
+4. Explicit capability: Event.capabilityType set at ingest from asset's network assignment. Worker resolves specific capability by type (not capabilities[0]). Attestation + contribution use event's capabilityType.
+5. Funding enforcement: postRewardToLedger checks buyer_funds balance >= gross before posting. Rejects with ValidationError if insufficient. recordBuyerFunding() pre-funds buyer. E2E flow + seed both fund buyer before posting.
+6. Tests: correctness.test.ts (12 tests). Verified: atomic outbox, concurrent worker claiming (no double-process), Decimal precision (0.1+0.2 exact), explicit capability binding, insufficient funding rejection, sufficient funding acceptance.
+
+Stage Summary:
+- All 6 correctness fixes implemented, tested, and deployed.
+- Vercel production verified: login + E2E (energy-vpp) all checks pass, Decimal amounts correct (gross 0.384, fee 0.0192, net 0.3648), ledger balanced, settlement completed.
+- GitHub: pectoraux/iaas-platform (commit 5b0f748)
+- Vercel: iaas-ivory.vercel.app (production READY)
+- Platform is now ready for the VPP implementation phase.
