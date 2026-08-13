@@ -279,10 +279,11 @@ model Event {
   networkVersionId String
   assetId         String
   deviceId        String?
-  // Task 4: explicit capability binding. Resolved from the asset's network
-  // assignment at ingest time. Events are NOT validated against capabilities[0]
-  // — they are validated against the specific capability the asset is assigned to.
-  capabilityType  String?
+  // Explicit capability binding — NON-NULL (issue from third review).
+  // The application always sets this at ingest time from the asset's network
+  // assignment. The database now enforces the same invariant: every event
+  // MUST have an explicit capability binding.
+  capabilityType  String
   externalEventId String?  // client-supplied event_id for idempotency
   eventType       String   // telemetry | observation | command_ack | usage | measurement
   occurredAt      DateTime
