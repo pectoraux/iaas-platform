@@ -129,3 +129,31 @@ Stage Summary:
 - No console errors. No runtime errors in dev.log. No hydration warnings.
 - Footer remains sticky (`mt-auto`). Login screen is responsive (left branding panel hides on mobile, right form goes full-width).
 - Files modified: `src/app/page.tsx` (main UI changes), `src/lib/domain/tenant-context.ts` (1-line backend import fix to unblock verification).
+
+---
+Task ID: 9-10
+Agent: orchestrator
+Task: Push to GitHub + deploy to Vercel with auth, PostgreSQL, and environment variables.
+
+Work Log:
+- Created GitHub repo: pectoraux/iaas-platform (public)
+- Pushed all code (156 tracked files), .env excluded from tracking
+- Created Vercel project "iaas" linked to GitHub repo
+- Set environment variables: DATABASE_URL (Neon pooled), JWT_SECRET
+- Triggered production deployment from main branch → READY in ~60s
+- Verified on production (iaas-ivory.vercel.app):
+  - Health check: status ok, 2 tenants, 1 event, 1 settlement
+  - Auth flow: login (admin + demo), session cookie, logout — all working
+  - Dashboard: KPIs, 6 tabs (Pipeline/Entities/Economics/Audit/Templates/Admin)
+  - Admin tab: waitlist with Approve/Reject, users table
+  - User menu: email, tenant, demo badge, sign out
+  - Role-based visibility: admin sees all, non-admin hides tenant selector + Run E2E + Admin tab
+- iaas.vercel.app subdomain was already taken by another project; production alias is iaas-ivory.vercel.app
+
+Stage Summary:
+- GitHub: https://github.com/pectoraux/iaas-platform
+- Vercel: https://iaas-ivory.vercel.app (production)
+- Database: Neon PostgreSQL (pooled connection)
+- Auth: JWT sessions with HTTP-only cookies, works identically on Vercel and locally
+- All environment variables configured on Vercel
+- App behaves identically on Vercel as on space-z.ai
