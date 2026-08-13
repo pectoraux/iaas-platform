@@ -190,7 +190,10 @@ model AssetNetworkAssignment {
   asset   Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
   network NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
 
-  @@unique([assetId, networkId])
+  // Issue 3: allow multiple capabilities per asset per network.
+  // A battery can provide energy_discharge + frequency_response + energy_capacity
+  // to the same VPP. A server can provide compute + storage + bandwidth.
+  @@unique([assetId, networkId, capabilityType])
   @@index([tenantId])
   @@index([assetId])
   @@index([networkId])

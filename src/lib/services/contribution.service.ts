@@ -77,15 +77,21 @@ export async function createContribution(
   const allSameVersion = attestations.every((a) => a.event.networkVersionId === networkVersionId)
   if (!allSameVersion) throw new ValidationError('All attestations must reference the same network version')
 
-  // Task 4: resolve capability from the event's explicit capabilityType,
-  // NOT configuration.capabilities[0].
+  // Issue 1: resolve capability from the event's explicit capabilityType —
+  // NO fallback to configuration.capabilities[0].
   const firstAtt = attestations[0]
   const configuration = await getPublishedConfiguration(networkVersionId)
-  const capType = firstAtt.event.capabilityType ?? configuration.capabilities[0]?.type ?? 'measured_output'
+  const capType = firstAtt.event.capabilityType
+  if (!capType) {
+    throw new ValidationError('Cannot create contribution from event without explicit capabilityType')
+  }
   const capability = input.capabilityId
     ? await db.capability.findFirst({ where: { id: input.capabilityId, tenantId } }).then((c) => c ?? null)
     : await getCapabilityForVersion(tenantId, networkVersionId, capType)
   if (!capability) throw new NotFoundError('capability', capType)
+
+  // Find the specific capability config for policyVersion.
+  const specificCapConfig = configuration.capabilities.find((c) => c.type === capType)
 
   // Derive operator + asset from the first attestation's event.
   const firstEvent = firstAtt.event
@@ -116,7 +122,7 @@ export async function createContribution(
         endTime,
         attestationIdsJson: JSON.stringify(input.attestationIds),
         status: 'created',
-        policyVersion: configuration.capabilities[0]?.schema_version ?? 1,
+        policyVersion: specificCapConfig?.schema_version ?? 1,
         idempotencyKey,
       },
     })

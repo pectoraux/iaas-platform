@@ -295,49 +295,140 @@ export async function postRewardToLedger(
   const revenueAccount = await ensurePlatformAccount(tenantId, reward.currency, 'revenue')
   const buyerFundsAccount = await ensureBuyerFundsAccount(tenantId, reward.currency)
 
-  // Task 5: check sufficient buyer funding.
-  const buyerBalanceBefore = await computeBalance(tenantId, buyerFundsAccount.id)
-  if (buyerBalanceBefore.lessThan(grossAmount)) {
-    throw new ValidationError(
-      `Insufficient buyer funding: balance ${buyerBalanceBefore.toString()} < gross ${grossAmount.toString()}. ` +
-      `Fund the buyer account via POST /api/v1/funding first.`,
-    )
+  // Issue 2: concurrency-safe buyer funding check.
+  // The balance check AND the ledger debit MUST happen inside the same
+  // transaction, with the buyer_funds account locked FOR UPDATE. This
+  // prevents two concurrent rewards from both passing the balance check
+  // and over-debiting the buyer.
+  //
+  // Flow:
+  //   BEGIN
+  //   SELECT * FROM LedgerEntry WHERE accountId = buyer FOR UPDATE
+  //   compute balance
+  //   if balance < gross → ROLLBACK (reject)
+  //   INSERT posting + entries
+  //   UPDATE reward status = 'posted'
+  //   COMMIT
+  let buyerBalanceBefore: Prisma.Decimal
+  let buyerBalanceAfter: Prisma.Decimal
+  let postingId: string
+  let entryIds: string[]
+
+  try {
+    const result = await db.$transaction(async (tx) => {
+      // Issue 2: lock the buyer's LedgerAccount row FOR UPDATE. This prevents
+      // any concurrent transaction from posting to the same buyer account
+      // until we commit. We lock the ACCOUNT row (not the entries) because:
+      //   - it's always exactly one row (fast lock)
+      //   - it serializes all postings to this account
+      //   - it works even when the account has zero entries
+      await tx.$queryRaw`SELECT * FROM "LedgerAccount" WHERE "id" = ${buyerFundsAccount.id} FOR UPDATE`
+
+      // Compute the buyer's current balance (inside the lock).
+      const buyerEntries = await tx.ledgerEntry.findMany({ where: { accountId: buyerFundsAccount.id } })
+      buyerBalanceBefore = buyerEntries.reduce((sum, e) => sum.plus(e.amount), new Prisma.Decimal(0))
+
+      // Check sufficient funds (inside the lock — no race possible).
+      if (buyerBalanceBefore.lessThan(grossAmount)) {
+        throw new ValidationError(
+          `Insufficient buyer funding: balance ${buyerBalanceBefore.toString()} < gross ${grossAmount.toString()}. ` +
+          `Fund the buyer account via POST /api/v1/funding first.`,
+        )
+      }
+
+      // Create the balanced posting + entries (inside the same transaction).
+      const post = await tx.ledgerPosting.create({
+        data: {
+          tenantId,
+          postingType: 'reward',
+          referenceType: 'reward',
+          referenceId: reward.id,
+          idempotencyKey,
+        },
+      })
+      const entries = await Promise.all([
+        tx.ledgerEntry.create({
+          data: {
+            tenantId, postingId: post.id, accountId: buyerFundsAccount.id,
+            amount: grossAmount.negated(), currency: reward.currency, entryType: 'buyer_debit',
+          },
+        }),
+        tx.ledgerEntry.create({
+          data: {
+            tenantId, postingId: post.id, accountId: payableAccount.id,
+            amount: netAmount, currency: reward.currency, entryType: 'reward_credit',
+          },
+        }),
+        tx.ledgerEntry.create({
+          data: {
+            tenantId, postingId: post.id, accountId: revenueAccount.id,
+            amount: platformFee, currency: reward.currency, entryType: 'platform_fee',
+          },
+        }),
+      ])
+
+      // Emit outbox in the same transaction (issue 4: atomic outbox).
+      await emit(
+        {
+          event_type: DomainEventTypes.LedgerEntryPosted,
+          aggregate_id: post.id,
+          tenant_id: tenantId,
+          version: 1,
+          payload: { postingType: 'reward', entryCount: entries.length },
+        },
+        tx,
+      )
+
+      // Mark reward as posted (inside the same transaction).
+      await tx.reward.update({ where: { id: reward.id }, data: { status: 'posted' } })
+
+      // Compute buyer balance after (inside the lock).
+      const buyerEntriesAfter = await tx.ledgerEntry.findMany({ where: { accountId: buyerFundsAccount.id } })
+      buyerBalanceAfter = buyerEntriesAfter.reduce((sum, e) => sum.plus(e.amount), new Prisma.Decimal(0))
+
+      return { postingId: post.id, entryIds: entries.map((e) => e.id) }
+    })
+
+    postingId = result.postingId
+    entryIds = result.entryIds
+  } catch (err) {
+    // Re-throw ValidationError (funding insufficient) as-is.
+    if (err instanceof ValidationError) throw err
+    // Other errors (e.g. unique constraint on idempotency) — re-throw.
+    throw err
   }
 
-  // Post the balanced transaction.
-  const posting = await postBalancedPosting({
+  await appendAudit({
     tenantId,
-    idempotencyKey,
-    postingType: 'reward',
-    referenceType: 'reward',
-    referenceId: reward.id,
-    entries: [
-      { accountId: buyerFundsAccount.id, amount: grossAmount.negated(), entryType: 'buyer_debit' },
-      { accountId: payableAccount.id, amount: netAmount, entryType: 'reward_credit' },
-      { accountId: revenueAccount.id, amount: platformFee, entryType: 'platform_fee' },
-    ],
+    eventType: AuditEvents.LedgerPosted,
+    resourceType: 'ledger_posting',
+    resourceId: postingId,
+    metadata: {
+      postingType: 'reward',
+      referenceType: 'reward',
+      referenceId: reward.id,
+      entryCount: entryIds.length,
+      sum: '0',
+    },
   })
 
-  await db.reward.update({ where: { id: reward.id }, data: { status: 'posted' } })
-
-  const balance = await computeBalance(tenantId, payableAccount.id)
-  const buyerBalanceAfter = await computeBalance(tenantId, buyerFundsAccount.id)
+  const operatorBalance = await computeBalance(tenantId, payableAccount.id)
 
   return {
-    posting_id: posting.posting_id,
-    reward_credit_entry_id: posting.entry_ids[1],
-    platform_fee_entry_id: posting.entry_ids[2],
-    buyer_debit_entry_id: posting.entry_ids[0],
-    operator_balance_after: balance,
+    posting_id: postingId,
+    reward_credit_entry_id: entryIds[1],
+    platform_fee_entry_id: entryIds[2],
+    buyer_debit_entry_id: entryIds[0],
+    operator_balance_after: operatorBalance,
     currency: reward.currency,
-    duplicate: posting.duplicate,
+    duplicate: false,
     breakdown: {
       gross: grossAmount.toString(),
       operator_credit: netAmount.toString(),
       platform_fee: platformFee.toString(),
       buyer_debit: grossAmount.toString(),
-      buyer_balance_before: buyerBalanceBefore.toString(),
-      buyer_balance_after: buyerBalanceAfter.toString(),
+      buyer_balance_before: buyerBalanceBefore!.toString(),
+      buyer_balance_after: buyerBalanceAfter!.toString(),
       balanced: true,
       funding_sufficient: true,
     },

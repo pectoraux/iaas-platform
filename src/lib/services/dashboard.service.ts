@@ -175,6 +175,7 @@ export async function runE2EFlow(opts?: {
     payload,
     signature,
     network_version_id: version?.id,
+    capability_type: capType, // issue 1: explicit capability binding
   })
 
   // Task 10: process the outbox (runs verification + creates attestation).

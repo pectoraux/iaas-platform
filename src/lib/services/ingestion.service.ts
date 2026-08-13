@@ -35,6 +35,7 @@ export interface IngestEventInput {
   payload: Record<string, unknown>
   signature?: string
   network_version_id?: string
+  capability_type?: string // issue 3: required when asset has multiple capabilities per network
 }
 
 export interface IngestResult {
@@ -69,18 +70,26 @@ export async function ingestEvent(
   const device = await resolveDeviceCredential(tenantId, input.device_id)
   const asset = device.asset
 
-  // ---- Network membership resolution (task 4) ----
+  // ---- Network membership + capability resolution (issues 1, 3) ----
   // Resolve the network assignment + capability type for this asset.
+  // Issue 1: capabilityType is REQUIRED — an event without an explicit
+  // capability binding must fail, not silently fall back to capabilities[0].
+  // Issue 3: an asset can have multiple capabilities per network; the caller
+  // must specify capability_type when there's ambiguity.
   let networkVersionId: string | null = null
   let capabilityType: string | null = null
 
   if (input.network_version_id) {
     const version = await getNetworkVersion(tenantId, input.network_version_id)
-    const assignment = await resolveAssetNetworkAssignment(tenantId, asset.id, version.networkId)
+    const assignment = await resolveAssetNetworkAssignment(
+      tenantId, asset.id, version.networkId, input.capability_type,
+    )
     networkVersionId = input.network_version_id
     capabilityType = assignment.capabilityType
   } else {
-    const assignment = await resolveAssetNetworkAssignment(tenantId, asset.id)
+    const assignment = await resolveAssetNetworkAssignment(
+      tenantId, asset.id, undefined, input.capability_type,
+    )
     const network = await db.networkDefinition.findFirst({
       where: { id: assignment.networkId, tenantId, currentVersionId: { not: null } },
     })
@@ -88,6 +97,10 @@ export async function ingestEvent(
     capabilityType = assignment.capabilityType
   }
   if (!networkVersionId) throw new ValidationError('Could not resolve a published network version for this asset')
+  // Issue 1: capabilityType must never be null. Reject if missing.
+  if (!capabilityType) {
+    throw new ValidationError('Could not resolve capability type for this asset. Ensure the asset has an active network assignment with a capability.')
+  }
 
   // ---- Replay/idempotency at ingest layer ----
   const existing = await db.event.findUnique({

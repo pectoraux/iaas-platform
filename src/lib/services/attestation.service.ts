@@ -51,9 +51,16 @@ export async function createAttestationForEvent(
     throw new ValidationError('Cannot attest an unverified event')
   }
 
-  // Task 4: resolve the SPECIFIC capability for this event, not capabilities[0].
-  const resolvedCapType = capabilityType ?? event.capabilityType ?? configuration.capabilities[0]?.type
-  const cap = configuration.capabilities.find((c) => c.type === resolvedCapType) ?? configuration.capabilities[0]
+  // Issue 1: resolve the SPECIFIC capability for this event — NO fallback.
+  // The event MUST have an explicit capabilityType (enforced at ingest).
+  const resolvedCapType = capabilityType ?? event.capabilityType
+  if (!resolvedCapType) {
+    throw new ValidationError('Cannot attest event without explicit capabilityType')
+  }
+  const cap = configuration.capabilities.find((c) => c.type === resolvedCapType)
+  if (!cap) {
+    throw new ValidationError(`Capability ${resolvedCapType} not found in network configuration`)
+  }
   const unit = cap?.unit ?? 'unit'
 
   // Derive the claim quantity from the payload using the specific capability's fields.

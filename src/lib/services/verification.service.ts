@@ -147,10 +147,13 @@ const schemaValidationCheck: VerificationCheck = {
     }
 
     // Build a Zod schema from the capability field definitions.
+    // The worker has already resolved the SPECIFIC capability for this event
+    // (issue 1) and set ctx.configuration.capabilities to contain only it.
+    // There should be exactly one capability here.
     const cap = ctx.configuration.capabilities[0]
     if (!cap || !cap.fields) {
-      // No capability schema defined — accept any object (backward compat).
-      return { name: 'schema_validation', status: 'pass', detail: 'No capability schema; object validated' }
+      // No capability schema defined — reject (issue 1: no silent acceptance).
+      return { name: 'schema_validation', status: 'fail', detail: 'No capability schema resolved for this event' }
     }
 
     const schemaShape: Record<string, z.ZodTypeAny> = {}

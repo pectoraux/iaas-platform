@@ -80,10 +80,42 @@ export async function processEventOutbox(tenantId?: string): Promise<{ processed
       const configuration = await getPublishedConfiguration(event.networkVersionId)
       const versionRecord = await getNetworkVersionRecord(event.networkVersionId)
 
-      // Task 4: use the event's explicit capabilityType to find the specific
-      // capability schema, NOT capabilities[0].
-      const capabilityType = event.capabilityType ?? configuration.capabilities[0]?.type
+      // Issue 1: use the event's EXPLICIT capabilityType — NO fallback to
+      // capabilities[0]. An event without capabilityType is malformed and
+      // must be rejected, not silently assigned the first capability.
+      const capabilityType = event.capabilityType
+      if (!capabilityType) {
+        // Mark as failed — this event was ingested before the fix or is malformed.
+        await db.event.update({ where: { id: event.id }, data: { status: 'failed' } })
+        await appendAudit({
+          tenantId: event.tenantId,
+          eventType: 'verification.completed',
+          resourceType: 'event',
+          resourceId: event.id,
+          metadata: { error: 'Event has no explicit capabilityType — rejected as malformed' },
+        })
+        rejected++
+        continue
+      }
       const specificCapability = configuration.capabilities.find((c) => c.type === capabilityType)
+      if (!specificCapability) {
+        // The event's capabilityType doesn't match any capability in the network config.
+        await db.event.update({ where: { id: event.id }, data: { status: 'rejected' } })
+        await db.verificationResult.create({
+          data: {
+            tenantId: event.tenantId,
+            eventId: event.id,
+            policyVersion: versionRecord.version,
+            verifierVersion: '1.1.0',
+            checksJson: JSON.stringify([{ name: 'capability_resolution', status: 'fail', detail: `capabilityType ${capabilityType} not found in network configuration` }]),
+            overallStatus: 'rejected',
+            risk: 1,
+            confidence: 0,
+          },
+        })
+        rejected++
+        continue
+      }
 
       const ctx: VerificationContext = {
         tenantId: event.tenantId,
@@ -247,20 +279,55 @@ export async function processSettlementOutbox(tenantId?: string): Promise<{ proc
       })
 
       if (payout.status === 'completed') {
-        // Post the settlement debit (balanced double-entry).
-        await postSettlementDebit(settlement)
-
-        await db.settlement.update({
-          where: { id: settlement.id },
-          data: {
-            status: 'completed',
-            providerPayoutId: payout.provider_payout_id,
-          },
-        })
-        await db.reward.update({ where: { id: settlement.rewardId }, data: { status: 'settled' } })
-
-        // ATOMIC (task 1): audit + outbox in the same transaction.
+        // Issue 4: atomic settlement completion — status update + reward update
+        // + settlement debit posting + outbox emit all in ONE transaction.
+        // If any part fails, the entire completion rolls back.
         await db.$transaction(async (tx) => {
+          // Post the settlement debit (balanced double-entry).
+          const payableAccount = await ensureOperatorAccount(settlement.tenantId, settlement.operatorId, settlement.currency, 'liability')
+          const cashAccount = await ensurePlatformAccount(settlement.tenantId, settlement.currency, 'asset')
+          const debitKey = `${settlement.idempotencyKey}:settlement_debit`
+
+          // Idempotency check for the posting.
+          const existingPosting = await tx.ledgerPosting.findUnique({
+            where: { tenantId_idempotencyKey: { tenantId: settlement.tenantId, idempotencyKey: debitKey } },
+          })
+          if (!existingPosting) {
+            const post = await tx.ledgerPosting.create({
+              data: {
+                tenantId: settlement.tenantId,
+                postingType: 'settlement',
+                referenceType: 'settlement',
+                referenceId: settlement.id,
+                idempotencyKey: debitKey,
+              },
+            })
+            await tx.ledgerEntry.create({
+              data: {
+                tenantId: settlement.tenantId, postingId: post.id, accountId: payableAccount.id,
+                amount: new Prisma.Decimal(settlement.amount).negated(),
+                currency: settlement.currency, entryType: 'settlement_debit',
+              },
+            })
+            await tx.ledgerEntry.create({
+              data: {
+                tenantId: settlement.tenantId, postingId: post.id, accountId: cashAccount.id,
+                amount: new Prisma.Decimal(settlement.amount),
+                currency: settlement.currency, entryType: 'settlement_credit',
+              },
+            })
+          }
+
+          // Update settlement status.
+          await tx.settlement.update({
+            where: { id: settlement.id },
+            data: { status: 'completed', providerPayoutId: payout.provider_payout_id },
+          })
+
+          // Update reward status.
+          await tx.reward.update({ where: { id: settlement.rewardId }, data: { status: 'settled' } })
+
+          // Emit outbox in the same transaction.
           await emit(
             {
               event_type: DomainEventTypes.SettlementCompleted,
@@ -308,46 +375,6 @@ export async function processSettlementOutbox(tenantId?: string): Promise<{ proc
   }
 
   return { processed: settlements.length, completed, failed }
-}
-
-/**
- * Post the settlement debit as a balanced double-entry posting (task 7).
- *   operator_payable (liability): -amount  (debit: reduces what we owe)
- *   cash (asset):                 +amount  (credit: reduces our cash)
- *   Sum = 0 ✓
- */
-async function postSettlementDebit(settlement: {
-  tenantId: string
-  operatorId: string
-  amount: Prisma.Decimal
-  currency: string
-  rewardId: string
-  id: string
-  idempotencyKey: string | null
-}) {
-  const payableAccount = await ensureOperatorAccount(settlement.tenantId, settlement.operatorId, settlement.currency, 'liability')
-  const cashAccount = await ensurePlatformAccount(settlement.tenantId, settlement.currency, 'asset')
-
-  const idemKey = `${settlement.idempotencyKey}:settlement_debit`
-  await postBalancedPosting({
-    tenantId: settlement.tenantId,
-    idempotencyKey: idemKey,
-    postingType: 'settlement',
-    referenceType: 'settlement',
-    referenceId: settlement.id,
-    entries: [
-      {
-        accountId: payableAccount.id,
-        amount: new Prisma.Decimal(settlement.amount).negated(), // debit: reduces liability
-        entryType: 'settlement_debit',
-      },
-      {
-        accountId: cashAccount.id,
-        amount: new Prisma.Decimal(settlement.amount), // credit: reduces cash
-        entryType: 'settlement_credit',
-      },
-    ],
-  })
 }
 
 export { ensureOperatorAccount, computeBalance }

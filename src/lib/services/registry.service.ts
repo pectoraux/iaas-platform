@@ -148,7 +148,7 @@ export async function assignAssetToNetwork(
   if (!network) throw new NotFoundError('network', networkId)
 
   const existing = await db.assetNetworkAssignment.findUnique({
-    where: { assetId_networkId: { assetId, networkId } },
+    where: { assetId_networkId_capabilityType: { assetId, networkId, capabilityType } },
   })
   if (existing) {
     if (existing.status === 'active') {
@@ -178,22 +178,50 @@ export async function assignAssetToNetwork(
 
 /**
  * Resolve the active network assignment for an asset. Used by ingestion to
- * determine which network's policy applies to an event.
+ * determine which network's policy + capability schema applies to an event.
+ *
+ * Issue 3: an asset can have multiple capabilities per network. The caller
+ * MUST specify a capabilityType when there's ambiguity. If the asset has
+ * exactly one assignment, it's used automatically.
  */
-export async function resolveAssetNetworkAssignment(tenantId: string, assetId: string, networkId?: string) {
-  if (networkId) {
-    // If a specific network is requested, validate the assignment exists + is active.
+export async function resolveAssetNetworkAssignment(
+  tenantId: string,
+  assetId: string,
+  networkId?: string,
+  capabilityType?: string,
+) {
+  if (networkId && capabilityType) {
+    // Specific network + capability.
     const assignment = await db.assetNetworkAssignment.findFirst({
-      where: { tenantId, assetId, networkId, status: 'active' },
+      where: { tenantId, assetId, networkId, capabilityType, status: 'active' },
       include: { network: true },
     })
     if (!assignment) {
-      throw new ValidationError(`Asset ${assetId} is not assigned to network ${networkId}`)
+      throw new ValidationError(`Asset ${assetId} is not assigned to network ${networkId} with capability ${capabilityType}`)
     }
     return assignment
   }
 
-  // No specific network — find the asset's active assignment (error if multiple ambiguous).
+  if (networkId) {
+    // Specific network — find all active assignments for this asset+network.
+    const assignments = await db.assetNetworkAssignment.findMany({
+      where: { tenantId, assetId, networkId, status: 'active' },
+      include: { network: true },
+    })
+    if (assignments.length === 0) {
+      throw new ValidationError(`Asset ${assetId} is not assigned to network ${networkId}`)
+    }
+    if (assignments.length === 1) {
+      return assignments[0]
+    }
+    // Multiple capabilities — caller must specify which one.
+    const caps = assignments.map((a) => a.capabilityType).join(', ')
+    throw new ValidationError(
+      `Asset ${assetId} has multiple capabilities in network ${networkId}: ${caps}. Specify capability_type in the ingest request.`,
+    )
+  }
+
+  // No specific network — find all active assignments.
   const assignments = await db.assetNetworkAssignment.findMany({
     where: { tenantId, assetId, status: 'active' },
     include: { network: true },
@@ -201,12 +229,14 @@ export async function resolveAssetNetworkAssignment(tenantId: string, assetId: s
   if (assignments.length === 0) {
     throw new ValidationError(`Asset ${assetId} has no active network assignment. Assign it to a network first.`)
   }
-  if (assignments.length > 1) {
-    throw new ValidationError(
-      `Asset ${assetId} has multiple active network assignments. Specify network_version_id in the ingest request.`,
-    )
+  if (assignments.length === 1) {
+    return assignments[0]
   }
-  return assignments[0]
+  // Multiple assignments across networks — caller must specify network_version_id.
+  const networks = assignments.map((a) => `${a.network.slug}/${a.capabilityType}`).join(', ')
+  throw new ValidationError(
+    `Asset ${assetId} has multiple active assignments: ${networks}. Specify network_version_id and/or capability_type in the ingest request.`,
+  )
 }
 
 // ---------------------------------------------------------------------------
