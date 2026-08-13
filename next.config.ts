@@ -1,8 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: "standalone",
-  /* config options here */
+  // Vercel doesn't need standalone output. Keep it off for Vercel deploys.
+  // For Docker/space-z.ai, standalone can be re-enabled.
+  output: undefined,
   typescript: {
     ignoreBuildErrors: true,
   },

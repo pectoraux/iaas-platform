@@ -37,6 +37,16 @@ import {
   PackageCheck,
   Banknote,
   ListChecks,
+  LogIn,
+  LogOut,
+  UserPlus,
+  Mail,
+  ChevronDown,
+  Zap,
+  Eye,
+  Wrench,
+  Sparkles,
+  Users,
 } from "lucide-react"
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -68,9 +78,20 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 
 import { apiFetch, ApiError } from "@/lib/api-client"
 import { cn } from "@/lib/utils"
@@ -167,6 +188,49 @@ interface HealthStatus {
 type Entity = Record<string, unknown>
 
 // ===========================================================================
+// Auth types — mirror backend SessionUser + admin responses.
+// ===========================================================================
+
+type UserRole = "admin" | "owner" | "operator" | "viewer"
+
+interface SessionUser {
+  userId: string
+  email: string
+  role: UserRole
+  tenantId: string | null
+  isDemo: boolean
+  displayName: string
+}
+
+interface WaitlistEntry {
+  id: string
+  email: string
+  requestedRole: string
+  reason: string | null
+  status: string
+  createdAt: string
+  reviewedAt: string | null
+}
+
+interface PlatformUser {
+  id: string
+  email: string
+  role: string
+  tenantId: string | null
+  status: string
+  isDemo: boolean
+  displayName: string | null
+  createdAt: string
+}
+
+type AuthState = "loading" | "authenticated" | "unauthenticated"
+
+interface ApproveResult {
+  user: { id: string; email: string }
+  temporaryPassword: string
+}
+
+// ===========================================================================
 // Constants
 // ===========================================================================
 
@@ -192,6 +256,36 @@ const PIPELINE_STEPS = [
   { key: "ledger_entries", label: "Ledger", icon: BookOpen },
   { key: "settlements", label: "Settlement", icon: CircleCheck },
 ] as const
+
+const DEMO_ACCOUNTS: {
+  label: string
+  email: string
+  password: string
+  role: UserRole
+  icon: React.ComponentType<{ className?: string }>
+}[] = [
+  { label: "Demo Admin", email: "demo-admin@iaas.network", password: "DemoAdmin123!", role: "admin", icon: ShieldCheck },
+  { label: "Demo Owner", email: "demo-owner@iaas.network", password: "DemoOwner123!", role: "owner", icon: Building2 },
+  { label: "Demo Operator", email: "demo-operator@iaas.network", password: "DemoOperator123!", role: "operator", icon: Wrench },
+  { label: "Demo Viewer", email: "demo-viewer@iaas.network", password: "DemoViewer123!", role: "viewer", icon: Eye },
+]
+
+const ROLE_TONE: Record<string, Tone> = {
+  admin: "emerald",
+  owner: "teal",
+  operator: "sky",
+  viewer: "muted",
+}
+
+const LOGIN_FEATURES: {
+  icon: React.ComponentType<{ className?: string }>
+  label: string
+}[] = [
+  { icon: Zap, label: "Event → Settlement pipeline" },
+  { icon: Building2, label: "Multi-tenant isolation" },
+  { icon: ShieldCheck, label: "Verifiable infrastructure proof" },
+  { icon: Sparkles, label: "Configurable reward engine" },
+]
 
 // ===========================================================================
 // Helpers
@@ -516,6 +610,7 @@ function PipelineTab({
   onTemplateChange,
   onPayloadChange,
   onRunE2E,
+  canRunE2E = true,
 }: {
   stats: Stats | null
   templateKey: string
@@ -525,6 +620,7 @@ function PipelineTab({
   onTemplateChange: (key: string) => void
   onPayloadChange: (v: string) => void
   onRunE2E: () => void
+  canRunE2E?: boolean
 }) {
   return (
     <div className="space-y-6">
@@ -589,73 +685,84 @@ function PipelineTab({
         </CardContent>
       </Card>
 
-      {/* Run E2E flow */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Play className="size-4 text-emerald-600" />
-            Run End-to-End Flow
-          </CardTitle>
-          <CardDescription>
-            Provisions a fresh tenant and runs the full telemetry → settlement vertical slice.
-            Takes 1–2 seconds.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-[200px_1fr]">
-            <div className="space-y-1.5">
-              <label htmlFor="tpl-select" className="text-xs font-medium text-muted-foreground">
-                Template
-              </label>
-              <Select value={templateKey} onValueChange={onTemplateChange}>
-                <SelectTrigger id="tpl-select" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="generic-resource-network">Generic Resource Network</SelectItem>
-                  <SelectItem value="energy-vpp">Energy Virtual Power Plant</SelectItem>
-                </SelectContent>
-              </Select>
+      {/* Run E2E flow — admin only */}
+      {canRunE2E ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Play className="size-4 text-emerald-600" />
+              Run End-to-End Flow
+            </CardTitle>
+            <CardDescription>
+              Provisions a fresh tenant and runs the full telemetry → settlement vertical slice.
+              Takes 1–2 seconds.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-[200px_1fr]">
+              <div className="space-y-1.5">
+                <label htmlFor="tpl-select" className="text-xs font-medium text-muted-foreground">
+                  Template
+                </label>
+                <Select value={templateKey} onValueChange={onTemplateChange}>
+                  <SelectTrigger id="tpl-select" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="generic-resource-network">Generic Resource Network</SelectItem>
+                    <SelectItem value="energy-vpp">Energy Virtual Power Plant</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <label htmlFor="payload-input" className="text-xs font-medium text-muted-foreground">
+                  Payload (JSON)
+                </label>
+                <Textarea
+                  id="payload-input"
+                  value={payload}
+                  onChange={(e) => onPayloadChange(e.target.value)}
+                  className="min-h-[72px] font-mono text-xs"
+                  spellCheck={false}
+                />
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <label htmlFor="payload-input" className="text-xs font-medium text-muted-foreground">
-                Payload (JSON)
-              </label>
-              <Textarea
-                id="payload-input"
-                value={payload}
-                onChange={(e) => onPayloadChange(e.target.value)}
-                className="min-h-[72px] font-mono text-xs"
-                spellCheck={false}
-              />
+            <div className="flex items-center gap-3">
+              <Button
+                onClick={onRunE2E}
+                disabled={running}
+                className="bg-emerald-600 text-white shadow-xs hover:bg-emerald-600/90"
+              >
+                {running ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" />
+                    Running…
+                  </>
+                ) : (
+                  <>
+                    <Play className="size-4" />
+                    Run Full Flow
+                  </>
+                )}
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                Creates a new tenant · idempotent on event_id
+              </span>
             </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <Button
-              onClick={onRunE2E}
-              disabled={running}
-              className="bg-emerald-600 text-white shadow-xs hover:bg-emerald-600/90"
-            >
-              {running ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" />
-                  Running…
-                </>
-              ) : (
-                <>
-                  <Play className="size-4" />
-                  Run Full Flow
-                </>
-              )}
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              Creates a new tenant · idempotent on event_id
-            </span>
-          </div>
 
-          {result && <E2EResultTimeline result={result} />}
-        </CardContent>
-      </Card>
+            {result && <E2EResultTimeline result={result} />}
+          </CardContent>
+        </Card>
+      ) : (
+        <Card className="border-dashed">
+          <CardContent className="flex items-center gap-3 py-6 text-sm text-muted-foreground">
+            <Lock className="size-4 text-amber-600" />
+            <span>
+              Running the end-to-end flow is an <span className="font-medium text-foreground">admin</span> action. Ask a platform admin to provision sample data.
+            </span>
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }
@@ -1729,10 +1836,854 @@ function TemplatesTab({ refreshKey }: { refreshKey: number }) {
 }
 
 // ===========================================================================
+// Auth: Login / Waitlist screen
+// ===========================================================================
+
+function LoginScreen({ onAuthed }: { onAuthed: (u: SessionUser) => void }) {
+  const [tab, setTab] = useState<"signin" | "waitlist">("signin")
+
+  // Sign-in state
+  const [signinEmail, setSigninEmail] = useState("")
+  const [signinPassword, setSigninPassword] = useState("")
+  const [signinError, setSigninError] = useState<string | null>(null)
+  const [signinLoading, setSigninLoading] = useState(false)
+
+  // Waitlist state
+  const [wlEmail, setWlEmail] = useState("")
+  const [wlRole, setWlRole] = useState<"owner" | "operator" | "viewer">("owner")
+  const [wlReason, setWlReason] = useState("")
+  const [wlLoading, setWlLoading] = useState(false)
+  const [wlSuccess, setWlSuccess] = useState<string | null>(null)
+  const [wlError, setWlError] = useState<string | null>(null)
+
+  // Per-button demo loading state (keyed by label).
+  const [demoLoading, setDemoLoading] = useState<string | null>(null)
+
+  const doLogin = useCallback(
+    async (email: string, password: string): Promise<SessionUser | null> => {
+      const res = await apiFetch<{ user: SessionUser }>("/api/auth/login", {
+        method: "POST",
+        body: { email, password },
+      })
+      return res.user
+    },
+    [],
+  )
+
+  const handleSignIn = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault()
+      setSigninLoading(true)
+      setSigninError(null)
+      try {
+        const u = await doLogin(signinEmail.trim(), signinPassword)
+        if (u) onAuthed(u)
+      } catch (err) {
+        const msg =
+          err instanceof ApiError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : "Login failed"
+        setSigninError(msg)
+      } finally {
+        setSigninLoading(false)
+      }
+    },
+    [doLogin, onAuthed, signinEmail, signinPassword],
+  )
+
+  const handleDemo = useCallback(
+    async (demo: (typeof DEMO_ACCOUNTS)[number]) => {
+      setDemoLoading(demo.label)
+      try {
+        const u = await doLogin(demo.email, demo.password)
+        if (u) onAuthed(u)
+      } catch (err) {
+        const msg =
+          err instanceof ApiError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : "Login failed"
+        toast.error("Demo login failed", { description: msg })
+      } finally {
+        setDemoLoading(null)
+      }
+    },
+    [doLogin, onAuthed],
+  )
+
+  const handleWaitlist = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault()
+      setWlLoading(true)
+      setWlError(null)
+      setWlSuccess(null)
+      try {
+        await apiFetch("/api/auth/signup", {
+          method: "POST",
+          body: {
+            email: wlEmail.trim(),
+            requestedRole: wlRole,
+            reason: wlReason.trim() || undefined,
+          },
+        })
+        setWlSuccess("You're on the waitlist! We'll notify you when your account is approved.")
+        setWlEmail("")
+        setWlReason("")
+        toast.success("Joined the waitlist", { description: wlEmail.trim() })
+      } catch (err) {
+        const msg =
+          err instanceof ApiError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : "Signup failed"
+        setWlError(msg)
+      } finally {
+        setWlLoading(false)
+      }
+    },
+    [wlEmail, wlReason, wlRole],
+  )
+
+  return (
+    <div className="flex min-h-screen flex-col bg-background">
+      <div className="grid flex-1 lg:grid-cols-2">
+        {/* Left: branding panel */}
+        <div className="relative hidden flex-col justify-between overflow-hidden bg-gradient-to-br from-emerald-600 via-teal-600 to-emerald-700 p-10 text-white lg:flex">
+          <div className="absolute inset-0 opacity-20" aria-hidden>
+            <div className="absolute -top-12 -right-12 size-72 rounded-full bg-white/30 blur-3xl" />
+            <div className="absolute bottom-0 -left-12 size-72 rounded-full bg-teal-300/30 blur-3xl" />
+          </div>
+
+          <div className="relative z-10 flex items-center gap-3">
+            <div className="flex size-10 items-center justify-center rounded-lg bg-white/15 backdrop-blur">
+              <Network className="size-6" />
+            </div>
+            <span className="text-sm font-semibold tracking-wide">Infrastructure-as-a-Network</span>
+          </div>
+
+          <div className="relative z-10 space-y-6">
+            <h2 className="text-3xl font-semibold leading-tight tracking-tight xl:text-4xl">
+              Deploy decentralized physical infrastructure networks as easily as deploying on AWS.
+            </h2>
+            <ul className="space-y-3">
+              {LOGIN_FEATURES.map((f) => {
+                const Icon = f.icon
+                return (
+                  <li key={f.label} className="flex items-center gap-3 text-sm text-emerald-50">
+                    <span className="flex size-7 items-center justify-center rounded-md bg-white/15 backdrop-blur">
+                      <Icon className="size-4" />
+                    </span>
+                    <span>{f.label}</span>
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
+
+          <div className="relative z-10 text-xs text-emerald-100/80">
+            Event → Verification → Attestation → Contribution → Reward → Ledger → Settlement
+          </div>
+        </div>
+
+        {/* Right: forms */}
+        <div className="flex items-center justify-center p-6 sm:p-10">
+          <div className="w-full max-w-md space-y-6">
+            <div className="space-y-1 text-center lg:hidden">
+              <div className="mx-auto mb-2 flex size-10 items-center justify-center rounded-lg bg-emerald-600 text-white shadow-sm">
+                <Network className="size-5" />
+              </div>
+              <h1 className="text-lg font-semibold tracking-tight">Infrastructure-as-a-Network</h1>
+              <p className="text-xs text-muted-foreground">Operator Console</p>
+            </div>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Welcome</CardTitle>
+                <CardDescription>Sign in to your account or join the waitlist.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Tabs value={tab} onValueChange={(v) => setTab(v as "signin" | "waitlist")}>
+                  <TabsList className="grid w-full grid-cols-2">
+                    <TabsTrigger value="signin" className="gap-1.5">
+                      <LogIn className="size-3.5" />
+                      Sign In
+                    </TabsTrigger>
+                    <TabsTrigger value="waitlist" className="gap-1.5">
+                      <UserPlus className="size-3.5" />
+                      Join Waitlist
+                    </TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent value="signin" className="mt-4">
+                    <form onSubmit={handleSignIn} className="space-y-3">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="signin-email">Email</Label>
+                        <Input
+                          id="signin-email"
+                          type="email"
+                          autoComplete="email"
+                          required
+                          value={signinEmail}
+                          onChange={(e) => setSigninEmail(e.target.value)}
+                          placeholder="you@example.com"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="signin-password">Password</Label>
+                        <Input
+                          id="signin-password"
+                          type="password"
+                          autoComplete="current-password"
+                          required
+                          value={signinPassword}
+                          onChange={(e) => setSigninPassword(e.target.value)}
+                          placeholder="••••••••"
+                        />
+                      </div>
+                      {signinError && (
+                        <p className="flex items-center gap-1.5 text-xs text-rose-600">
+                          <AlertTriangle className="size-3.5" />
+                          {signinError}
+                        </p>
+                      )}
+                      <Button
+                        type="submit"
+                        disabled={signinLoading}
+                        className="w-full bg-emerald-600 text-white shadow-xs hover:bg-emerald-600/90"
+                      >
+                        {signinLoading ? (
+                          <>
+                            <Loader2 className="size-4 animate-spin" />
+                            Signing in…
+                          </>
+                        ) : (
+                          <>
+                            <LogIn className="size-4" />
+                            Sign In
+                          </>
+                        )}
+                      </Button>
+                    </form>
+                  </TabsContent>
+
+                  <TabsContent value="waitlist" className="mt-4">
+                    <form onSubmit={handleWaitlist} className="space-y-3">
+                      {wlSuccess && (
+                        <Alert className="border-emerald-200 bg-emerald-50">
+                          <CircleCheck className="text-emerald-600" />
+                          <AlertTitle className="text-emerald-800">You're on the waitlist</AlertTitle>
+                          <AlertDescription className="text-emerald-700">
+                            {wlSuccess}
+                          </AlertDescription>
+                        </Alert>
+                      )}
+                      <div className="space-y-1.5">
+                        <Label htmlFor="wl-email">Email</Label>
+                        <Input
+                          id="wl-email"
+                          type="email"
+                          autoComplete="email"
+                          required
+                          value={wlEmail}
+                          onChange={(e) => setWlEmail(e.target.value)}
+                          placeholder="you@example.com"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="wl-role">Requested role</Label>
+                        <Select value={wlRole} onValueChange={(v) => setWlRole(v as "owner" | "operator" | "viewer")}>
+                          <SelectTrigger id="wl-role" className="w-full">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="owner">Owner</SelectItem>
+                            <SelectItem value="operator">Operator</SelectItem>
+                            <SelectItem value="viewer">Viewer</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="wl-reason">Reason (optional)</Label>
+                        <Textarea
+                          id="wl-reason"
+                          value={wlReason}
+                          onChange={(e) => setWlReason(e.target.value)}
+                          placeholder="Tell us about your use case…"
+                          className="min-h-[72px]"
+                        />
+                      </div>
+                      {wlError && (
+                        <p className="flex items-center gap-1.5 text-xs text-rose-600">
+                          <AlertTriangle className="size-3.5" />
+                          {wlError}
+                        </p>
+                      )}
+                      <Button
+                        type="submit"
+                        disabled={wlLoading}
+                        className="w-full bg-emerald-600 text-white shadow-xs hover:bg-emerald-600/90"
+                      >
+                        {wlLoading ? (
+                          <>
+                            <Loader2 className="size-4 animate-spin" />
+                            Submitting…
+                          </>
+                        ) : (
+                          <>
+                            <UserPlus className="size-4" />
+                            Join Waitlist
+                          </>
+                        )}
+                      </Button>
+                    </form>
+                  </TabsContent>
+                </Tabs>
+
+                <div className="mt-6 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Separator className="flex-1" />
+                    <span className="text-xs text-muted-foreground">Quick Demo Access</span>
+                    <Separator className="flex-1" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {DEMO_ACCOUNTS.map((d) => {
+                      const Icon = d.icon
+                      const isLoading = demoLoading === d.label
+                      const isDisabled = demoLoading !== null && !isLoading
+                      return (
+                        <Button
+                          key={d.label}
+                          type="button"
+                          variant={d.role === "admin" ? "default" : "outline"}
+                          onClick={() => handleDemo(d)}
+                          disabled={isDisabled}
+                          className={
+                            d.role === "admin"
+                              ? "bg-emerald-600 text-white shadow-xs hover:bg-emerald-600/90"
+                              : ""
+                          }
+                        >
+                          {isLoading ? (
+                            <Loader2 className="size-3.5 animate-spin" />
+                          ) : (
+                            <Icon className="size-3.5" />
+                          )}
+                          {d.label}
+                        </Button>
+                      )
+                    })}
+                  </div>
+                  <p className="text-center text-[11px] text-muted-foreground">
+                    Demo accounts are pre-seeded with sample data.
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+      </div>
+
+      <footer className="mt-auto border-t bg-muted/30">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-2 px-4 py-3 text-xs text-muted-foreground sm:px-6">
+          <p>Infrastructure-as-a-Network Platform — MVP</p>
+          <p className="font-mono text-[11px]">Secure · Multi-tenant · Auditable</p>
+        </div>
+      </footer>
+    </div>
+  )
+}
+
+// ===========================================================================
+// Auth: Header user menu (dropdown)
+// ===========================================================================
+
+function UserMenu({ user, onLogout }: { user: SessionUser; onLogout: () => void }) {
+  const roleTone = ROLE_TONE[user.role] ?? "muted"
+  const initials = (user.displayName || user.email).slice(0, 2).toUpperCase()
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex h-9 max-w-[220px] items-center gap-2 rounded-md border bg-background px-2.5 text-xs font-medium transition-colors hover:bg-accent"
+          aria-label="Account menu"
+        >
+          <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-[10px] font-semibold text-emerald-700">
+            {initials}
+          </span>
+          <span className="hidden truncate sm:inline">{user.displayName}</span>
+          <Badge variant="outline" className={cn("capitalize", TONE_CLASSES[roleTone])}>
+            {user.role}
+          </Badge>
+          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64">
+        <DropdownMenuLabel className="flex flex-col gap-1">
+          <span className="text-sm font-medium">{user.displayName}</span>
+          <span className="flex items-center gap-1.5 text-xs font-normal text-muted-foreground">
+            <Mail className="size-3" />
+            <span className="truncate">{user.email}</span>
+          </span>
+          {user.tenantId && (
+            <span className="flex items-center gap-1.5 text-[11px] font-normal text-muted-foreground">
+              <Building2 className="size-3" />
+              <span className="truncate font-mono">{truncateId(user.tenantId)}</span>
+            </span>
+          )}
+        </DropdownMenuLabel>
+        {user.isDemo && (
+          <>
+            <DropdownMenuSeparator />
+            <div className="mx-1 rounded-md bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
+              Demo account — sample data
+            </div>
+          </>
+        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={onLogout}
+          className="text-rose-600 focus:text-rose-700"
+        >
+          <LogOut className="size-3.5" />
+          Sign Out
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+// ===========================================================================
+// Auth: Admin tab — waitlist + users management
+// ===========================================================================
+
+function ApproveWaitlistDialog({
+  entry,
+  onClose,
+  onApproved,
+}: {
+  entry: WaitlistEntry | null
+  onClose: () => void
+  onApproved: () => void
+}) {
+  const [role, setRole] = useState<string>("owner")
+  const [tenantName, setTenantName] = useState("")
+  const [displayName, setDisplayName] = useState("")
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<ApproveResult | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    if (entry) {
+      setRole(entry.requestedRole || "owner")
+      setTenantName("")
+      setDisplayName(entry.email.split("@")[0] || "")
+      setResult(null)
+      setCopied(false)
+    }
+  }, [entry])
+
+  const submit = useCallback(async () => {
+    if (!entry) return
+    setLoading(true)
+    try {
+      const res = await apiFetch<ApproveResult>("/api/admin/waitlist", {
+        method: "POST",
+        body: {
+          waitlistId: entry.id,
+          role,
+          tenantName: tenantName.trim() || undefined,
+          displayName: displayName.trim() || undefined,
+        },
+      })
+      setResult(res)
+      toast.success("Account created", { description: res.user.email })
+    } catch (err) {
+      const msg =
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Approve failed"
+      toast.error("Failed to approve", { description: msg })
+    } finally {
+      setLoading(false)
+    }
+  }, [entry, role, tenantName, displayName])
+
+  const copyPassword = useCallback(async () => {
+    if (!result) return
+    try {
+      await navigator.clipboard.writeText(result.temporaryPassword)
+      setCopied(true)
+      toast.success("Password copied to clipboard")
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      toast.error("Could not copy password")
+    }
+  }, [result])
+
+  return (
+    <Dialog open={!!entry} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <ShieldCheck className="size-4 text-emerald-600" />
+            Approve Waitlist Entry
+          </DialogTitle>
+          <DialogDescription>
+            Create a new user account from this waitlist request. A temporary password will be generated.
+          </DialogDescription>
+        </DialogHeader>
+
+        {entry && !result && (
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="ap-email">Email</Label>
+              <Input id="ap-email" value={entry.email} disabled />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="ap-role">Role</Label>
+              <Select value={role} onValueChange={setRole}>
+                <SelectTrigger id="ap-role" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="admin">admin</SelectItem>
+                  <SelectItem value="owner">owner</SelectItem>
+                  <SelectItem value="operator">operator</SelectItem>
+                  <SelectItem value="viewer">viewer</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {role !== "admin" && (
+              <div className="space-y-1.5">
+                <Label htmlFor="ap-tenant">Tenant name (optional)</Label>
+                <Input
+                  id="ap-tenant"
+                  value={tenantName}
+                  onChange={(e) => setTenantName(e.target.value)}
+                  placeholder="Auto-generated if empty"
+                />
+              </div>
+            )}
+            <div className="space-y-1.5">
+              <Label htmlFor="ap-name">Display name</Label>
+              <Input
+                id="ap-name"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+              />
+            </div>
+          </div>
+        )}
+
+        {result && (
+          <div className="space-y-3">
+            <Alert className="border-emerald-200 bg-emerald-50">
+              <CircleCheck className="text-emerald-600" />
+              <AlertTitle className="text-emerald-800">Account created</AlertTitle>
+              <AlertDescription className="text-emerald-700">
+                <span className="font-medium">{result.user.email}</span> can now sign in with the temporary password below. Communicate this securely.
+              </AlertDescription>
+            </Alert>
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+              <p className="flex items-center gap-1.5 text-[11px] font-medium text-amber-800">
+                <Lock className="size-3" />
+                Temporary password — shown once
+              </p>
+              <div className="mt-2 flex items-center gap-2">
+                <code className="flex-1 break-all rounded bg-white px-2 py-1.5 font-mono text-xs text-amber-900">
+                  {result.temporaryPassword}
+                </code>
+                <Button size="sm" variant="outline" onClick={copyPassword}>
+                  {copied ? <Check className="size-3.5 text-emerald-600" /> : <Copy className="size-3.5" />}
+                  Copy
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <DialogFooter>
+          {result ? (
+            <Button
+              onClick={onApproved}
+              className="bg-emerald-600 text-white shadow-xs hover:bg-emerald-600/90"
+            >
+              Done
+            </Button>
+          ) : (
+            <>
+              <Button variant="outline" onClick={onClose} disabled={loading}>
+                Cancel
+              </Button>
+              <Button
+                onClick={submit}
+                disabled={loading}
+                className="bg-emerald-600 text-white shadow-xs hover:bg-emerald-600/90"
+              >
+                {loading ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <ShieldCheck className="size-4" />
+                )}
+                Approve & Create Account
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function AdminTab({ refreshKey }: { refreshKey: number }) {
+  const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "approved" | "rejected">("pending")
+  const [approveTarget, setApproveTarget] = useState<WaitlistEntry | null>(null)
+  const [localRefresh, setLocalRefresh] = useState(0)
+  const [rejecting, setRejecting] = useState<string | null>(null)
+  const compositeRefresh = refreshKey + localRefresh
+
+  const waitlistPath =
+    statusFilter === "all" ? "/api/admin/waitlist" : `/api/admin/waitlist?status=${statusFilter}`
+  const { data: waitlist, loading: wlLoading, error: wlError } = useApi<WaitlistEntry[]>(
+    waitlistPath,
+    undefined,
+    compositeRefresh,
+  )
+  const { data: users, loading: usersLoading, error: usersError } = useApi<PlatformUser[]>(
+    "/api/admin/users",
+    undefined,
+    compositeRefresh,
+  )
+
+  const handleReject = useCallback(
+    async (entry: WaitlistEntry) => {
+      if (!window.confirm(`Reject waitlist request from ${entry.email}?`)) return
+      setRejecting(entry.id)
+      try {
+        await apiFetch(`/api/admin/waitlist/${entry.id}/reject`, { method: "POST" })
+        toast.success("Waitlist entry rejected", { description: entry.email })
+        setLocalRefresh((k) => k + 1)
+      } catch (err) {
+        const msg =
+          err instanceof ApiError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : "Reject failed"
+        toast.error("Failed to reject", { description: msg })
+      } finally {
+        setRejecting(null)
+      }
+    },
+    [],
+  )
+
+  const filters: ("all" | "pending" | "approved" | "rejected")[] = ["all", "pending", "approved", "rejected"]
+
+  return (
+    <div className="space-y-6">
+      {/* Waitlist section */}
+      <Card className="py-0">
+        <CardHeader className="border-b py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ShieldCheck className="size-4 text-emerald-600" />
+              Waitlist
+              {waitlist && waitlist.length > 0 && (
+                <Badge variant="secondary" className="ml-1 tabular-nums">{waitlist.length}</Badge>
+              )}
+            </CardTitle>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex gap-1 rounded-lg bg-muted p-1">
+                {filters.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => setStatusFilter(s)}
+                    className={cn(
+                      "rounded-md px-2.5 py-1 text-xs font-medium capitalize transition-colors",
+                      statusFilter === s
+                        ? "bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setLocalRefresh((k) => k + 1)}
+              >
+                <RefreshCw className="size-3.5" />
+                <span className="hidden sm:inline">Refresh</span>
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          {wlError ? (
+            <div className="p-4"><ErrorState message={wlError} /></div>
+          ) : wlLoading ? (
+            <div className="p-4"><TableSkeleton /></div>
+          ) : !waitlist || waitlist.length === 0 ? (
+            <div className="p-4"><EmptyState message="No waitlist entries in this view." /></div>
+          ) : (
+            <ScrollArea className="max-h-[28rem]">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Email</TableHead>
+                    <TableHead>Requested Role</TableHead>
+                    <TableHead>Reason</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Created</TableHead>
+                    <TableHead>Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {waitlist.map((e) => {
+                    const isRejecting = rejecting === e.id
+                    return (
+                      <TableRow key={e.id}>
+                        <Cell className="font-medium">{e.email}</Cell>
+                        <Cell>
+                          <Badge
+                            variant="outline"
+                            className={cn("capitalize", TONE_CLASSES[ROLE_TONE[e.requestedRole] ?? "muted"])}
+                          >
+                            {e.requestedRole}
+                          </Badge>
+                        </Cell>
+                        <Cell className="max-w-xs truncate text-muted-foreground">
+                          {e.reason || "—"}
+                        </Cell>
+                        <Cell><StatusBadge status={e.status} /></Cell>
+                        <Cell><RelativeTime date={e.createdAt} /></Cell>
+                        <Cell>
+                          {e.status === "pending" ? (
+                            <div className="flex gap-1.5">
+                              <Button
+                                size="sm"
+                                className="h-7 bg-emerald-600 text-white shadow-xs hover:bg-emerald-600/90"
+                                onClick={() => setApproveTarget(e)}
+                              >
+                                Approve
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 border-rose-200 text-rose-600 hover:bg-rose-50"
+                                disabled={isRejecting}
+                                onClick={() => handleReject(e)}
+                              >
+                                {isRejecting ? <Loader2 className="size-3.5 animate-spin" /> : "Reject"}
+                              </Button>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
+                        </Cell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+            </ScrollArea>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Users section */}
+      <Card className="py-0">
+        <CardHeader className="border-b py-4">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Users className="size-4 text-emerald-600" />
+            Users
+            {users && users.length > 0 && (
+              <Badge variant="secondary" className="ml-1 tabular-nums">{users.length}</Badge>
+            )}
+          </CardTitle>
+          <CardDescription>Read-only list of all platform accounts.</CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          {usersError ? (
+            <div className="p-4"><ErrorState message={usersError} /></div>
+          ) : usersLoading ? (
+            <div className="p-4"><TableSkeleton /></div>
+          ) : !users || users.length === 0 ? (
+            <div className="p-4"><EmptyState message="No users yet." /></div>
+          ) : (
+            <ScrollArea className="max-h-[28rem]">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Email</TableHead>
+                    <TableHead>Role</TableHead>
+                    <TableHead>Tenant</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Demo?</TableHead>
+                    <TableHead>Created</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {users.map((u) => (
+                    <TableRow key={u.id}>
+                      <Cell className="font-medium">{u.email}</Cell>
+                      <Cell>
+                        <Badge
+                          variant="outline"
+                          className={cn("capitalize", TONE_CLASSES[ROLE_TONE[u.role] ?? "muted"])}
+                        >
+                          {u.role}
+                        </Badge>
+                      </Cell>
+                      <Cell><CopyableId id={u.tenantId} label="tenant id" /></Cell>
+                      <Cell><StatusBadge status={u.status} /></Cell>
+                      <Cell>
+                        {u.isDemo ? (
+                          <Badge variant="outline" className={TONE_CLASSES.amber}>demo</Badge>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </Cell>
+                      <Cell><RelativeTime date={u.createdAt} /></Cell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </ScrollArea>
+          )}
+        </CardContent>
+      </Card>
+
+      <ApproveWaitlistDialog
+        entry={approveTarget}
+        onClose={() => setApproveTarget(null)}
+        onApproved={() => {
+          setApproveTarget(null)
+          setLocalRefresh((k) => k + 1)
+        }}
+      />
+    </div>
+  )
+}
+
+// ===========================================================================
 // Header
 // ===========================================================================
 
 function Header({
+  user,
+  onLogout,
   tenants,
   tenantsLoading,
   selectedTenantId,
@@ -1742,6 +2693,8 @@ function Header({
   onRunE2E,
   runningE2E,
 }: {
+  user: SessionUser
+  onLogout: () => void
   tenants: Tenant[]
   tenantsLoading: boolean
   selectedTenantId: string
@@ -1751,6 +2704,7 @@ function Header({
   onRunE2E: () => void
   runningE2E: boolean
 }) {
+  const isAdmin = user.role === "admin"
   return (
     <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
       <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-4 py-3 sm:px-6">
@@ -1767,28 +2721,30 @@ function Header({
         </div>
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          <Select value={selectedTenantId} onValueChange={onTenantChange}>
-            <SelectTrigger
-              className="h-9 w-[220px] gap-2"
-              aria-label="Select tenant"
-              disabled={tenantsLoading}
-            >
-              <Building2 className="size-3.5 text-muted-foreground" />
-              <SelectValue placeholder={tenantsLoading ? "Loading tenants…" : "Select tenant"} />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__default__">Default (first active)</SelectItem>
-              {tenants.length > 0 && <SelectSeparator />}
-              {tenants.map((t) => (
-                <SelectItem key={t.id} value={t.id}>
-                  <span className="flex items-center gap-2">
-                    <span className="truncate">{t.name}</span>
-                    <span className="font-mono text-[10px] text-muted-foreground">{t.slug}</span>
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {isAdmin && (
+            <Select value={selectedTenantId} onValueChange={onTenantChange}>
+              <SelectTrigger
+                className="h-9 w-[220px] gap-2"
+                aria-label="Select tenant"
+                disabled={tenantsLoading}
+              >
+                <Building2 className="size-3.5 text-muted-foreground" />
+                <SelectValue placeholder={tenantsLoading ? "Loading tenants…" : "Select tenant"} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__default__">Default (first active)</SelectItem>
+                {tenants.length > 0 && <SelectSeparator />}
+                {tenants.map((t) => (
+                  <SelectItem key={t.id} value={t.id}>
+                    <span className="flex items-center gap-2">
+                      <span className="truncate">{t.name}</span>
+                      <span className="font-mono text-[10px] text-muted-foreground">{t.slug}</span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
 
           <Button
             variant="outline"
@@ -1801,20 +2757,24 @@ function Header({
             <span className="hidden sm:inline">Refresh</span>
           </Button>
 
-          <Button
-            size="sm"
-            onClick={onRunE2E}
-            disabled={runningE2E}
-            className="bg-emerald-600 text-white shadow-xs hover:bg-emerald-600/90"
-          >
-            {runningE2E ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Play className="size-4" />
-            )}
-            <span className="hidden sm:inline">Run E2E Flow</span>
-            <span className="sm:hidden">E2E</span>
-          </Button>
+          {isAdmin && (
+            <Button
+              size="sm"
+              onClick={onRunE2E}
+              disabled={runningE2E}
+              className="bg-emerald-600 text-white shadow-xs hover:bg-emerald-600/90"
+            >
+              {runningE2E ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Play className="size-4" />
+              )}
+              <span className="hidden sm:inline">Run E2E Flow</span>
+              <span className="sm:hidden">E2E</span>
+            </Button>
+          )}
+
+          <UserMenu user={user} onLogout={onLogout} />
         </div>
       </div>
     </header>
@@ -1860,7 +2820,14 @@ function Footer({ health }: { health: HealthStatus | null }) {
 // Main page
 // ===========================================================================
 
-export default function Home() {
+function Dashboard({
+  user,
+  onLogout,
+}: {
+  user: SessionUser
+  onLogout: () => void
+}) {
+  const isAdmin = user.role === "admin"
   const [tenants, setTenants] = useState<Tenant[]>([])
   const [tenantsLoading, setTenantsLoading] = useState(true)
   const [selectedTenantId, setSelectedTenantId] = useState<string>("__default__")
@@ -1877,8 +2844,20 @@ export default function Home() {
   const [e2eRunning, setE2eRunning] = useState(false)
   const [e2eResult, setE2eResult] = useState<E2EResult | null>(null)
 
-  // Load tenants once per refresh.
+  // Safety: if role changes (e.g. after re-login) and activeTab is no longer
+  // permitted, fall back to pipeline.
   useEffect(() => {
+    if (!isAdmin && activeTab === "admin") setActiveTab("pipeline")
+  }, [isAdmin, activeTab])
+
+  // Load tenants once per refresh — admins only (non-admins are locked to their
+  // session tenant and don't see the selector).
+  useEffect(() => {
+    if (!isAdmin) {
+      setTenants([])
+      setTenantsLoading(false)
+      return
+    }
     let cancelled = false
     setTenantsLoading(true)
     apiFetch<Tenant[]>("/api/v1/tenants")
@@ -1894,7 +2873,7 @@ export default function Home() {
     return () => {
       cancelled = true
     }
-  }, [refreshKey])
+  }, [refreshKey, isAdmin])
 
   // Fetch stats (global; no tenant header). Poll every 15s.
   useEffect(() => {
@@ -2005,6 +2984,8 @@ export default function Home() {
       <Toaster position="top-right" richColors closeButton />
 
       <Header
+        user={user}
+        onLogout={onLogout}
         tenants={tenants}
         tenantsLoading={tenantsLoading}
         selectedTenantId={selectedTenantId}
@@ -2104,6 +3085,12 @@ export default function Home() {
               <LayoutTemplate className="size-3.5" />
               Templates
             </TabsTrigger>
+            {isAdmin && (
+              <TabsTrigger value="admin" className="gap-1.5">
+                <ShieldCheck className="size-3.5" />
+                Admin
+              </TabsTrigger>
+            )}
           </TabsList>
 
           <TabsContent value="pipeline">
@@ -2116,6 +3103,7 @@ export default function Home() {
               onTemplateChange={onTemplateChange}
               onPayloadChange={setPayload}
               onRunE2E={runE2E}
+              canRunE2E={isAdmin}
             />
           </TabsContent>
 
@@ -2134,10 +3122,94 @@ export default function Home() {
           <TabsContent value="templates">
             <TemplatesTab refreshKey={refreshKey} />
           </TabsContent>
+
+          {isAdmin && (
+            <TabsContent value="admin">
+              <AdminTab refreshKey={refreshKey} />
+            </TabsContent>
+          )}
         </Tabs>
       </main>
 
       <Footer health={health} />
     </div>
+  )
+}
+
+// ===========================================================================
+// Main page — auth shell
+// ===========================================================================
+
+export default function Home() {
+  const [authState, setAuthState] = useState<AuthState>("loading")
+  const [sessionUser, setSessionUser] = useState<SessionUser | null>(null)
+
+  // Check existing session on mount.
+  useEffect(() => {
+    let cancelled = false
+    apiFetch<{ authenticated: boolean; user?: SessionUser }>("/api/auth/me")
+      .then((r) => {
+        if (cancelled) return
+        if (r.authenticated && r.user) {
+          setSessionUser(r.user)
+          setAuthState("authenticated")
+        } else {
+          setAuthState("unauthenticated")
+        }
+      })
+      .catch(() => {
+        if (cancelled) return
+        setAuthState("unauthenticated")
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const handleAuthed = useCallback((u: SessionUser) => {
+    setSessionUser(u)
+    setAuthState("authenticated")
+    toast.success(`Signed in as ${u.displayName}`)
+  }, [])
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await apiFetch("/api/auth/logout", { method: "POST" })
+    } catch {
+      // ignore — clear local state regardless
+    }
+    setSessionUser(null)
+    setAuthState("unauthenticated")
+    toast.success("Signed out")
+  }, [])
+
+  if (authState === "loading") {
+    return (
+      <div className="flex min-h-screen flex-col bg-background">
+        <Toaster position="top-right" richColors closeButton />
+        <div className="flex flex-1 items-center justify-center">
+          <div className="flex flex-col items-center gap-3 text-muted-foreground">
+            <Loader2 className="size-8 animate-spin text-emerald-600" />
+            <p className="text-xs">Loading session…</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (authState === "unauthenticated" || !sessionUser) {
+    return (
+      <>
+        <Toaster position="top-right" richColors closeButton />
+        <LoginScreen onAuthed={handleAuthed} />
+      </>
+    )
+  }
+
+  return (
+    <>
+      <Toaster position="top-right" richColors closeButton />
+      <Dashboard user={sessionUser} onLogout={handleLogout} />
+    </>
   )
 }

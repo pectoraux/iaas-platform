@@ -46,7 +46,7 @@ function json(body: unknown, status = 200, req?: NextRequest) {
  */
 export function apiRoute<TParams = Record<string, never>>(
   handler: Handler<TParams>,
-  opts: { requireTenant?: boolean } = { requireTenant: true },
+  opts: { requireTenant?: boolean; requireAuth?: boolean } = { requireTenant: true, requireAuth: true },
 ) {
   return async (
     req: NextRequest,
@@ -54,12 +54,19 @@ export function apiRoute<TParams = Record<string, never>>(
   ): Promise<NextResponse> => {
     const rid = correlationId(req)
     try {
-      const tenantCtx = opts.requireTenant === false
-        ? { tenantId: '' }
-        : await resolveTenantContext(req.headers)
+      let tenantCtx: TenantContext | { tenantId: string; user: null; isAdmin: false }
+      if (opts.requireTenant === false && opts.requireAuth === false) {
+        // Fully public endpoint (e.g. health check).
+        tenantCtx = { tenantId: '', user: null, isAdmin: false }
+      } else if (opts.requireTenant === false) {
+        // Authenticated but no tenant required (e.g. tenant creation, E2E flow).
+        tenantCtx = await resolveTenantContext(req).catch(() => ({ tenantId: '', user: null, isAdmin: false } as const))
+      } else {
+        tenantCtx = await resolveTenantContext(req)
+      }
       // Resolve params (Next.js 16: params is a Promise).
       const params = (routeCtx?.params ? await routeCtx.params : ({} as Record<string, string>)) as unknown as TParams
-      const result = await handler(tenantCtx, req, params)
+      const result = await handler(tenantCtx as TenantContext, req, params)
       if (result instanceof NextResponse) {
         result.headers.set('x-request-id', rid)
         return result

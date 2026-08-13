@@ -1,9 +1,9 @@
 // =============================================================================
 // Infrastructure-as-a-Network Platform — Canonical Domain Schema
 // =============================================================================
-// Adapted to SQLite for the MVP. Domain boundaries, immutability, idempotency,
-// audit, and tenant isolation are preserved. Enums are stored as String (SQLite
-// has no native enum), JSON as String via Prisma `Json` (supported on SQLite).
+// PostgreSQL (Neon). Domain boundaries, immutability, idempotency, audit, and
+// tenant isolation are preserved. Enums are stored as String, JSON as String
+// via manual serialization for portability.
 //
 // Canonical economic pipeline:
 //   Event → Verification → Attestation → Contribution → Reward → Ledger → Settlement
@@ -21,7 +21,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -55,6 +55,7 @@ model Tenant {
   auditLogs      AuditLog[]
   idempotency    IdempotencyRecord[]
   domainEvents   DomainEvent[]
+  platformUsers  PlatformUser[]
 
   @@index([slug])
 }
@@ -523,4 +524,48 @@ model DomainEvent {
   @@index([tenantId])
   @@index([eventType])
   @@index([processed])
+}
+
+// -----------------------------------------------------------------------------
+// 15. Platform authentication (NOT tenant-scoped — platform-level identity)
+// -----------------------------------------------------------------------------
+
+model PlatformUser {
+  // Platform-level user account. Links to a tenant for non-admin roles.
+  // Admins have tenantId = null (platform-wide access).
+  id            String   @id @default(cuid())
+  email         String   @unique
+  passwordHash  String   // scrypt hash: salt:hash
+  role          String   @default("viewer") // admin | owner | operator | viewer
+  tenantId      String?  // null for admin; tenant id for tenant-scoped users
+  status        String   @default("active") // active | suspended
+  isDemo        Boolean  @default(false)
+  displayName   String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tenant        Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  waitlistApproved Waitlist[]
+
+  @@index([tenantId])
+  @@index([role])
+}
+
+model Waitlist {
+  // Users who signed up and are waiting for admin approval.
+  // Admin can approve (creates a PlatformUser) or reject.
+  id            String   @id @default(cuid())
+  email         String   @unique
+  requestedRole String   @default("owner") // admin | owner | operator | viewer
+  reason        String?
+  status        String   @default("pending") // pending | approved | rejected
+  approvedById  String?  // PlatformUser who approved
+  createdUserId String?  // PlatformUser created when approved
+  createdAt     DateTime @default(now())
+  reviewedAt    DateTime?
+
+  approvedBy    PlatformUser? @relation(fields: [approvedById], references: [id])
+
+  @@index([status])
+  @@index([email])
 }

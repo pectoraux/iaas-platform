@@ -39,6 +39,7 @@ export async function apiFetch<T>(
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     signal: opts.signal,
     cache: "no-store",
+    credentials: "include",
   })
 
   const text = await res.text()
