@@ -264,3 +264,28 @@ Stage Summary:
 - Production login + E2E verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit 9192b01)
 - Generic platform core is fully hardened. Ready for VPP implementation.
+
+---
+Task ID: VPP-1
+Agent: orchestrator
+Task: Fix demo logins + PaySwap precision + credential rotation + VPP-1 implementation.
+
+Work Log:
+1. Demo login fix: seed now uses per-account passwords matching frontend (DemoAdmin123!, DemoOwner123!, DemoOperator123!, DemoViewer123!).
+2. PaySwap precision: PayoutRequest.amount changed from number to string. Worker passes settlement.amount.toString() instead of Number(). No JS number between Ledger and provider.
+3. Credential rotation: exposed admin (ekontetevi@gmail) replaced with admin@iaas.network. Old credential rejected. Database re-seeded.
+4. VPP-1 implementation:
+   - 5 new VPP-specific models: VppBuyerProgram, VppCapacityReservation, VppDispatch, VppDispatchAssignment, VppBaseline
+   - NO changes to generic models (Event, Attestation, Contribution, Reward, Ledger, Settlement)
+   - Simulated DER adapter: generates telemetry → signs → submits as generic Event → worker verifies → baseline engine → generic Contribution → generic Reward → generic Ledger → generic Settlement
+   - Energy-vpp template now has 3 capabilities: energy_discharge, frequency_response, energy_capacity
+   - API routes: /api/v1/vpp/programs, /reservations, /dispatches, /dispatches/:id/execute
+   - 5 integration tests (all pass): multi-capability assignment, per-capability schema validation, wrong-field rejection, full dispatch flow through generic pipeline
+
+Stage Summary:
+- Demo logins work on production.
+- PaySwap precision preserved end-to-end (Decimal → string, no JS number).
+- Exposed credential rotated.
+- VPP-1 proves: one battery with 3 capabilities in same network, telemetry validated per capability, full dispatch flows through generic pipeline without parallel energy abstractions.
+- GitHub: pectoraux/iaas-platform (commit 5af9d3f)
+- Vercel: iaas-ivory.vercel.app — production READY, login + E2E verified.
