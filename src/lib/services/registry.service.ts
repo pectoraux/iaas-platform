@@ -222,12 +222,13 @@ export async function resolveAssetNetworkAssignment(
   }
 
   // No specific network — find all active assignments.
+  // If capabilityType is specified, filter by it.
   const assignments = await db.assetNetworkAssignment.findMany({
-    where: { tenantId, assetId, status: 'active' },
+    where: { tenantId, assetId, status: 'active', ...(capabilityType ? { capabilityType } : {}) },
     include: { network: true },
   })
   if (assignments.length === 0) {
-    throw new ValidationError(`Asset ${assetId} has no active network assignment. Assign it to a network first.`)
+    throw new ValidationError(`Asset ${assetId} has no active network assignment${capabilityType ? ` with capability ${capabilityType}` : ''}. Assign it to a network first.`)
   }
   if (assignments.length === 1) {
     return assignments[0]

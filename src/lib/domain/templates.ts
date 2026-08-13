@@ -94,12 +94,27 @@ export const NETWORK_TEMPLATES: NetworkTemplate[] = [
         schemaVersion: 1,
         fields: { power_kw: 'number', available_energy_kwh: 'number', state_of_charge_pct: 'number' },
       },
+      {
+        type: 'frequency_response',
+        unit: 'kW',
+        schemaVersion: 1,
+        fields: { frequency_hz: 'number', response_kw: 'number', duration_seconds: 'number' },
+      },
+      {
+        type: 'energy_capacity',
+        unit: 'kWh',
+        schemaVersion: 1,
+        fields: { capacity_kwh: 'number', available_kwh: 'number', reserved_kwh: 'number' },
+      },
     ],
     verification: {
       checks: ['device_signature', 'timestamp_window', 'replay_protection', 'schema_validation', 'numeric_range'],
       numeric_ranges: {
         power_kw: { min: 0, max: 1000 },
         state_of_charge_pct: { min: 0, max: 100 },
+        frequency_hz: { min: 49.5, max: 50.5 },
+        response_kw: { min: 0, max: 1000 },
+        capacity_kwh: { min: 0, max: 10000 },
       },
       timestamp_window_seconds: 120,
     },

@@ -59,6 +59,11 @@ model Tenant {
   idempotency    IdempotencyRecord[]
   domainEvents   DomainEvent[]
   platformUsers  PlatformUser[]
+  vppPrograms    VppBuyerProgram[]
+  vppReservations VppCapacityReservation[]
+  vppDispatches  VppDispatch[]
+  vppAssignments VppDispatchAssignment[]
+  vppBaselines   VppBaseline[]
 
   @@index([slug])
 }
@@ -93,6 +98,7 @@ model NetworkDefinition {
   tenant    Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   versions  NetworkVersion[]
   assetAssignments AssetNetworkAssignment[]
+  vppPrograms    VppBuyerProgram[]
 
   @@unique([tenantId, slug])
   @@index([tenantId])
@@ -139,6 +145,8 @@ model Operator {
   contributions Contribution[]
   rewards       Reward[]
   settlements   Settlement[]
+  vppReservations VppCapacityReservation[]
+  vppAssignments VppDispatchAssignment[]
 
   @@index([tenantId])
   @@index([organizationId])
@@ -167,6 +175,8 @@ model Asset {
   events     Event[]
   networkAssignments AssetNetworkAssignment[]
   contributions Contribution[]
+  vppReservations VppCapacityReservation[]
+  vppAssignments VppDispatchAssignment[]
 
   @@index([tenantId])
   @@index([operatorId])
@@ -411,6 +421,7 @@ model RewardRule {
   tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   networkVersion NetworkVersion  @relation(fields: [networkVersionId], references: [id])
   rewards        Reward[]
+  vppPrograms    VppBuyerProgram[]
 
   @@index([tenantId])
   @@index([networkVersionId])
@@ -673,3 +684,189 @@ model Waitlist {
   @@index([status])
   @@index([email])
 }
+
+// =============================================================================
+// 16. VPP Domain Layer (Energy Virtual Power Plant)
+// =============================================================================
+// These models are VPP-SPECIFIC. They sit ON TOP of the generic platform
+// primitives (Event, Attestation, Contribution, Reward, Ledger, Settlement)
+// and do NOT modify or duplicate them.
+//
+// The VPP layer owns:
+//   - DER asset types (battery, solar_inverter, ev_charger, smart_meter)
+//   - Energy capabilities (energy_discharge, frequency_response, energy_capacity)
+//   - Capacity reservations (how much capacity an operator commits to a buyer)
+//   - Dispatch events (buyer requests discharge, platform assigns to assets)
+//   - Dispatch assignments (which assets discharge how much)
+//   - Baseline calculations (what the asset would have done without dispatch)
+//   - Performance verification (actual vs baseline = verified contribution)
+//
+// The VPP layer does NOT create:
+//   - EnergyEvent (uses generic Event)
+//   - EnergyAttestation (uses generic Attestation)
+//   - EnergyContribution (uses generic Contribution)
+//   - EnergyReward (uses generic Reward)
+//   - EnergyLedger (uses generic LedgerPosting/LedgerEntry)
+//   - EnergySettlement (uses generic Settlement)
+//
+// VPP telemetry → generic Event
+// VPP performance proof → generic Attestation
+// VPP kWh delivered → generic Contribution
+// VPP payment → generic Reward + Ledger + Settlement
+// =============================================================================
+
+/// A buyer program defines the commercial terms for VPP participation.
+/// e.g. "Grid operator pays $0.12/kWh for discharge during peak hours".
+/// Created by the tenant owner; assets are enrolled via CapacityReservation.
+model VppBuyerProgram {
+  id              String   @id @default(cuid())
+  tenantId        String
+  networkId       String
+  name            String
+  description     String?
+  status          String   @default("active") // active | paused | ended
+  // The reward rule to use for contributions under this program.
+  // References the generic RewardRule (which is versioned via NetworkVersion).
+  rewardRuleId    String
+  // Dispatch window: when can discharge be requested?
+  dispatchWindowStart String // e.g. "16:00" (hour:minute, local)
+  dispatchWindowEnd   String // e.g. "21:00"
+  // Pricing
+  pricePerKwh     String   // decimal as string
+  currency        String   @default("USD")
+  // Capacity
+  minCapacityKw   String   // decimal as string — minimum total capacity required
+  maxCapacityKw   String?  // decimal as string — optional cap
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant        Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  network       NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
+  rewardRule    RewardRule        @relation(fields: [rewardRuleId], references: [id])
+  reservations  VppCapacityReservation[]
+  dispatches    VppDispatch[]
+
+  @@index([tenantId])
+  @@index([networkId])
+}
+
+/// An operator commits capacity from their assets to a buyer program.
+/// This is the VPP-specific reservation layer — it determines how much
+/// capacity an asset can contribute before dispatch.
+model VppCapacityReservation {
+  id              String   @id @default(cuid())
+  tenantId        String
+  programId       String
+  operatorId      String
+  assetId         String
+  capabilityType  String   // energy_discharge | frequency_response | energy_capacity
+  // Reserved capacity (what the operator commits to provide).
+  reservedKw      String   // decimal as string
+  reservedKwh     String?  // decimal as string (optional energy limit)
+  status          String   @default("active") // active | withdrawn | expired
+  effectiveFrom   DateTime @default(now())
+  effectiveTo     DateTime?
+  createdAt       DateTime @default(now())
+
+  tenant    Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  program   VppBuyerProgram   @relation(fields: [programId], references: [id], onDelete: Cascade)
+  operator  Operator          @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  asset     Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([programId, assetId, capabilityType])
+  @@index([tenantId])
+  @@index([programId])
+}
+
+/// A dispatch event: the buyer requests discharge from the VPP.
+/// This is VPP-specific orchestration — it does NOT replace the generic
+/// Event model. Instead, it triggers the creation of generic Events (telemetry)
+/// for each assigned asset.
+model VppDispatch {
+  id              String   @id @default(cuid())
+  tenantId        String
+  programId       String
+  // The dispatch request.
+  requestedKw     String   // decimal as string — total power requested
+  requestedKwh    String   // decimal as string — total energy to deliver
+  startTime       DateTime // when discharge should begin
+  endTime         DateTime // when discharge should end
+  status          String   @default("created") // created | assigned | dispatching | completed | cancelled | failed
+  // Dispatch metadata
+  reason          String?  // e.g. "grid_frequency_event", "price_peak", "manual"
+  metadataJson    String   @default("{}")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  program     VppBuyerProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
+  assignments VppDispatchAssignment[]
+
+  @@index([tenantId])
+  @@index([programId])
+  @@index([status])
+}
+
+/// A dispatch assignment: which asset discharges how much.
+/// Each assignment generates a generic Event (telemetry) when the asset
+/// reports its actual discharge. The VPP baseline engine then computes
+/// the performance (actual - baseline) which becomes a Contribution.
+model VppDispatchAssignment {
+  id              String   @id @default(cuid())
+  tenantId        String
+  dispatchId      String
+  assetId         String
+  operatorId      String
+  capabilityType  String   // energy_discharge | frequency_response
+  assignedKw      String   // decimal as string — power assigned to this asset
+  assignedKwh     String   // decimal as string — energy assigned to this asset
+  status          String   @default("assigned") // assigned | dispatching | completed | failed
+  // After completion: actual vs baseline (computed by the baseline engine).
+  actualKwh       String?  // decimal as string — measured energy delivered
+  baselineKwh     String?  // decimal as string — estimated energy without dispatch
+  performanceKwh  String?  // decimal as string — actual - baseline (the contribution quantity)
+  // Link to the generic pipeline (filled when the asset reports telemetry).
+  eventId         String?  // the generic Event created by the asset's discharge telemetry
+  contributionId  String?  // the generic Contribution created from the performance
+  createdAt       DateTime @default(now())
+  completedAt     DateTime?
+
+  tenant     Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  dispatch   VppDispatch  @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
+  asset      Asset        @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  operator   Operator     @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  baseline   VppBaseline?
+
+  @@index([tenantId])
+  @@index([dispatchId])
+  @@index([assetId])
+}
+
+/// Baseline calculation record. The baseline engine estimates what an asset
+/// would have done without the dispatch (e.g. a battery would have stayed at
+/// its current state of charge). The difference (actual - baseline) is the
+/// verified contribution.
+model VppBaseline {
+  id              String   @id @default(cuid())
+  tenantId        String
+  assignmentId    String   @unique
+  // Baseline method used.
+  method          String   // average_load | last_week_same_time | model_prediction | zero
+  // Baseline values (what the asset would have done without dispatch).
+  baselineKw      String   // decimal as string
+  baselineKwh     String   // decimal as string
+  // Actual values (what the asset did during dispatch).
+  actualKw        String   // decimal as string
+  actualKwh       String   // decimal as string
+  // Performance = actual - baseline (the verified contribution quantity).
+  performanceKwh  String   // decimal as string
+  // Metadata for auditability.
+  metadataJson    String   @default("{}")
+  createdAt       DateTime @default(now())
+
+  tenant    Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignment VppDispatchAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
