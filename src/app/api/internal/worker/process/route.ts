@@ -1,23 +1,21 @@
 import { NextResponse } from 'next/server'
-import { db } from '@/lib/db'
-import { markProcessed } from '@/lib/domain/events'
+import { processEventOutbox, processSettlementOutbox } from '@/lib/services/worker.service'
 
 /**
- * Internal worker endpoint: drains the domain-event outbox.
- * In production this would be a BullMQ worker; here it's a callable endpoint
- * so the dashboard can trigger processing. It marks events as processed
- * (side effects already emitted inline during the originating operation).
+ * Internal worker endpoint: drains BOTH outboxes (events + settlements).
+ * In production this would be a BullMQ worker consuming Redis. For Vercel
+ * serverless, it's triggered by the client (after ingestion) or a cron job.
  */
-export const POST = async () => {
-  const pending = await db.domainEvent.findMany({
-    where: { processed: false },
-    take: 100,
-    orderBy: { occurredAt: 'asc' },
+export async function POST() {
+  const events = await processEventOutbox()
+  const settlements = await processSettlementOutbox()
+  return NextResponse.json({
+    events,
+    settlements,
+    total_processed: events.processed + settlements.processed,
   })
-  for (const evt of pending) {
-    // The domain logic already ran inline; this just marks the outbox row processed.
-    // A real worker would dispatch to downstream consumers here.
-    await markProcessed(evt.id)
-  }
-  return NextResponse.json({ processed: pending.length })
+}
+
+export async function GET() {
+  return POST()
 }

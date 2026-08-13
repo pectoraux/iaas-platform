@@ -4,6 +4,9 @@
 // Rule 8: A Node must NOT become a catch-all. Operator / Asset / Device /
 // Capability are distinct entities.
 // Rule 33: Never trust operator_id / device ownership / etc. from client input.
+//
+// Task 4: Assets are explicitly assigned to networks via AssetNetworkAssignment.
+// Task 9: DeviceCredential uses `verificationKey` (not `publicKey`).
 // =============================================================================
 
 import { db } from '@/lib/db'
@@ -11,7 +14,7 @@ import { ConflictError, NotFoundError, ValidationError } from '@/lib/domain/erro
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import {
   generateProvisioningSecret,
-  publicKeyFromProvisioningSecret,
+  verificationKeyFromProvisioningSecret,
   sha256,
 } from '@/lib/domain/crypto'
 
@@ -101,15 +104,109 @@ export async function createAsset(tenantId: string, input: CreateAssetInput, act
 export async function listAssets(tenantId: string) {
   return db.asset.findMany({
     where: { tenantId },
-    include: { operator: true, devices: true },
+    include: { operator: true, devices: true, networkAssignments: { include: { network: true } } },
     orderBy: { createdAt: 'desc' },
   })
 }
 
 export async function getAsset(tenantId: string, id: string) {
-  const a = await db.asset.findFirst({ where: { id, tenantId }, include: { operator: true, devices: true } })
+  const a = await db.asset.findFirst({
+    where: { id, tenantId },
+    include: { operator: true, devices: true, networkAssignments: { include: { network: true } } },
+  })
   if (!a) throw new NotFoundError('asset', id)
   return a
+}
+
+// ---------------------------------------------------------------------------
+// Asset → Network assignment (task 4)
+// ---------------------------------------------------------------------------
+
+export interface AssignAssetNetworkInput {
+  assetId: string
+  networkId: string
+  capabilityType: string
+}
+
+/**
+ * Explicitly assign an asset to a network. An asset MUST have an active
+ * assignment to ingest events or earn contributions in that network.
+ *
+ * This replaces the old "pick the tenant's most recent network" heuristic,
+ * which was unsafe for multi-network tenants.
+ */
+export async function assignAssetToNetwork(
+  tenantId: string,
+  assetId: string,
+  networkId: string,
+  capabilityType: string,
+  actorId?: string,
+) {
+  // Validate asset + network belong to tenant.
+  await getAsset(tenantId, assetId)
+  const network = await db.networkDefinition.findFirst({ where: { id: networkId, tenantId } })
+  if (!network) throw new NotFoundError('network', networkId)
+
+  const existing = await db.assetNetworkAssignment.findUnique({
+    where: { assetId_networkId: { assetId, networkId } },
+  })
+  if (existing) {
+    if (existing.status === 'active') {
+      return existing
+    }
+    // Reactivate.
+    return db.assetNetworkAssignment.update({
+      where: { id: existing.id },
+      data: { status: 'active', effectiveTo: null, capabilityType },
+    })
+  }
+
+  const assignment = await db.assetNetworkAssignment.create({
+    data: { tenantId, assetId, networkId, capabilityType, status: 'active' },
+  })
+
+  await appendAudit({
+    tenantId,
+    actorId,
+    eventType: 'asset.assigned_to_network',
+    resourceType: 'asset_network_assignment',
+    resourceId: assignment.id,
+    metadata: { assetId, networkId, capabilityType },
+  })
+  return assignment
+}
+
+/**
+ * Resolve the active network assignment for an asset. Used by ingestion to
+ * determine which network's policy applies to an event.
+ */
+export async function resolveAssetNetworkAssignment(tenantId: string, assetId: string, networkId?: string) {
+  if (networkId) {
+    // If a specific network is requested, validate the assignment exists + is active.
+    const assignment = await db.assetNetworkAssignment.findFirst({
+      where: { tenantId, assetId, networkId, status: 'active' },
+      include: { network: true },
+    })
+    if (!assignment) {
+      throw new ValidationError(`Asset ${assetId} is not assigned to network ${networkId}`)
+    }
+    return assignment
+  }
+
+  // No specific network — find the asset's active assignment (error if multiple ambiguous).
+  const assignments = await db.assetNetworkAssignment.findMany({
+    where: { tenantId, assetId, status: 'active' },
+    include: { network: true },
+  })
+  if (assignments.length === 0) {
+    throw new ValidationError(`Asset ${assetId} has no active network assignment. Assign it to a network first.`)
+  }
+  if (assignments.length > 1) {
+    throw new ValidationError(
+      `Asset ${assetId} has multiple active network assignments. Specify network_version_id in the ingest request.`,
+    )
+  }
+  return assignments[0]
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +235,7 @@ export interface ProvisionedDevice {
   credential: {
     id: string
     credentialType: string
-    publicKey: string
+    verificationKey: string
     status: string
   }
   // Returned ONLY at provisioning time. Never stored in plaintext, never re-issued.
@@ -156,7 +253,7 @@ export async function createDevice(
 ): Promise<ProvisionedDevice> {
   await getAsset(tenantId, input.assetId) // scoping + 404
 
-  const { provisioningSecret, secretHash, publicKey } = generateProvisioningSecret()
+  const { provisioningSecret, secretHash, verificationKey } = generateProvisioningSecret()
 
   const result = await db.$transaction(async (tx) => {
     const device = await tx.device.create({
@@ -175,7 +272,7 @@ export async function createDevice(
         tenantId,
         deviceId: device.id,
         credentialType: 'hmac_sha256',
-        publicKey,
+        verificationKey,
         secretHash,
         provisioningSecretHash: sha256(provisioningSecret),
         status: 'active',
@@ -198,7 +295,7 @@ export async function createDevice(
     credential: {
       id: result.credential.id,
       credentialType: result.credential.credentialType,
-      publicKey: result.credential.publicKey,
+      verificationKey: result.credential.verificationKey,
       status: result.credential.status,
     },
     provisioningSecret,
@@ -222,8 +319,8 @@ export async function getDevice(tenantId: string, id: string) {
 export async function activateDevice(tenantId: string, id: string, actorId?: string) {
   const device = await getDevice(tenantId, id)
   await db.device.update({ where: { id }, data: { status: 'active' } })
-  if (device.credentialId) {
-    await db.deviceCredential.updateMany({ where: { id: device.credentialId }, data: { status: 'active', activatedAt: new Date() } })
+  if (device.credential) {
+    await db.deviceCredential.updateMany({ where: { id: device.credential.id }, data: { status: 'active', activatedAt: new Date() } })
   }
   await appendAudit({ tenantId, actorId, eventType: AuditEvents.DeviceActivated, resourceType: 'device', resourceId: id })
   return getDevice(tenantId, id)
@@ -232,8 +329,8 @@ export async function activateDevice(tenantId: string, id: string, actorId?: str
 export async function suspendDevice(tenantId: string, id: string, actorId?: string) {
   const device = await getDevice(tenantId, id)
   await db.device.update({ where: { id }, data: { status: 'suspended' } })
-  if (device.credentialId) {
-    await db.deviceCredential.updateMany({ where: { id: device.credentialId }, data: { status: 'suspended', suspendedAt: new Date() } })
+  if (device.credential) {
+    await db.deviceCredential.updateMany({ where: { id: device.credential.id }, data: { status: 'suspended', suspendedAt: new Date() } })
   }
   await appendAudit({ tenantId, actorId, eventType: AuditEvents.DeviceSuspended, resourceType: 'device', resourceId: id })
   return getDevice(tenantId, id)
@@ -292,4 +389,4 @@ export async function getCapabilityForVersion(tenantId: string, versionId: strin
   return cap
 }
 
-export { publicKeyFromProvisioningSecret }
+export { verificationKeyFromProvisioningSecret }

@@ -4,12 +4,18 @@
 // Rule 9: Verification mechanisms must be composable.
 // Generic primitives ONLY. No proof_of_energy / proof_of_storage / etc. in the
 // platform core — verticals compose these primitives.
+//
+// Task 5: schema_validation now uses REAL JSON Schema validation via Zod,
+// validating the event payload against the capability's field definitions.
+//
+// Task 6: policy_version is now the actual NetworkVersion.version, not
+// hardcoded `1`.
 // =============================================================================
 
 import { db } from '@/lib/db'
-import { NotFoundError } from '@/lib/domain/errors'
 import { verifySignature, canonicalEventMessage } from '@/lib/domain/crypto'
 import type { VersionConfiguration } from './network.service'
+import { z } from 'zod'
 
 export type CheckStatus = 'pass' | 'fail' | 'skipped'
 
@@ -33,10 +39,10 @@ export interface VerificationContext {
   }
   device: {
     id: string
-    credential: { publicKey: string; status: string } | null
+    credential: { verificationKey: string; status: string } | null
   }
   configuration: VersionConfiguration
-  // raw ingest request (for signature recomputation)
+  networkVersion: { id: string; version: number } // task 6: actual version
   raw: {
     device_id: string
     event_id: string
@@ -49,7 +55,7 @@ export interface VerificationContext {
 }
 
 export interface VerificationResult {
-  policy_version: number
+  policy_version: number // = NetworkVersion.version (task 6)
   verifier_version: string
   checks: CheckResult[]
   overall_status: 'verified' | 'rejected'
@@ -57,7 +63,7 @@ export interface VerificationResult {
   confidence: number
 }
 
-export const VERIFIER_VERSION = '1.0.0'
+export const VERIFIER_VERSION = '1.1.0'
 
 // ---------------------------------------------------------------------------
 // Generic verification primitives
@@ -74,7 +80,7 @@ const deviceSignatureCheck: VerificationCheck = {
     if (!ctx.device.credential) return { name: 'device_signature', status: 'fail', detail: 'No credential on device' }
     if (!ctx.event.signature) return { name: 'device_signature', status: 'fail', detail: 'Missing signature' }
     const message = canonicalEventMessage(ctx.raw)
-    const ok = verifySignature(message, ctx.event.signature, ctx.device.credential.publicKey)
+    const ok = verifySignature(message, ctx.event.signature, ctx.device.credential.verificationKey)
     return ok
       ? { name: 'device_signature', status: 'pass' }
       : { name: 'device_signature', status: 'fail', detail: 'Signature mismatch' }
@@ -105,20 +111,32 @@ const replayProtectionCheck: VerificationCheck = {
       return { name: 'replay_protection', status: 'pass', detail: 'No sequence; idempotency-key enforced' }
     }
     const last = await db.event.findFirst({
-      where: { tenantId: ctx.tenantId, deviceId: ctx.event.deviceId, sequence: { not: null } },
+      where: {
+        tenantId: ctx.tenantId,
+        deviceId: ctx.event.deviceId,
+        sequence: { not: null },
+        id: { not: ctx.event.id },
+      },
       orderBy: { sequence: 'desc' },
     })
-    if (last && last.id !== ctx.event.id && (last.sequence as number) >= ctx.event.sequence) {
+    if (last && (last.sequence as number) >= ctx.event.sequence) {
       return { name: 'replay_protection', status: 'fail', detail: `Sequence ${ctx.event.sequence} <= last ${last.sequence}` }
     }
     return { name: 'replay_protection', status: 'pass' }
   },
 }
 
+/**
+ * Task 5: REAL JSON Schema validation.
+ *
+ * Builds a Zod schema from the capability's field definitions and validates
+ * the event payload against it. This replaces the old "JSON parses + is object"
+ * check, which let `{"power_kw": "banana"}` through.
+ */
 const schemaValidationCheck: VerificationCheck = {
   name: 'schema_validation',
   async verify(ctx): Promise<CheckResult> {
-    let payload: any
+    let payload: unknown
     try {
       payload = JSON.parse(ctx.event.payloadJson)
     } catch {
@@ -126,6 +144,37 @@ const schemaValidationCheck: VerificationCheck = {
     }
     if (typeof payload !== 'object' || payload === null) {
       return { name: 'schema_validation', status: 'fail', detail: 'Payload must be an object' }
+    }
+
+    // Build a Zod schema from the capability field definitions.
+    const cap = ctx.configuration.capabilities[0]
+    if (!cap || !cap.fields) {
+      // No capability schema defined — accept any object (backward compat).
+      return { name: 'schema_validation', status: 'pass', detail: 'No capability schema; object validated' }
+    }
+
+    const schemaShape: Record<string, z.ZodTypeAny> = {}
+    for (const [field, type] of Object.entries(cap.fields)) {
+      switch (type) {
+        case 'number':
+          schemaShape[field] = z.number()
+          break
+        case 'string':
+          schemaShape[field] = z.string()
+          break
+        case 'boolean':
+          schemaShape[field] = z.boolean()
+          break
+        default:
+          schemaShape[field] = z.unknown()
+      }
+    }
+    const schema = z.object(schemaShape).strict() // strict = reject unknown fields
+
+    const result = schema.safeParse(payload)
+    if (!result.success) {
+      const issues = result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')
+      return { name: 'schema_validation', status: 'fail', detail: issues }
     }
     return { name: 'schema_validation', status: 'pass' }
   },
@@ -160,6 +209,8 @@ export const CHECK_REGISTRY: Record<string, VerificationCheck> = {
 /**
  * Run the verification pipeline for an event. The set of checks is determined
  * by the network version's verification policy (versioned, immutable).
+ *
+ * Task 6: policy_version is the actual NetworkVersion.version.
  */
 export async function runVerification(ctx: VerificationContext): Promise<VerificationResult> {
   const checks: CheckResult[] = []
@@ -182,7 +233,7 @@ export async function runVerification(ctx: VerificationContext): Promise<Verific
   const confidence = total === 0 ? 0 : passed / total
   const risk = anyFail ? 1 - confidence : 0
   return {
-    policy_version: 1, // derived from network version (which is immutable)
+    policy_version: ctx.networkVersion.version, // task 6: actual version
     verifier_version: VERIFIER_VERSION,
     checks,
     overall_status: anyFail ? 'rejected' : 'verified',

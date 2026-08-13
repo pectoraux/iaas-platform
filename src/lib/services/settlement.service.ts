@@ -1,19 +1,25 @@
 // =============================================================================
-// Settlement service.
+// Settlement service — OUTBOX/WORKER model (task 8).
 //
-// Lifecycle: created → submitted → processing → completed | failed | retrying.
-// Uses idempotency keys: `reward-<reward_id>` so no duplicate reward can ever
-// produce two external payouts.
+// createSettlement() only:
+//   1. Creates the settlement in CREATED state
+//   2. Emits a domain event to the outbox
+//   3. Returns immediately
 //
-// The PaymentsService interface is the ONLY dependency on the outside world.
+// The actual payment provider call + ledger finalization happens in the worker
+// (worker.service.ts → processSettlementOutbox). This closes the crash window
+// between "provider says completed" and "database records completed".
+//
+// Lifecycle: created → (worker) → submitted → processing → completed | failed | retrying
+// Idempotency keys: `reward-<reward_id>` — no duplicate reward can produce two payouts.
 // =============================================================================
 
 import { db } from '@/lib/db'
-import { ConflictError, NotFoundError, PaymentError, ValidationError } from '@/lib/domain/errors'
+import { ConflictError, NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import { emit, DomainEventTypes } from '@/lib/domain/events'
 import { paymentsService } from './payments.service'
-import { ensureOperatorAccount, computeBalance } from './ledger.service'
+import { computeBalance, ensureOperatorAccount } from './ledger.service'
 
 export interface SettlementResult {
   id: string
@@ -25,11 +31,14 @@ export interface SettlementResult {
   provider: string
   provider_payout_id: string | null
   duplicate: boolean
+  message: string
 }
 
 /**
- * Create + submit a settlement for a posted reward. Idempotent on
- * (tenantId, idempotencyKey) where idempotencyKey = `reward-<reward_id>`.
+ * Create a settlement instruction. Does NOT call the payment provider — that
+ * happens in the worker. Emits a domain event to the outbox for async processing.
+ *
+ * Idempotent on (tenantId, idempotencyKey) where idempotencyKey = `reward-<reward_id>`.
  */
 export async function createSettlement(
   tenantId: string,
@@ -53,6 +62,7 @@ export async function createSettlement(
       provider: existing.provider,
       provider_payout_id: existing.providerPayoutId,
       duplicate: true,
+      message: `Settlement already exists (status: ${existing.status}). Call /api/internal/worker/process to advance.`,
     }
   }
 
@@ -65,7 +75,7 @@ export async function createSettlement(
     throw new ValidationError(`Reward ${rewardId} must be posted before settlement (current: ${reward.status})`)
   }
 
-  // Create the settlement instruction.
+  // Create the settlement instruction (CREATED state only — no provider call).
   const settlement = await db.settlement.create({
     data: {
       tenantId,
@@ -95,54 +105,24 @@ export async function createSettlement(
     payload: { rewardId: reward.id, amount: reward.amount },
   })
 
-  // Submit to the payments provider.
-  await db.settlement.update({ where: { id: settlement.id }, data: { status: 'submitted' } })
-  let payout
-  try {
-    payout = await paymentsService.create_payout({
-      idempotency_key: idempotencyKey,
-      recipient_ref: reward.operatorId,
-      amount: reward.amount,
-      currency: reward.currency,
-      reference: `reward:${reward.id}`,
-    })
-  } catch (err) {
-    await db.settlement.update({
-      where: { id: settlement.id },
-      data: { status: 'failed', failureReason: err instanceof Error ? err.message : 'payout failed' },
-    })
-    throw new PaymentError('Payout submission failed', { rewardId })
-  }
-
-  await db.settlement.update({
-    where: { id: settlement.id },
-    data: {
-      status: payout.status === 'completed' ? 'completed' : payout.status,
-      providerPayoutId: payout.provider_payout_id,
-    },
-  })
-
-  // If completed: post the settlement debit to the ledger + mark reward settled.
-  if (payout.status === 'completed') {
-    await completeSettlementInternal(tenantId, settlement.id, reward.id, reward.operatorId, reward.amount, reward.currency, actorId)
-  }
-
-  const finalRow = await db.settlement.findUnique({ where: { id: settlement.id } })
-  const final = finalRow!
   return {
-    id: final.id,
-    reward_id: final.rewardId,
-    operator_id: final.operatorId,
-    amount: final.amount,
-    currency: final.currency,
-    status: final.status,
-    provider: final.provider,
-    provider_payout_id: final.providerPayoutId,
+    id: settlement.id,
+    reward_id: settlement.rewardId,
+    operator_id: settlement.operatorId,
+    amount: settlement.amount,
+    currency: settlement.currency,
+    status: settlement.status,
+    provider: settlement.provider,
+    provider_payout_id: null,
     duplicate: false,
+    message: 'Settlement created. Call /api/internal/worker/process to submit to payment provider.',
   }
 }
 
-/** Mark a settlement completed (called after webhook / reconcile). */
+/**
+ * Manually confirm/settle a settlement (for testing or webhook reconciliation).
+ * In normal flow, the worker handles this.
+ */
 export async function completeSettlement(
   tenantId: string,
   settlementId: string,
@@ -161,71 +141,39 @@ export async function completeSettlement(
       provider: settlement.provider,
       provider_payout_id: settlement.providerPayoutId,
       duplicate: true,
+      message: 'Already completed',
     }
   }
-  await completeSettlementInternal(tenantId, settlement.id, settlement.rewardId, settlement.operatorId, settlement.amount, settlement.currency, actorId)
-  const finalRow = await db.settlement.findUnique({ where: { id: settlementId } })
-  const final = finalRow!
+
+  // Call the payment provider.
+  const payout = await paymentsService.create_payout({
+    idempotency_key: settlement.idempotencyKey!,
+    recipient_ref: settlement.operatorId,
+    amount: settlement.amount,
+    currency: settlement.currency,
+    reference: `reward:${settlement.rewardId}`,
+  })
+
+  if (payout.status === 'completed') {
+    // Post the settlement debit via the worker logic.
+    const { processSettlementOutbox } = await import('./worker.service')
+    await db.settlement.update({ where: { id: settlement.id }, data: { status: 'submitted' } })
+    await processSettlementOutbox(tenantId)
+  }
+
+  const final = await db.settlement.findUnique({ where: { id: settlementId } })
   return {
-    id: final.id,
-    reward_id: final.rewardId,
-    operator_id: final.operatorId,
-    amount: final.amount,
-    currency: final.currency,
-    status: final.status,
-    provider: final.provider,
-    provider_payout_id: final.providerPayoutId,
+    id: final!.id,
+    reward_id: final!.rewardId,
+    operator_id: final!.operatorId,
+    amount: final!.amount,
+    currency: final!.currency,
+    status: final!.status,
+    provider: final!.provider,
+    provider_payout_id: final!.providerPayoutId,
     duplicate: false,
+    message: `Settlement ${final!.status}`,
   }
-}
-
-async function completeSettlementInternal(
-  tenantId: string,
-  settlementId: string,
-  rewardId: string,
-  operatorId: string,
-  amount: number,
-  currency: string,
-  actorId?: string,
-) {
-  const account = await ensureOperatorAccount(tenantId, operatorId, currency)
-  // Post the settlement debit (money leaving the platform). Idempotent.
-  const debitKey = `reward-${rewardId}:settlement_debit`
-  const existing = await db.ledgerEntry.findUnique({
-    where: { tenantId_idempotencyKey: { tenantId, idempotencyKey: debitKey } },
-  })
-  if (!existing) {
-    await db.ledgerEntry.create({
-      data: {
-        tenantId,
-        accountId: account.id,
-        amount: -amount,
-        currency,
-        entryType: 'settlement_debit',
-        referenceType: 'settlement',
-        referenceId: settlementId,
-        idempotencyKey: debitKey,
-      },
-    })
-  }
-  await db.settlement.update({ where: { id: settlementId }, data: { status: 'completed' } })
-  await db.reward.update({ where: { id: rewardId }, data: { status: 'settled' } })
-
-  await appendAudit({
-    tenantId,
-    actorId,
-    eventType: AuditEvents.SettlementCompleted,
-    resourceType: 'settlement',
-    resourceId: settlementId,
-    metadata: { rewardId, amount, currency },
-  })
-  await emit({
-    event_type: DomainEventTypes.SettlementCompleted,
-    aggregate_id: settlementId,
-    tenant_id: tenantId,
-    version: 1,
-    payload: { rewardId, amount, currency },
-  })
 }
 
 export async function listSettlements(tenantId: string) {
@@ -245,8 +193,4 @@ export async function getSettlement(tenantId: string, id: string) {
   return s
 }
 
-export async function getSettlementByReward(tenantId: string, rewardId: string) {
-  return db.settlement.findUnique({ where: { rewardId } }).then((s) => (s && s.tenantId === tenantId ? s : null))
-}
-
-export { computeBalance }
+export { computeBalance, ensureOperatorAccount }

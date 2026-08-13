@@ -63,7 +63,7 @@ export const NETWORK_TEMPLATES: NetworkTemplate[] = [
       },
     ],
     verification: {
-      checks: ['device_signature', 'timestamp_window', 'replay_protection', 'numeric_range'],
+      checks: ['device_signature', 'timestamp_window', 'replay_protection', 'schema_validation', 'numeric_range'],
       numeric_ranges: { output_value: { min: 0, max: 100000 } },
       timestamp_window_seconds: 300,
     },
@@ -96,7 +96,7 @@ export const NETWORK_TEMPLATES: NetworkTemplate[] = [
       },
     ],
     verification: {
-      checks: ['device_signature', 'timestamp_window', 'replay_protection', 'numeric_range'],
+      checks: ['device_signature', 'timestamp_window', 'replay_protection', 'schema_validation', 'numeric_range'],
       numeric_ranges: {
         power_kw: { min: 0, max: 1000 },
         state_of_charge_pct: { min: 0, max: 100 },

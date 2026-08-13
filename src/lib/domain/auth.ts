@@ -3,11 +3,38 @@
 //
 // Uses Node.js built-in crypto (no external deps, works on Vercel serverless).
 // Secrets are NEVER stored in plaintext — scrypt with random salt.
+//
+// SECURITY (task 2): JWT_SECRET is MANDATORY in production. If absent, startup
+// fails fast. No insecure fallback.
 // =============================================================================
 
 import { scryptSync, randomBytes, timingSafeEqual, createHmac } from 'crypto'
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me'
+/**
+ * Resolve JWT_SECRET. In production, absence is a fatal error — no insecure
+ * fallback. In development (NODE_ENV !== 'production'), a warning is logged
+ * and a random ephemeral secret is used (sessions won't survive restart).
+ */
+function resolveJwtSecret(): string {
+  const secret = process.env.JWT_SECRET
+  if (secret && secret.length >= 32) return secret
+
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'FATAL: JWT_SECRET environment variable is required in production and must be at least 32 characters. ' +
+      'Set it in your Vercel project environment variables.',
+    )
+  }
+  // Development only: ephemeral random secret (sessions reset on restart).
+  if (!secret) {
+    console.warn('⚠️  JWT_SECRET not set — using ephemeral dev secret. Do NOT use in production.')
+  } else {
+    console.warn('⚠️  JWT_SECRET is shorter than 32 characters — using ephemeral dev secret. Do NOT use in production.')
+  }
+  return randomBytes(48).toString('hex')
+}
+
+const JWT_SECRET = resolveJwtSecret()
 const COOKIE_NAME = 'iaas_session'
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000 // 7 days in ms
 

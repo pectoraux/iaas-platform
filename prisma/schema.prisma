@@ -11,9 +11,11 @@
 // Architectural rules enforced by schema:
 //  - Published NetworkVersion is immutable (no update path exposed).
 //  - Every economically relevant object references the policy/version that produced it.
-//  - Ledger is append-only (no update/delete on LedgerEntry).
+//  - Ledger is append-only, DOUBLE-ENTRY (every posting balances: sum(amount) = 0).
 //  - AuditLog is append-only.
 //  - Every tenant-owned entity carries tenant_id.
+//  - Idempotency uses reservation (INSERT pending → execute → complete).
+//  - Assets are explicitly assigned to networks via AssetNetworkAssignment.
 // =============================================================================
 
 generator client {
@@ -51,6 +53,7 @@ model Tenant {
   rewards        Reward[]
   ledgerAccounts LedgerAccount[]
   ledgerEntries  LedgerEntry[]
+  ledgerPostings LedgerPosting[]
   settlements    Settlement[]
   auditLogs      AuditLog[]
   idempotency    IdempotencyRecord[]
@@ -89,6 +92,7 @@ model NetworkDefinition {
 
   tenant    Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   versions  NetworkVersion[]
+  assetAssignments AssetNetworkAssignment[]
 
   @@unique([tenantId, slug])
   @@index([tenantId])
@@ -142,6 +146,7 @@ model Operator {
 
 // -----------------------------------------------------------------------------
 // 4. Asset + Device (an asset can have many devices)
+//    + AssetNetworkAssignment (explicit network membership)
 // -----------------------------------------------------------------------------
 
 model Asset {
@@ -160,10 +165,35 @@ model Asset {
   operator   Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
   devices    Device[]
   events     Event[]
+  networkAssignments AssetNetworkAssignment[]
   contributions Contribution[]
 
   @@index([tenantId])
   @@index([operatorId])
+}
+
+/// Explicit assignment of an asset to a network. An asset CANNOT ingest events
+/// or earn contributions without an active assignment. This replaces the old
+/// "pick the tenant's most recent network" heuristic, which was unsafe for
+/// multi-network tenants.
+model AssetNetworkAssignment {
+  id              String   @id @default(cuid())
+  tenantId        String
+  assetId         String
+  networkId       String
+  capabilityType  String   // which capability this asset provides in this network
+  status          String   @default("active") // active | suspended | ended
+  effectiveFrom   DateTime @default(now())
+  effectiveTo     DateTime?
+  createdAt       DateTime @default(now())
+
+  asset   Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  network NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
+
+  @@unique([assetId, networkId])
+  @@index([tenantId])
+  @@index([assetId])
+  @@index([networkId])
 }
 
 model Device {
@@ -189,16 +219,18 @@ model Device {
 }
 
 model DeviceCredential {
-  // Secrets are NEVER stored in plaintext. We store a SHA-256 hash of the
-  // provisioning secret and the public key for signature verification.
-  // tenantId is a plain scoping field (no relation back to Tenant to keep the
-  // Tenant relation list focused on first-class domain entities).
+  // Secrets are NEVER stored in plaintext.
+  //
+  // TERMINOLOGY FIX (task 9): the field is now `verificationKey`, NOT `publicKey`.
+  // For HMAC-SHA256 this is a SECRET derived from the provisioning secret — it
+  // is NOT a public key and must never be exposed. The name reflects what it is.
+  // For future Ed25519 support, this would hold the actual public verifying key.
   id                     String    @id @default(cuid())
   tenantId               String
   deviceId               String    @unique
   credentialType         String    @default("hmac_sha256") // hmac_sha256 | ed25519
-  publicKey              String    // HMAC: derived key base; Ed25519: verifying key
-  secretHash             String    // hash of the shared device secret
+  verificationKey        String    // HMAC: derived secret used to verify signatures; Ed25519: public verifying key
+  secretHash             String    // hash of the shared provisioning secret
   provisioningSecretHash String?   // one-time provisioning secret hash
   status                 String    @default("active") // active | suspended | revoked
   createdAt              DateTime  @default(now())
@@ -234,6 +266,8 @@ model Capability {
 
 // -----------------------------------------------------------------------------
 // 6. Event (generic, immutable, signed)
+//    Status flow: queued → (worker picks up) → verified | rejected | failed
+//    The API no longer runs verification synchronously — it persists + enqueues.
 // -----------------------------------------------------------------------------
 
 model Event {
@@ -249,7 +283,7 @@ model Event {
   sequence        Int?
   payloadJson     String   @default("{}")
   schemaVersion   Int      @default(1)
-  status          String   @default("pending") // pending | verified | rejected | failed
+  status          String   @default("queued") // queued | verified | rejected | failed
   signature       String?
   idempotencyKey  String?  // for the ingest request
   createdAt       DateTime @default(now())
@@ -272,7 +306,7 @@ model VerificationResult {
   id                   String   @id @default(cuid())
   tenantId             String
   eventId              String   @unique
-  policyVersion        Int
+  policyVersion        Int      // = the NetworkVersion.version that defined the policy (task 6)
   verifierVersion      String
   checksJson           String   @default("[]") // [{ name, status, detail }]
   overallStatus        String   // verified | rejected
@@ -298,7 +332,7 @@ model Attestation {
   quantity                  Float
   unit                      String
   status                    String   @default("verified") // verified | disputed | revoked
-  verificationPolicyVersion Int
+  verificationPolicyVersion Int      // = NetworkVersion.version (task 6)
   verifierVersion           String
   createdAt                 DateTime @default(now())
 
@@ -327,7 +361,7 @@ model Contribution {
   endTime          DateTime
   attestationIdsJson String  @default("[]")
   status           String   @default("created") // created | settled | voided
-  policyVersion    Int
+  policyVersion    Int      // = NetworkVersion.version
   idempotencyKey   String?
   createdAt        DateTime @default(now())
 
@@ -395,50 +429,92 @@ model Reward {
 }
 
 // -----------------------------------------------------------------------------
-// 10. Ledger (append-only; account + entries)
+// 10. Ledger — DOUBLE-ENTRY accounting (task 7)
+//
+// Every posting creates a LedgerPosting (groups the entries) + multiple
+// LedgerEntry rows. The sum of amounts in a posting MUST equal zero.
+//
+// Account types:
+//   asset     — cash, settlement_clearing (debit-normal: balance typically < 0)
+//   liability — buyer_funds, operator_payable (credit-normal: balance typically > 0)
+//   revenue   — platform_revenue (credit-normal: balance typically > 0)
+//
+// Convention: amount is signed. Positive = credit. Negative = debit.
+// For each posting: SUM(amount) = 0.
+//
+// Example reward posting ($100 to operator, $5 platform fee, funded by buyer):
+//   buyer_funds       (liability): -105  (debit: reduces buyer's prepaid funds)
+//   operator_payable  (liability): +100  (credit: increases what we owe operator)
+//   platform_revenue  (revenue):   +5    (credit: increases platform revenue)
+//   Sum: -105 + 100 + 5 = 0  ✓
+//
+// Example settlement (pay operator $100):
+//   operator_payable  (liability): -100  (debit: reduces what we owe)
+//   cash              (asset):     +100  (credit: reduces our cash)
+//   Sum: -100 + 100 = 0  ✓
 // -----------------------------------------------------------------------------
 
 model LedgerAccount {
-  id         String   @id @default(cuid())
-  tenantId   String
-  ownerId    String   // operator id (or "platform")
-  ownerType  String   @default("operator") // operator | platform | buyer
-  currency   String   @default("USD")
-  createdAt  DateTime @default(now())
+  id          String   @id @default(cuid())
+  tenantId    String
+  ownerId     String   // operator id | "platform" | "buyer"
+  ownerType   String   // operator | platform | buyer
+  accountType String   // asset | liability | revenue (task 7)
+  currency    String   @default("USD")
+  createdAt   DateTime @default(now())
 
   tenant  Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   entries LedgerEntry[]
 
-  @@unique([tenantId, ownerId, ownerType, currency])
+  @@unique([tenantId, ownerId, ownerType, accountType, currency])
   @@index([tenantId])
 }
 
-model LedgerEntry {
-  // APPEND-ONLY. No update path exposed in service layer.
-  // referenceType/referenceId are polymorphic (reward | settlement | contribution)
-  // so we do NOT model a Prisma relation here — lookups are done by service code.
+/// A posting groups all entries in a single balanced transaction.
+model LedgerPosting {
   id             String   @id @default(cuid())
   tenantId       String
-  accountId      String
-  amount         Float    // signed: +credit / -debit
-  currency       String   @default("USD")
-  entryType      String   // reward_credit | platform_fee | settlement_debit | settlement_credit | adjustment
+  postingType    String   // reward | settlement | funding | adjustment
   referenceType  String?  // reward | settlement | contribution
   referenceId    String?
   idempotencyKey String?
   createdAt      DateTime @default(now())
 
-  tenant  LedgerAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  tenantRef Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant  Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  entries LedgerEntry[]
 
   @@unique([tenantId, idempotencyKey])
   @@index([tenantId])
-  @@index([accountId])
   @@index([referenceType, referenceId])
 }
 
+model LedgerEntry {
+  // APPEND-ONLY. Part of a LedgerPosting. Individual entries are NOT idempotent
+  // by themselves — idempotency is enforced at the posting level.
+  id        String   @id @default(cuid())
+  tenantId  String
+  postingId String
+  accountId String
+  amount    Float    // signed: +credit / -debit; sum per posting MUST = 0
+  currency  String   @default("USD")
+  entryType String   // reward_credit | platform_fee | buyer_debit | settlement_debit | settlement_credit | funding_credit | funding_debit
+  createdAt DateTime @default(now())
+
+  posting LedgerPosting @relation(fields: [postingId], references: [id], onDelete: Cascade)
+  account LedgerAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([accountId])
+  @@index([postingId])
+}
+
 // -----------------------------------------------------------------------------
-// 11. Settlement (PaymentsService abstraction over PaySwap)
+// 11. Settlement — outbox/worker model (task 8)
+//
+// createSettlement() only creates the settlement in CREATED state + emits a
+// domain event to the outbox. A worker (triggered by the client or cron) picks
+// it up, calls the payment provider, and finalizes the ledger.
 // -----------------------------------------------------------------------------
 
 model Settlement {
@@ -487,7 +563,17 @@ model AuditLog {
 }
 
 // -----------------------------------------------------------------------------
-// 13. Idempotency records (store the response for replay)
+// 13. Idempotency records — reservation-based (task 3)
+//
+// Flow:
+//   1. INSERT with status='pending', responseJson='' (unique constraint = lock)
+//   2. Winner executes the operation
+//   3. UPDATE to status='completed', responseJson=<result>
+//   4. Losers poll until status='completed', then return the stored response
+//
+// This closes the check-then-execute race window. If the winner crashes before
+// completing, a later request detects the stale pending record (via createdAt
+// age) and can reclaim or return a conflict.
 // -----------------------------------------------------------------------------
 
 model IdempotencyRecord {
@@ -495,14 +581,17 @@ model IdempotencyRecord {
   tenantId     String
   key          String
   resourceType String
+  status       String   @default("pending") // pending | completed
   resourceId   String?
-  responseJson String
+  responseJson String   @default("")
   createdAt    DateTime @default(now())
+  completedAt  DateTime?
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, key, resourceType])
   @@index([tenantId])
+  @@index([status])
 }
 
 // -----------------------------------------------------------------------------

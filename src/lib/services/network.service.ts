@@ -175,9 +175,27 @@ export async function getPublishedConfiguration(versionId: string): Promise<Vers
   return JSON.parse(v.configurationJson)
 }
 
+/** Get a network version by id, scoped to tenant. Used by ingestion. */
+export async function getNetworkVersion(tenantId: string, versionId: string) {
+  const version = await db.networkVersion.findFirst({
+    where: { id: versionId, network: { tenantId } },
+    include: { network: true },
+  })
+  if (!version) throw new NotFoundError('network_version', versionId)
+  return version
+}
+
+/** Get the network version record (with version number) for policy resolution. */
+export async function getNetworkVersionRecord(versionId: string) {
+  const v = await db.networkVersion.findUnique({ where: { id: versionId } })
+  if (!v) throw new NotFoundError('network_version', versionId)
+  return v
+}
+
 /**
  * Instantiate a network from a template. Creates Network + a version +
- * publishes it (materialising capabilities + reward rule). One-shot.
+ * publishes it (materialising capabilities + reward rule). Idempotent — if
+ * the network already exists with a published version, returns it.
  */
 export async function instantiateTemplate(
   tenantId: string,
@@ -190,6 +208,19 @@ export async function instantiateTemplate(
 
   const name = overrides?.name ?? template.name
   const slug = overrides?.slug ?? template.slug
+
+  // Idempotent: check if network already exists with a published version.
+  const existing = await db.networkDefinition.findUnique({
+    where: { tenantId_slug: { tenantId, slug } },
+    include: { versions: { where: { publishedAt: { not: null } }, orderBy: { version: 'desc' }, take: 1 } },
+  })
+  if (existing && existing.currentVersionId) {
+    return {
+      network: existing,
+      version: existing.versions[0] ?? null,
+      template,
+    }
+  }
 
   const network = await createNetwork(tenantId, { name, slug, vertical: template.vertical }, actorId)
 

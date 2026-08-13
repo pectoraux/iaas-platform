@@ -26,6 +26,8 @@ export const AuditEvents = {
   TemplateInstantiated: 'template.instantiated',
   WaitlistApproved: 'waitlist.approved',
   UserLogin: 'user.login',
+  AssetAssignedToNetwork: 'asset.assigned_to_network',
+  SettlementFailed: 'settlement.failed',
 } as const
 
 export type AuditEventType = (typeof AuditEvents)[keyof typeof AuditEvents]

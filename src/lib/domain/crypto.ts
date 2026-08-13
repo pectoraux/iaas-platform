@@ -8,28 +8,37 @@
 //
 // SECRETS ARE NEVER STORED IN PLAINTEXT.
 //   - provisioningSecret: returned ONCE to the caller at provisioning time.
-//   - secretHash: SHA-256(provisioningSecret) stored for auth comparison.
-//   - publicKey: derived key base used to recompute the expected signature.
+//   - secretHash: SHA-256(verificationKey) stored for auth comparison.
+//   - verificationKey: derived key used to verify signatures.
+//
+// TERMINOLOGY (task 9): this field is called `verificationKey`, NOT `publicKey`.
+// For HMAC-SHA256, this is a SECRET — it must never be exposed publicly. The
+// name reflects its purpose (verifying signatures), not a false implication of
+// public safety. For future Ed25519 support, this would hold the actual public
+// verifying key (safe to share).
 // =============================================================================
 
 import { createHmac, createHash, randomBytes, timingSafeEqual } from 'crypto'
 
 const PROVISIONING_PREFIX = 'psk_'
 
-/** Generate a provisioning secret + its derived signing key base. */
+/**
+ * Generate a provisioning secret + its derived verification key.
+ *
+ * - provisioningSecret = psk_<32 random bytes hex>  (returned ONCE, never stored)
+ * - verificationKey = sha256(provisioningSecret)     (stored, used to verify signatures)
+ * - secretHash = sha256(verificationKey)              (stored, used to verify the provisioning secret)
+ */
 export function generateProvisioningSecret(): {
   provisioningSecret: string
   secretHash: string
-  publicKey: string
+  verificationKey: string
 } {
-  // provisioningSecret = psk_<32 random bytes hex>
-  // publicKey (signing base) = sha256(provisioningSecret) — used to recompute signatures
-  // secretHash = sha256(publicKey) — stored, used to verify provisioningSecret on auth
   const raw = randomBytes(32).toString('hex')
   const provisioningSecret = `${PROVISIONING_PREFIX}${raw}`
-  const publicKey = sha256(provisioningSecret)
-  const secretHash = sha256(publicKey)
-  return { provisioningSecret, secretHash, publicKey }
+  const verificationKey = sha256(provisioningSecret)
+  const secretHash = sha256(verificationKey)
+  return { provisioningSecret, secretHash, verificationKey }
 }
 
 /** Hash a value with SHA-256 (hex). */
@@ -61,26 +70,28 @@ export function canonicalEventMessage(input: {
   ].join('\n')
 }
 
-/** Sign a canonical message with a signing key (the derived publicKey). */
+/** Sign a canonical message with a signing key (the derived verification key). */
 export function signMessage(message: string, signingKey: string): string {
   return createHmac('sha256', signingKey).update(message).digest('hex')
 }
 
 /**
- * Verify a device event signature.
+ * Verify a device event signature using the credential's verificationKey.
  *
  * The signing key used by both signer and verifier is the credential's
- * `publicKey` (= sha256(provisioningSecret)). The platform stores publicKey
- * (never the provisioning secret), so it can verify offline. The client, which
- * only has the provisioning secret at provisioning time, must derive the
- * signing key via `deriveSigningKey(provisioningSecret)` before signing.
+ * `verificationKey` (= sha256(provisioningSecret)). The platform stores the
+ * verificationKey (never the provisioning secret), so it can verify offline.
+ * The client, which only has the provisioning secret at provisioning time,
+ * must derive the signing key via `deriveSigningKey(provisioningSecret)`.
+ *
+ * NOTE: for HMAC-SHA256, the verificationKey is a SECRET. Do not expose it.
  */
 export function verifySignature(
   message: string,
   signature: string,
-  publicKey: string,
+  verificationKey: string,
 ): boolean {
-  const expected = createHmac('sha256', publicKey).update(message).digest('hex')
+  const expected = createHmac('sha256', verificationKey).update(message).digest('hex')
   const a = Buffer.from(signature, 'hex')
   const b = Buffer.from(expected, 'hex')
   if (a.length !== b.length) return false
@@ -90,7 +101,7 @@ export function verifySignature(
 /**
  * Derive the signing key from a provisioning secret. Clients call this after
  * provisioning to obtain the key they use with `signMessage`. The platform
- * never sees the provisioning secret again — only the derived publicKey.
+ * never sees the provisioning secret again — only the derived verificationKey.
  */
 export function deriveSigningKey(provisioningSecret: string): string {
   return sha256(provisioningSecret)
@@ -101,15 +112,15 @@ export function verifyProvisioningSecret(
   provisioningSecret: string,
   secretHash: string,
 ): boolean {
-  const publicKey = sha256(provisioningSecret)
-  const computed = sha256(publicKey)
+  const verificationKey = sha256(provisioningSecret)
+  const computed = sha256(verificationKey)
   const a = Buffer.from(computed, 'hex')
   const b = Buffer.from(secretHash, 'hex')
   if (a.length !== b.length) return false
   return timingSafeEqual(a, b)
 }
 
-/** Resolve the publicKey (signing base) from a provisioning secret. */
-export function publicKeyFromProvisioningSecret(provisioningSecret: string): string {
+/** Resolve the verificationKey from a provisioning secret. */
+export function verificationKeyFromProvisioningSecret(provisioningSecret: string): string {
   return sha256(provisioningSecret)
 }
