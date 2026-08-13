@@ -61,21 +61,19 @@ export function canonicalEventMessage(input: {
   ].join('\n')
 }
 
-/** Sign a canonical message with the provisioning secret (HMAC-SHA256). */
-export function signMessage(message: string, provisioningSecret: string): string {
-  return createHmac('sha256', provisioningSecret).update(message).digest('hex')
+/** Sign a canonical message with a signing key (the derived publicKey). */
+export function signMessage(message: string, signingKey: string): string {
+  return createHmac('sha256', signingKey).update(message).digest('hex')
 }
 
 /**
  * Verify a device event signature.
- * Recomputes the expected signature using the credential's publicKey (which is
- * sha256(provisioningSecret)) as the HMAC key — note: this means the verifier
- * must possess the provisioningSecret OR the platform must store the derived
- * signing key. For the MVP we store publicKey (= sha256(provisioningSecret)) as
- * the HMAC key base, so the verifier uses publicKey directly.
  *
- * This keeps the provisioning secret out of the database while letting the
- * platform verify signatures offline.
+ * The signing key used by both signer and verifier is the credential's
+ * `publicKey` (= sha256(provisioningSecret)). The platform stores publicKey
+ * (never the provisioning secret), so it can verify offline. The client, which
+ * only has the provisioning secret at provisioning time, must derive the
+ * signing key via `deriveSigningKey(provisioningSecret)` before signing.
  */
 export function verifySignature(
   message: string,
@@ -87,6 +85,15 @@ export function verifySignature(
   const b = Buffer.from(expected, 'hex')
   if (a.length !== b.length) return false
   return timingSafeEqual(a, b)
+}
+
+/**
+ * Derive the signing key from a provisioning secret. Clients call this after
+ * provisioning to obtain the key they use with `signMessage`. The platform
+ * never sees the provisioning secret again — only the derived publicKey.
+ */
+export function deriveSigningKey(provisioningSecret: string): string {
+  return sha256(provisioningSecret)
 }
 
 /** Validate a provisioning secret against a stored hash (used by device auth). */

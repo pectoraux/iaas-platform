@@ -11,7 +11,7 @@ import { createContribution } from './contribution.service'
 import { calculateReward } from './reward.service'
 import { postRewardToLedger } from './ledger.service'
 import { createSettlement } from './settlement.service'
-import { signMessage } from '@/lib/domain/crypto'
+import { signMessage, deriveSigningKey } from '@/lib/domain/crypto'
 
 export interface DashboardStats {
   tenants: number
@@ -147,7 +147,8 @@ export async function runE2EFlow(opts?: {
     sequence: 1,
     payload,
   })
-  const signature = signMessage(message, provisioned.provisioningSecret)
+  const signingKey = deriveSigningKey(provisioned.provisioningSecret)
+  const signature = signMessage(message, signingKey)
 
   const ingest = await ingestEvent(tenant.id, {
     device_id: provisioned.device.id,

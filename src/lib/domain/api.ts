@@ -15,6 +15,13 @@ type Handler<TParams = Record<string, never>> = (
   params: TParams,
 ) => Promise<NextResponse | unknown>
 
+/**
+ * Next.js 16 route context. `params` is a Promise in dynamic routes.
+ */
+export interface RouteContext<TParams = Record<string, string>> {
+  params: Promise<TParams>
+}
+
 function correlationId(req: NextRequest): string {
   return req.headers.get('x-request-id') ?? randomUUID()
 }
@@ -30,16 +37,29 @@ function json(body: unknown, status = 200, req?: NextRequest) {
 /**
  * Wrap an API route handler. Resolves tenant context from headers, maps
  * domain errors to HTTP status, attaches a correlation id.
+ *
+ * Supports both static routes (no context) and dynamic routes (Next.js 16
+ * passes `{ params: Promise<...> }`).
+ *
+ * If `requireTenant` is false (bootstrap endpoints like tenant creation or the
+ * E2E flow runner), tenant resolution is skipped and ctx.tenantId is empty.
  */
-export function apiRoute<TParams = Record<string, never>>(handler: Handler<TParams>) {
+export function apiRoute<TParams = Record<string, never>>(
+  handler: Handler<TParams>,
+  opts: { requireTenant?: boolean } = { requireTenant: true },
+) {
   return async (
     req: NextRequest,
-    ctxParams?: TParams,
+    routeCtx?: RouteContext<Record<string, string>>,
   ): Promise<NextResponse> => {
     const rid = correlationId(req)
     try {
-      const tenantCtx = await resolveTenantContext(req.headers)
-      const result = await handler(tenantCtx, req, (ctxParams ?? ({} as TParams)) as TParams)
+      const tenantCtx = opts.requireTenant === false
+        ? { tenantId: '' }
+        : await resolveTenantContext(req.headers)
+      // Resolve params (Next.js 16: params is a Promise).
+      const params = (routeCtx?.params ? await routeCtx.params : ({} as Record<string, string>)) as unknown as TParams
+      const result = await handler(tenantCtx, req, params)
       if (result instanceof NextResponse) {
         result.headers.set('x-request-id', rid)
         return result
