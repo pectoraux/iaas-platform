@@ -23,11 +23,24 @@ export interface CreateContributionInput {
   // Optional explicit window; defaults derived from attestation events.
   startTime?: string
   endTime?: string
+  // Task 1: DERIVED CONTRIBUTION — a vertical-specific calculation can specify
+  // the exact quantity+unit to use for the contribution, overriding the default
+  // "sum of attestation quantities" behavior.
+  //
+  // This is critical for the VPP: the attestation stores the raw telemetry
+  // value (e.g. power_kw = 4.8 kW), but the contribution must represent the
+  // VERIFIED PERFORMANCE (e.g. 9.8 kWh delivered = actual - baseline).
+  //
+  // Without this, the generic contribution engine would use the first
+  // attestation field (power_kw) as the quantity, producing a kW value
+  // labeled as kWh — dimensionally wrong.
+  derivedQuantity?: string // decimal as string
+  derivedUnit?: string
 }
 
 export interface ContributionResult {
   id: string
-  quantity: number
+  quantity: string // decimal as string (was number before task 3)
   unit: string
   status: string
   attestation_ids: string[]
@@ -98,9 +111,22 @@ export async function createContribution(
   const asset = await db.asset.findFirst({ where: { id: firstEvent.assetId, tenantId } })
   if (!asset) throw new NotFoundError('asset', firstEvent.assetId)
 
-  // Task 3: Decimal arithmetic for quantity summation.
-  const quantity = attestations.reduce((sum, a) => sum.plus(a.quantity), new Prisma.Decimal(0))
-  const unit = capability.unit
+  // Task 1: DERIVED CONTRIBUTION.
+  // If the caller provides a derivedQuantity (e.g. VPP performance_kwh),
+  // use it instead of summing attestation quantities. This lets verticals
+  // specify the exact verified quantity (actual - baseline, verified bytes
+  // delivered, GPU-hours consumed, etc.) rather than being forced to use
+  // the first attestation field.
+  let quantity: Prisma.Decimal
+  let unit: string
+  if (input.derivedQuantity !== undefined && input.derivedUnit !== undefined) {
+    quantity = new Prisma.Decimal(input.derivedQuantity)
+    unit = input.derivedUnit
+  } else {
+    // Default: sum of attestation quantities (generic behavior).
+    quantity = attestations.reduce((sum, a) => sum.plus(a.quantity), new Prisma.Decimal(0))
+    unit = capability.unit
+  }
 
   // Derive time window from attestations.
   const occurredTimes = attestations.map((a) => a.event.occurredAt.getTime()).sort((a, b) => a - b)

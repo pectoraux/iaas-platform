@@ -64,6 +64,7 @@ model Tenant {
   vppDispatches  VppDispatch[]
   vppAssignments VppDispatchAssignment[]
   vppBaselines   VppBaseline[]
+  capacityAllocations CapacityAllocation[]
 
   @@index([slug])
 }
@@ -99,6 +100,7 @@ model NetworkDefinition {
   versions  NetworkVersion[]
   assetAssignments AssetNetworkAssignment[]
   vppPrograms    VppBuyerProgram[]
+  capacityAllocations CapacityAllocation[]
 
   @@unique([tenantId, slug])
   @@index([tenantId])
@@ -177,6 +179,7 @@ model Asset {
   contributions Contribution[]
   vppReservations VppCapacityReservation[]
   vppAssignments VppDispatchAssignment[]
+  capacityAllocations CapacityAllocation[]
 
   @@index([tenantId])
   @@index([operatorId])
@@ -399,6 +402,48 @@ model Contribution {
   @@index([tenantId])
   @@index([operatorId])
   @@index([assetId])
+}
+
+// -----------------------------------------------------------------------------
+// 8b. Capacity Allocation — PLATFORM-LEVEL primitive (extracted from VPP).
+//
+// The VPP exposed that capacity allocation is needed across ALL verticals:
+//   VPP:        10 kW → Event A: 6 kW → Event B: 4 kW → 0 available
+//   Storage:    100 TB → Project A: 70 TB → 30 TB available
+//   Compute:    16 GPU-hours → Project A: 6 → Project B: 5 → 5 available
+//   Wireless:   1 Gbps → Network A: 400 Mbps → Network B: 300 Mbps → 300 available
+//
+// This model tracks time-window-aware capacity allocations for an asset's
+// capability. It prevents double-selling: the sum of active allocations for
+// overlapping time windows cannot exceed the asset's verified capacity.
+// -----------------------------------------------------------------------------
+
+model CapacityAllocation {
+  id              String   @id @default(cuid())
+  tenantId        String
+  assetId         String
+  networkId       String
+  capabilityType  String
+  // The verified physical capacity of this asset for this capability.
+  physicalCapacity String  // decimal as string
+  // The amount allocated to this specific reservation/dispatch.
+  allocatedAmount String  // decimal as string
+  // Time window for this allocation (prevents overlap).
+  startTime       DateTime
+  endTime         DateTime
+  // What this allocation is for.
+  sourceType      String   // vpp_reservation | vpp_dispatch | storage_reservation | ...
+  sourceId        String?
+  status          String   @default("active") // active | released | expired
+  createdAt       DateTime @default(now())
+
+  tenant  Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  asset   Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  network NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([assetId, capabilityType, startTime, endTime])
+  @@index([sourceType, sourceId])
 }
 
 // -----------------------------------------------------------------------------
@@ -773,7 +818,9 @@ model VppCapacityReservation {
   operator  Operator          @relation(fields: [operatorId], references: [id], onDelete: Cascade)
   asset     Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
-  @@unique([programId, assetId, capabilityType])
+  // Note: NO unique constraint on [programId, assetId, capabilityType] because
+  // an asset can have multiple non-overlapping reservations in the same program.
+  // Capacity allocation is enforced by the CapacityAllocation model (time-window-aware).
   @@index([tenantId])
   @@index([programId])
 }
