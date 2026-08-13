@@ -289,3 +289,27 @@ Stage Summary:
 - VPP-1 proves: one battery with 3 capabilities in same network, telemetry validated per capability, full dispatch flows through generic pipeline without parallel energy abstractions.
 - GitHub: pectoraux/iaas-platform (commit 5af9d3f)
 - Vercel: iaas-ivory.vercel.app — production READY, login + E2E verified.
+
+---
+Task ID: VPP-1 economic correctness
+Agent: orchestrator
+Task: Fix 8 VPP economic issues from review.
+
+Work Log:
+1. Derived contribution: CreateContributionInput accepts derivedQuantity+derivedUnit. VPP passes performance_kwh (not power_kw). Test proves contribution.quantity == baseline.performanceKwh != attestation.power_kw.
+2. DER adapter: DERAdapter interface + SimulatedDERAdapter extracted from vpp.service.ts.
+3. Capacity integrity: reservation validates operator ownership, network assignment, capability active, reserved <= physical.
+4. No double-selling: CapacityAllocation model (platform-level), time-window-aware, SELECT FOR UPDATE. Tests: overlapping rejected, non-overlapping allowed.
+5. Transactional dispatch: createDispatch uses FOR UPDATE on reservations + atomic dispatch+assignments.
+6. No auto-funding: removed from executeDispatchAssignment. Buyer must be pre-funded.
+7. Idempotent execution: completed assignment returns existing result. Atomic status transition via conditional updateMany.
+8. Tests: 8 VPP invariant tests (all pass): derived contribution, capacity integrity (3), double-selling (2), idempotent execution, multi-asset aggregation.
+
+Platform primitive: CapacityAllocation extracted as platform-level (reusable by storage, compute, wireless).
+
+Stage Summary:
+- All 8 VPP economic fixes implemented and tested.
+- VPP-1 now correctly models: performance_kwh → contribution quantity → reward.
+- Capacity allocation is a platform primitive (not VPP-specific).
+- Production verified: login + E2E work on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit 2fdb74e)
