@@ -1,0 +1,526 @@
+// =============================================================================
+// Infrastructure-as-a-Network Platform — Canonical Domain Schema
+// =============================================================================
+// Adapted to SQLite for the MVP. Domain boundaries, immutability, idempotency,
+// audit, and tenant isolation are preserved. Enums are stored as String (SQLite
+// has no native enum), JSON as String via Prisma `Json` (supported on SQLite).
+//
+// Canonical economic pipeline:
+//   Event → Verification → Attestation → Contribution → Reward → Ledger → Settlement
+//
+// Architectural rules enforced by schema:
+//  - Published NetworkVersion is immutable (no update path exposed).
+//  - Every economically relevant object references the policy/version that produced it.
+//  - Ledger is append-only (no update/delete on LedgerEntry).
+//  - AuditLog is append-only.
+//  - Every tenant-owned entity carries tenant_id.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// 1. Tenancy
+// -----------------------------------------------------------------------------
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  status    String   @default("active") // active | suspended
+  plan      String   @default("starter") // starter | growth | enterprise
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  networks       NetworkDefinition[]
+  organizations  Organization[]
+  operators      Operator[]
+  assets         Asset[]
+  devices        Device[]
+  capabilities   Capability[]
+  events         Event[]
+  attestations   Attestation[]
+  contributions  Contribution[]
+  rewardRules    RewardRule[]
+  rewards        Reward[]
+  ledgerAccounts LedgerAccount[]
+  ledgerEntries  LedgerEntry[]
+  settlements    Settlement[]
+  auditLogs      AuditLog[]
+  idempotency    IdempotencyRecord[]
+  domainEvents   DomainEvent[]
+
+  @@index([slug])
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  createdAt DateTime @default(now())
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  operators Operator[]
+
+  @@index([tenantId])
+}
+
+// -----------------------------------------------------------------------------
+// 2. Network definitions + immutable versioning
+// -----------------------------------------------------------------------------
+
+model NetworkDefinition {
+  id               String   @id @default(cuid())
+  tenantId         String
+  name             String
+  slug             String
+  vertical         String   @default("generic") // generic | energy_vpp | storage | wireless | compute | ...
+  status           String   @default("draft") // draft | active | archived
+  currentVersionId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  tenant    Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  versions  NetworkVersion[]
+
+  @@unique([tenantId, slug])
+  @@index([tenantId])
+}
+
+model NetworkVersion {
+  // IMMUTABLE once publishedAt is set.
+  id                String    @id @default(cuid())
+  networkId         String
+  version           Int
+  configurationJson String    // full versioned config: asset_types, capabilities, verification_policy, reward_policy
+  publishedAt       DateTime?
+  createdAt         DateTime  @default(now())
+
+  network        NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
+  capabilities   Capability[]
+  rewardRules    RewardRule[]
+  events         Event[]
+  contributions  Contribution[]
+
+  @@unique([networkId, version])
+  @@index([networkId])
+}
+
+// -----------------------------------------------------------------------------
+// 3. Identity (NO catch-all "Node" abstraction)
+// -----------------------------------------------------------------------------
+
+model Operator {
+  // A person or organization contributing infrastructure.
+  // Designed so reputation can later become portable across tenants.
+  id              String   @id @default(cuid())
+  tenantId        String
+  organizationId  String?
+  status          String   @default("active") // active | suspended | offboarded
+  displayName     String
+  trustScore      Float?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  organization  Organization? @relation(fields: [organizationId], references: [id])
+  assets        Asset[]
+  contributions Contribution[]
+  rewards       Reward[]
+  settlements   Settlement[]
+
+  @@index([tenantId])
+  @@index([organizationId])
+}
+
+// -----------------------------------------------------------------------------
+// 4. Asset + Device (an asset can have many devices)
+// -----------------------------------------------------------------------------
+
+model Asset {
+  id            String   @id @default(cuid())
+  tenantId      String
+  operatorId    String
+  assetType     String   // battery | vehicle | storage_server | gpu | wifi_ap | sensor | ...
+  name          String
+  status        String   @default("registered") // registered | active | retired
+  location      String?
+  metadataJson  String   @default("{}")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  operator   Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  devices    Device[]
+  events     Event[]
+  contributions Contribution[]
+
+  @@index([tenantId])
+  @@index([operatorId])
+}
+
+model Device {
+  // Technical interface to an asset. Not the asset itself.
+  id            String   @id @default(cuid())
+  tenantId      String
+  assetId       String
+  deviceType    String   // controller | smart_meter | inverter | gateway | ...
+  manufacturer  String?
+  model         String?
+  status        String   @default("provisioned") // provisioned | active | suspended | revoked
+  metadataJson  String   @default("{}")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  asset       Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  credential  DeviceCredential?
+  events      Event[]
+
+  @@index([tenantId])
+  @@index([assetId])
+}
+
+model DeviceCredential {
+  // Secrets are NEVER stored in plaintext. We store a SHA-256 hash of the
+  // provisioning secret and the public key for signature verification.
+  // tenantId is a plain scoping field (no relation back to Tenant to keep the
+  // Tenant relation list focused on first-class domain entities).
+  id                     String    @id @default(cuid())
+  tenantId               String
+  deviceId               String    @unique
+  credentialType         String    @default("hmac_sha256") // hmac_sha256 | ed25519
+  publicKey              String    // HMAC: derived key base; Ed25519: verifying key
+  secretHash             String    // hash of the shared device secret
+  provisioningSecretHash String?   // one-time provisioning secret hash
+  status                 String    @default("active") // active | suspended | revoked
+  createdAt              DateTime  @default(now())
+  activatedAt            DateTime?
+  suspendedAt            DateTime?
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+// -----------------------------------------------------------------------------
+// 5. Capability (versioned schemas, separate from telemetry)
+// -----------------------------------------------------------------------------
+
+model Capability {
+  id              String   @id @default(cuid())
+  tenantId        String
+  networkVersionId String?
+  capabilityType  String   // energy_discharge | storage_capacity | bandwidth | compute | measured_output | ...
+  schemaVersion   Int      @default(1)
+  fieldsJson      String   @default("{}") // field name -> type
+  unit            String   @default("unit")
+  createdAt       DateTime @default(now())
+
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  networkVersion  NetworkVersion? @relation(fields: [networkVersionId], references: [id])
+  contributions   Contribution[]
+
+  @@index([tenantId])
+  @@index([capabilityType])
+}
+
+// -----------------------------------------------------------------------------
+// 6. Event (generic, immutable, signed)
+// -----------------------------------------------------------------------------
+
+model Event {
+  id              String   @id @default(cuid())
+  tenantId        String
+  networkVersionId String
+  assetId         String
+  deviceId        String?
+  externalEventId String?  // client-supplied event_id for idempotency
+  eventType       String   // telemetry | observation | command_ack | usage | measurement
+  occurredAt      DateTime
+  receivedAt      DateTime @default(now())
+  sequence        Int?
+  payloadJson     String   @default("{}")
+  schemaVersion   Int      @default(1)
+  status          String   @default("pending") // pending | verified | rejected | failed
+  signature       String?
+  idempotencyKey  String?  // for the ingest request
+  createdAt       DateTime @default(now())
+
+  tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  networkVersion  NetworkVersion      @relation(fields: [networkVersionId], references: [id])
+  asset           Asset               @relation(fields: [assetId], references: [id])
+  device          Device?             @relation(fields: [deviceId], references: [id])
+  verification    VerificationResult?
+  attestations    Attestation[]
+
+  @@unique([tenantId, externalEventId])
+  @@index([tenantId])
+  @@index([assetId])
+  @@index([deviceId])
+  @@index([status])
+}
+
+model VerificationResult {
+  id                   String   @id @default(cuid())
+  tenantId             String
+  eventId              String   @unique
+  policyVersion        Int
+  verifierVersion      String
+  checksJson           String   @default("[]") // [{ name, status, detail }]
+  overallStatus        String   // verified | rejected
+  risk                 Float    @default(0)
+  confidence           Float    @default(1)
+  createdAt            DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([overallStatus])
+}
+
+// -----------------------------------------------------------------------------
+// 7. Attestation (verified claim about an event — NOT a boolean)
+// -----------------------------------------------------------------------------
+
+model Attestation {
+  id                        String   @id @default(cuid())
+  tenantId                  String
+  eventId                   String
+  claimType                 String   // valid_measurement | valid_usage | ...
+  quantity                  Float
+  unit                      String
+  status                    String   @default("verified") // verified | disputed | revoked
+  verificationPolicyVersion Int
+  verifierVersion           String
+  createdAt                 DateTime @default(now())
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  contributions Contribution[]
+
+  @@index([tenantId])
+  @@index([eventId])
+}
+
+// -----------------------------------------------------------------------------
+// 8. Contribution (economically valid work — NOT proof, NOT payment)
+// -----------------------------------------------------------------------------
+
+model Contribution {
+  id               String   @id @default(cuid())
+  tenantId         String
+  networkVersionId String
+  operatorId       String
+  assetId          String
+  capabilityId     String
+  quantity         Float
+  unit             String
+  startTime        DateTime
+  endTime          DateTime
+  attestationIdsJson String  @default("[]")
+  status           String   @default("created") // created | settled | voided
+  policyVersion    Int
+  idempotencyKey   String?
+  createdAt        DateTime @default(now())
+
+  tenant          Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  networkVersion  NetworkVersion @relation(fields: [networkVersionId], references: [id])
+  operator        Operator       @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  asset           Asset          @relation(fields: [assetId], references: [id])
+  capability      Capability     @relation(fields: [capabilityId], references: [id])
+  attestations    Attestation[]
+  rewards         Reward[]
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId])
+  @@index([operatorId])
+  @@index([assetId])
+}
+
+// -----------------------------------------------------------------------------
+// 9. Reward (configurable engine — fixed_rate | revenue_share)
+// -----------------------------------------------------------------------------
+
+model RewardRule {
+  // Versioned reward policy attached to a network version.
+  id               String   @id @default(cuid())
+  tenantId         String
+  networkVersionId String
+  ruleType         String   // fixed_rate | revenue_share
+  rate             String   // decimal as string for precision
+  unit             String
+  currency         String   @default("USD")
+  ruleVersion      Int      @default(1)
+  configJson       String   @default("{}")
+  createdAt        DateTime @default(now())
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  networkVersion NetworkVersion  @relation(fields: [networkVersionId], references: [id])
+  rewards        Reward[]
+
+  @@index([tenantId])
+  @@index([networkVersionId])
+}
+
+model Reward {
+  id              String   @id @default(cuid())
+  tenantId        String
+  contributionId  String
+  operatorId      String
+  amount          Float
+  currency        String   @default("USD")
+  ruleVersion     Int
+  ruleId          String
+  rule            RewardRule @relation(fields: [ruleId], references: [id])
+  status          String   @default("calculated") // calculated | posted | settled | failed
+  idempotencyKey  String?
+  createdAt       DateTime @default(now())
+
+  tenant        Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contribution  Contribution @relation(fields: [contributionId], references: [id], onDelete: Cascade)
+  operator      Operator     @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  settlement    Settlement?
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId])
+  @@index([contributionId])
+}
+
+// -----------------------------------------------------------------------------
+// 10. Ledger (append-only; account + entries)
+// -----------------------------------------------------------------------------
+
+model LedgerAccount {
+  id         String   @id @default(cuid())
+  tenantId   String
+  ownerId    String   // operator id (or "platform")
+  ownerType  String   @default("operator") // operator | platform | buyer
+  currency   String   @default("USD")
+  createdAt  DateTime @default(now())
+
+  tenant  Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  entries LedgerEntry[]
+
+  @@unique([tenantId, ownerId, ownerType, currency])
+  @@index([tenantId])
+}
+
+model LedgerEntry {
+  // APPEND-ONLY. No update path exposed in service layer.
+  // referenceType/referenceId are polymorphic (reward | settlement | contribution)
+  // so we do NOT model a Prisma relation here — lookups are done by service code.
+  id             String   @id @default(cuid())
+  tenantId       String
+  accountId      String
+  amount         Float    // signed: +credit / -debit
+  currency       String   @default("USD")
+  entryType      String   // reward_credit | platform_fee | settlement_debit | settlement_credit | adjustment
+  referenceType  String?  // reward | settlement | contribution
+  referenceId    String?
+  idempotencyKey String?
+  createdAt      DateTime @default(now())
+
+  tenant  LedgerAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  tenantRef Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId])
+  @@index([accountId])
+  @@index([referenceType, referenceId])
+}
+
+// -----------------------------------------------------------------------------
+// 11. Settlement (PaymentsService abstraction over PaySwap)
+// -----------------------------------------------------------------------------
+
+model Settlement {
+  id               String   @id @default(cuid())
+  tenantId         String
+  rewardId         String   @unique
+  operatorId       String
+  amount           Float
+  currency         String   @default("USD")
+  status           String   @default("created") // created | submitted | processing | completed | failed | retrying
+  idempotencyKey   String?
+  provider         String   @default("payswap_sandbox")
+  providerPayoutId String?
+  failureReason    String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reward  Reward  @relation(fields: [rewardId], references: [id], onDelete: Cascade)
+  operator Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId])
+  @@index([status])
+}
+
+// -----------------------------------------------------------------------------
+// 12. Audit log (append-only, application-immutable)
+// -----------------------------------------------------------------------------
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  tenantId     String
+  actorId      String?
+  eventType    String   // tenant.created | network.published | operator.created | ...
+  resourceType String
+  resourceId   String
+  metadataJson String   @default("{}")
+  createdAt    DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([eventType])
+  @@index([resourceType, resourceId])
+}
+
+// -----------------------------------------------------------------------------
+// 13. Idempotency records (store the response for replay)
+// -----------------------------------------------------------------------------
+
+model IdempotencyRecord {
+  id           String   @id @default(cuid())
+  tenantId     String
+  key          String
+  resourceType String
+  resourceId   String?
+  responseJson String
+  createdAt    DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, key, resourceType])
+  @@index([tenantId])
+}
+
+// -----------------------------------------------------------------------------
+// 14. Domain event outbox (Redis/Kafka-replaceable transport abstraction)
+// -----------------------------------------------------------------------------
+
+model DomainEvent {
+  id           String   @id @default(cuid())
+  tenantId     String
+  eventType    String   // DeviceEventAccepted | VerificationCompleted | ...
+  aggregateId  String
+  version      Int      @default(1)
+  payloadJson  String   @default("{}")
+  occurredAt   DateTime @default(now())
+  processed    Boolean  @default(false)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([eventType])
+  @@index([processed])
+}
