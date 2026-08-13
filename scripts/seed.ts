@@ -65,9 +65,16 @@ async function main() {
   console.log('🌱 Seeding Infrastructure-as-a-Network platform...\n')
 
   // ---- Resolve credentials from env (no hardcoded real credentials) ----
+  // Admin credential is env-configurable; default is random (never committed).
   const adminEmail = process.env.SEED_ADMIN_EMAIL || 'admin@iaas.local'
   const adminPassword = process.env.SEED_ADMIN_PASSWORD || generatePassword()
-  const demoPassword = process.env.SEED_DEMO_PASSWORD || generatePassword()
+  // Demo accounts use FIXED, predictable passwords (they're demo accounts, not secrets).
+  // These match the DEMO_ACCOUNTS array in the frontend (src/app/page.tsx).
+  // They can be overridden via SEED_DEMO_* env vars for production.
+  const demoAdminPassword = process.env.SEED_DEMO_ADMIN_PASSWORD || 'DemoAdmin123!'
+  const demoOwnerPassword = process.env.SEED_DEMO_OWNER_PASSWORD || 'DemoOwner123!'
+  const demoOperatorPassword = process.env.SEED_DEMO_OPERATOR_PASSWORD || 'DemoOperator123!'
+  const demoViewerPassword = process.env.SEED_DEMO_VIEWER_PASSWORD || 'DemoViewer123!'
 
   // ---- 1. Demo tenant with infrastructure data ----
   console.log('📋 Creating demo tenant...')
@@ -175,9 +182,10 @@ async function main() {
   })
 
   // Demo accounts — all linked to the Acme tenant.
+  // Each uses its own fixed, predictable password matching the frontend.
   await ensureUser({
     email: 'demo-admin@iaas.network',
-    password: demoPassword,
+    password: demoAdminPassword,
     role: 'admin',
     displayName: 'Demo Admin',
     isDemo: true,
@@ -185,7 +193,7 @@ async function main() {
   })
   await ensureUser({
     email: 'demo-owner@iaas.network',
-    password: demoPassword,
+    password: demoOwnerPassword,
     role: 'owner',
     displayName: 'Demo Owner',
     isDemo: true,
@@ -193,7 +201,7 @@ async function main() {
   })
   await ensureUser({
     email: 'demo-operator@iaas.network',
-    password: demoPassword,
+    password: demoOperatorPassword,
     role: 'operator',
     displayName: 'Demo Operator',
     isDemo: true,
@@ -201,7 +209,7 @@ async function main() {
   })
   await ensureUser({
     email: 'demo-viewer@iaas.network',
-    password: demoPassword,
+    password: demoViewerPassword,
     role: 'viewer',
     displayName: 'Demo Viewer',
     isDemo: true,
@@ -211,13 +219,13 @@ async function main() {
   console.log('\n✅ Seed complete.')
   console.log('\n📋 Login credentials:')
   console.log(`  Admin:          ${adminEmail} / ${adminPassword}`)
-  console.log(`  Demo Admin:     demo-admin@iaas.network / ${demoPassword}`)
-  console.log(`  Demo Owner:     demo-owner@iaas.network / ${demoPassword}`)
-  console.log(`  Demo Operator:  demo-operator@iaas.network / ${demoPassword}`)
-  console.log(`  Demo Viewer:    demo-viewer@iaas.network / ${demoPassword}`)
-  if (!process.env.SEED_ADMIN_PASSWORD || !process.env.SEED_DEMO_PASSWORD) {
-    console.log('\n  ⚠️  Passwords were randomly generated. To use fixed passwords, set:')
-    console.log('     SEED_ADMIN_PASSWORD=... SEED_DEMO_PASSWORD=... bun run seed')
+  console.log(`  Demo Admin:     demo-admin@iaas.network / ${demoAdminPassword}`)
+  console.log(`  Demo Owner:     demo-owner@iaas.network / ${demoOwnerPassword}`)
+  console.log(`  Demo Operator:  demo-operator@iaas.network / ${demoOperatorPassword}`)
+  console.log(`  Demo Viewer:    demo-viewer@iaas.network / ${demoViewerPassword}`)
+  if (!process.env.SEED_ADMIN_PASSWORD) {
+    console.log('\n  ⚠️  Admin password was randomly generated. To use a fixed password, set:')
+    console.log('     SEED_ADMIN_PASSWORD=... bun run seed')
   }
 }
 

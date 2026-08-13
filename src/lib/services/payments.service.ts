@@ -7,12 +7,20 @@
 // import PaySwap directly.
 //
 //   Reward → Ledger → Settlement Instruction → PaymentsService → PaySwap
+//
+// PRECISION (reviewer fix): the `amount` field is a STRING (decimal as string),
+// NOT a JavaScript number. This preserves exact decimal representation from
+// the ledger all the way to the payment provider. The adapter converts to
+// whatever exact representation the provider requires.
+//
+// Rule: No monetary value becomes a JavaScript `number` anywhere between
+// Ledger and the external payment provider.
 // =============================================================================
 
 export interface PayoutRequest {
   idempotency_key: string
   recipient_ref: string // operator id (would map to a PaySwap recipient in prod)
-  amount: number
+  amount: string // decimal as string — NEVER a JS number (precision preservation)
   currency: string
   reference: string
 }
@@ -32,6 +40,10 @@ export interface PayoutStatus {
 
 /**
  * The payments interface. Swappable: PaySwap sandbox, Stripe, mock, etc.
+ *
+ * CRITICAL: `amount` in PayoutRequest is always a string (decimal representation).
+ * The adapter is responsible for converting to the provider's required format
+ * (string, integer cents, Decimal, etc.) WITHOUT going through JS number.
  */
 export interface PaymentsService {
   readonly provider: string
@@ -47,6 +59,9 @@ export interface PaymentsService {
 // Simulates a payout provider with deterministic completion. In sandbox mode,
 // payouts complete immediately (configurable). This lets the full E2E flow run
 // without external dependencies.
+//
+// PRECISION: the adapter receives the amount as a string and stores/passes it
+// as a string. No conversion to JS number occurs.
 // ---------------------------------------------------------------------------
 
 const SANDBOX_PAYOUTS = new Map<string, PayoutStatus & { request: PayoutRequest }>()
@@ -63,6 +78,7 @@ export class PaySwapSandboxAdapter implements PaymentsService {
     SANDBOX_PAYOUTS.set(providerPayoutId, {
       provider_payout_id: providerPayoutId,
       status,
+      // Amount stays as string — no precision loss.
       raw: { recipient_ref: req.recipient_ref, amount: req.amount, currency: req.currency },
       request: req,
     })

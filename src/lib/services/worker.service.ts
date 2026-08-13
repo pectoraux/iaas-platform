@@ -273,7 +273,7 @@ export async function processSettlementOutbox(tenantId?: string): Promise<{ proc
       const payout = await paymentsService.create_payout({
         idempotency_key: settlement.idempotencyKey!,
         recipient_ref: settlement.operatorId,
-        amount: Number(settlement.amount), // payment provider API expects number
+        amount: settlement.amount.toString(), // PRECISION: string, not JS number
         currency: settlement.currency,
         reference: `reward:${settlement.rewardId}`,
       })
