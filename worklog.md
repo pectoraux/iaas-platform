@@ -202,3 +202,42 @@ Stage Summary:
 - GitHub: pectoraux/iaas-platform (commit 5b0f748)
 - Vercel: iaas-ivory.vercel.app (production READY)
 - Platform is now ready for the VPP implementation phase.
+
+---
+Task ID: hardening-3 (final pre-VPP correctness)
+Agent: orchestrator
+Task: Implement 4 final pre-VPP fixes from third code review.
+
+Work Log:
+1. Explicit capability binding (no fallback):
+   - IngestEventInput accepts capability_type param
+   - ingestion resolves assignment with capability_type; rejects if null
+   - Worker: removed all '?? capabilities[0]' fallbacks
+   - Worker rejects null capabilityType as 'failed'; unmatched as 'rejected'
+   - Attestation + contribution: throw on null, no silent fallback
+   - Tests: capabilityType persisted; ambiguous asset rejected
+
+2. Concurrency-safe buyer funding (SELECT FOR UPDATE):
+   - postRewardToLedger: balance check + debit in SAME db.$transaction
+   - Locks LedgerAccount row FOR UPDATE (serializes all postings to buyer)
+   - Two concurrent rewards: exactly ONE succeeds, other rejected
+   - Buyer balance NEVER goes negative
+   - Test: concurrent rewards exceeding funds → 1 pass, 1 fail, balance >= 0
+
+3. Multi-capability per network:
+   - @@unique: [assetId, networkId] → [assetId, networkId, capabilityType]
+   - Battery can have energy_discharge + frequency_response + energy_capacity
+   - resolveAssetNetworkAssignment: requires capability_type when ambiguous
+   - Test: one asset, two capabilities in same network
+
+4. Atomic worker state transitions:
+   - Settlement completion: status + reward + ledger debit + outbox in ONE tx
+   - Verification: confirmed atomic (verification result + event status + outbox)
+   - Test: verifies all parts exist together after settlement completion
+
+Tests: pre-vpp.test.ts (6 tests, all pass on Neon)
+Stage Summary:
+- All 4 final pre-VPP fixes implemented, tested, deployed.
+- Vercel production verified: E2E all 5 checks pass, ledger balanced, settlement completed.
+- GitHub: pectoraux/iaas-platform (commit 9cac478)
+- Generic platform core is now correctness-hardened. Ready for VPP.
