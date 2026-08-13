@@ -116,7 +116,11 @@ export async function runE2EFlow(opts?: {
 }): Promise<E2EFlowResult> {
   const templateKey = opts?.templateKey ?? 'generic-resource-network'
   const tenantSlug = opts?.tenantSlug ?? `e2e-${Date.now()}`
-  const payload = opts?.payload ?? { output_value: 4.8, duration_seconds: 3600 }
+  // Use template-appropriate default payload if none specified.
+  const defaultPayload = templateKey === 'energy-vpp'
+    ? { power_kw: 4.8, available_energy_kwh: 13.5, state_of_charge_pct: 72 }
+    : { output_value: 4.8, duration_seconds: 3600 }
+  const payload = opts?.payload ?? defaultPayload
 
   // 1. Tenant
   const tenant = await createTenant({ name: `E2E ${tenantSlug}`, slug: tenantSlug, plan: 'growth' })
