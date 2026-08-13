@@ -1,13 +1,17 @@
 // =============================================================================
 // Domain event bus (outbox pattern).
 //
+// Task 1 (atomic outbox): `emit` MUST be called inside the same database
+// transaction as the main operation. This guarantees that if the main operation
+// commits, the outbox row also commits — no orphaned events, no missing events.
+//
 // The transport is pluggable. For the MVP we use an in-process outbox table
-// (DomainEvent) processed synchronously by the worker. The interface is
-// designed so Redis/BullMQ or Kafka/Redpanda can replace the transport without
-// changing domain logic — only the `dispatch`/`consume` adapters change.
+// (DomainEvent) processed by the worker. The interface is designed so Redis/
+// BullMQ or Kafka/Redpanda can replace the transport without changing domain
+// logic — only the `dispatch`/`consume` adapters change.
 // =============================================================================
 
-import { db } from '@/lib/db'
+import { db, type ExtendedPrismaClient, type ExtendedTransactionClient } from '@/lib/db'
 import { randomUUID } from 'crypto'
 
 export const DomainEventTypes = {
@@ -33,14 +37,25 @@ export interface DomainEventPayload<T = Record<string, unknown>> {
   payload: T
 }
 
-/** Append a domain event to the outbox. */
-export async function emit<T>(event: Omit<DomainEventPayload<T>, 'event_id' | 'occurred_at'>) {
+/**
+ * Append a domain event to the outbox.
+ *
+ * CRITICAL (task 1): pass a `tx` (transaction client) when calling this inside
+ * a db.$transaction. This ensures the outbox row is committed atomically with
+ * the main operation. If the transaction rolls back, the outbox row is also
+ * rolled back — no orphaned events.
+ */
+export async function emit<T>(
+  event: Omit<DomainEventPayload<T>, 'event_id' | 'occurred_at'>,
+  tx?: ExtendedTransactionClient,
+): Promise<DomainEventPayload<T>> {
+  const client = tx ?? db
   const evt: DomainEventPayload<T> = {
     ...event,
     event_id: randomUUID(),
     occurred_at: new Date().toISOString(),
   }
-  await db.domainEvent.create({
+  await client.domainEvent.create({
     data: {
       tenantId: evt.tenant_id,
       eventType: evt.event_type,

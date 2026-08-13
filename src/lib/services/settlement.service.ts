@@ -75,34 +75,44 @@ export async function createSettlement(
     throw new ValidationError(`Reward ${rewardId} must be posted before settlement (current: ${reward.status})`)
   }
 
-  // Create the settlement instruction (CREATED state only — no provider call).
-  const settlement = await db.settlement.create({
-    data: {
-      tenantId,
-      rewardId: reward.id,
-      operatorId: reward.operatorId,
-      amount: reward.amount,
-      currency: reward.currency,
-      status: 'created',
-      idempotencyKey,
-      provider: paymentsService.provider,
-    },
+  // ATOMIC (task 1): create settlement + emit outbox in the SAME transaction.
+  const settlement = await db.$transaction(async (tx) => {
+    const created = await tx.settlement.create({
+      data: {
+        tenantId,
+        rewardId: reward.id,
+        operatorId: reward.operatorId,
+        amount: reward.amount,
+        currency: reward.currency,
+        status: 'created',
+        idempotencyKey,
+        provider: paymentsService.provider,
+      },
+    })
+
+    // Emit the outbox event IN THE SAME TRANSACTION (task 1).
+    await emit(
+      {
+        event_type: DomainEventTypes.SettlementRequested,
+        aggregate_id: created.id,
+        tenant_id: tenantId,
+        version: 1,
+        payload: { rewardId: reward.id, amount: reward.amount.toString() },
+      },
+      tx,
+    )
+
+    return created
   })
 
+  // Audit is best-effort (outside the transaction).
   await appendAudit({
     tenantId,
     actorId,
     eventType: AuditEvents.SettlementCreated,
     resourceType: 'settlement',
     resourceId: settlement.id,
-    metadata: { rewardId: reward.id, amount: reward.amount, currency: reward.currency },
-  })
-  await emit({
-    event_type: DomainEventTypes.SettlementRequested,
-    aggregate_id: settlement.id,
-    tenant_id: tenantId,
-    version: 1,
-    payload: { rewardId: reward.id, amount: reward.amount },
+    metadata: { rewardId: reward.id, amount: reward.amount.toString(), currency: reward.currency },
   })
 
   return {

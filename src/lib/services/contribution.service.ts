@@ -10,6 +10,7 @@
 // =============================================================================
 
 import { db } from '@/lib/db'
+import { Prisma } from '@prisma/client'
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import { emit, DomainEventTypes } from '@/lib/domain/events'
@@ -76,10 +77,11 @@ export async function createContribution(
   const allSameVersion = attestations.every((a) => a.event.networkVersionId === networkVersionId)
   if (!allSameVersion) throw new ValidationError('All attestations must reference the same network version')
 
-  // Resolve capability for this version. Deterministic.
+  // Task 4: resolve capability from the event's explicit capabilityType,
+  // NOT configuration.capabilities[0].
   const firstAtt = attestations[0]
   const configuration = await getPublishedConfiguration(networkVersionId)
-  const capType = configuration.capabilities[0]?.type ?? 'measured_output'
+  const capType = firstAtt.event.capabilityType ?? configuration.capabilities[0]?.type ?? 'measured_output'
   const capability = input.capabilityId
     ? await db.capability.findFirst({ where: { id: input.capabilityId, tenantId } }).then((c) => c ?? null)
     : await getCapabilityForVersion(tenantId, networkVersionId, capType)
@@ -90,10 +92,8 @@ export async function createContribution(
   const asset = await db.asset.findFirst({ where: { id: firstEvent.assetId, tenantId } })
   if (!asset) throw new NotFoundError('asset', firstEvent.assetId)
 
-  // Derive quantity SERVER-SIDE: sum of attestation quantities.
-  // (For multi-attestation windows; for single events this equals the event's
-  // measured value.)
-  const quantity = attestations.reduce((sum, a) => sum + a.quantity, 0)
+  // Task 3: Decimal arithmetic for quantity summation.
+  const quantity = attestations.reduce((sum, a) => sum.plus(a.quantity), new Prisma.Decimal(0))
   const unit = capability.unit
 
   // Derive time window from attestations.
@@ -101,28 +101,38 @@ export async function createContribution(
   const startTime = input.startTime ? new Date(input.startTime) : new Date(occurredTimes[0])
   const endTime = input.endTime ? new Date(input.endTime) : new Date(occurredTimes[occurredTimes.length - 1])
 
-  const contribution = await db.contribution.create({
-    data: {
-      tenantId,
-      networkVersionId,
-      operatorId: asset.operatorId,
-      assetId: asset.id,
-      capabilityId: capability.id,
-      quantity,
-      unit,
-      startTime,
-      endTime,
-      attestationIdsJson: JSON.stringify(input.attestationIds),
-      status: 'created',
-      policyVersion: configuration.capabilities[0]?.schema_version ?? 1,
-      idempotencyKey,
-    },
-  })
+  // Task 1: atomic contribution creation + outbox emit.
+  const contribution = await db.$transaction(async (tx) => {
+    const created = await tx.contribution.create({
+      data: {
+        tenantId,
+        networkVersionId,
+        operatorId: asset.operatorId,
+        assetId: asset.id,
+        capabilityId: capability.id,
+        quantity,
+        unit,
+        startTime,
+        endTime,
+        attestationIdsJson: JSON.stringify(input.attestationIds),
+        status: 'created',
+        policyVersion: configuration.capabilities[0]?.schema_version ?? 1,
+        idempotencyKey,
+      },
+    })
 
-  // Link attestations to the contribution.
-  await db.attestation.updateMany({
-    where: { id: { in: input.attestationIds } },
-    data: {}, // no FK; linkage is via attestationIdsJson on the contribution
+    await emit(
+      {
+        event_type: DomainEventTypes.ContributionCreated,
+        aggregate_id: created.id,
+        tenant_id: tenantId,
+        version: 1,
+        payload: { quantity: quantity.toString(), unit, operatorId: asset.operatorId, attestationIds: input.attestationIds },
+      },
+      tx,
+    )
+
+    return created
   })
 
   await appendAudit({
@@ -131,19 +141,12 @@ export async function createContribution(
     eventType: AuditEvents.ContributionCreated,
     resourceType: 'contribution',
     resourceId: contribution.id,
-    metadata: { quantity, unit, operatorId: asset.operatorId, assetId: asset.id, attestationIds: input.attestationIds, networkVersionId },
-  })
-  await emit({
-    event_type: DomainEventTypes.ContributionCreated,
-    aggregate_id: contribution.id,
-    tenant_id: tenantId,
-    version: 1,
-    payload: { quantity, unit, operatorId: asset.operatorId, attestationIds: input.attestationIds },
+    metadata: { quantity: quantity.toString(), unit, operatorId: asset.operatorId, assetId: asset.id, attestationIds: input.attestationIds, networkVersionId, capabilityType: capType },
   })
 
   return {
     id: contribution.id,
-    quantity,
+    quantity: quantity.toString(),
     unit,
     status: contribution.status,
     attestation_ids: input.attestationIds,

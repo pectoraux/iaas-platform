@@ -276,6 +276,10 @@ model Event {
   networkVersionId String
   assetId         String
   deviceId        String?
+  // Task 4: explicit capability binding. Resolved from the asset's network
+  // assignment at ingest time. Events are NOT validated against capabilities[0]
+  // — they are validated against the specific capability the asset is assigned to.
+  capabilityType  String?
   externalEventId String?  // client-supplied event_id for idempotency
   eventType       String   // telemetry | observation | command_ack | usage | measurement
   occurredAt      DateTime
@@ -283,9 +287,13 @@ model Event {
   sequence        Int?
   payloadJson     String   @default("{}")
   schemaVersion   Int      @default(1)
-  status          String   @default("queued") // queued | verified | rejected | failed
+  status          String   @default("queued") // queued | processing | verified | rejected | failed
   signature       String?
   idempotencyKey  String?  // for the ingest request
+  // Task 2: worker lease. Set when a worker atomically claims the event.
+  // Prevents two workers from processing the same event.
+  claimedAt       DateTime?
+  leaseExpiresAt  DateTime?
   createdAt       DateTime @default(now())
 
   tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -329,7 +337,7 @@ model Attestation {
   tenantId                  String
   eventId                   String
   claimType                 String   // valid_measurement | valid_usage | ...
-  quantity                  Float
+  quantity                  Decimal @db.Decimal(20, 8)
   unit                      String
   status                    String   @default("verified") // verified | disputed | revoked
   verificationPolicyVersion Int      // = NetworkVersion.version (task 6)
@@ -355,7 +363,7 @@ model Contribution {
   operatorId       String
   assetId          String
   capabilityId     String
-  quantity         Float
+  quantity         Decimal @db.Decimal(20, 8)
   unit             String
   startTime        DateTime
   endTime          DateTime
@@ -409,7 +417,7 @@ model Reward {
   tenantId        String
   contributionId  String
   operatorId      String
-  amount          Float
+  amount          Decimal @db.Decimal(20, 8)
   currency        String   @default("USD")
   ruleVersion     Int
   ruleId          String
@@ -495,7 +503,7 @@ model LedgerEntry {
   tenantId  String
   postingId String
   accountId String
-  amount    Float    // signed: +credit / -debit; sum per posting MUST = 0
+  amount    Decimal @db.Decimal(20, 8) // signed: +credit / -debit; sum per posting MUST = 0
   currency  String   @default("USD")
   entryType String   // reward_credit | platform_fee | buyer_debit | settlement_debit | settlement_credit | funding_credit | funding_debit
   createdAt DateTime @default(now())
@@ -522,13 +530,16 @@ model Settlement {
   tenantId         String
   rewardId         String   @unique
   operatorId       String
-  amount           Float
+  amount           Decimal @db.Decimal(20, 8)
   currency         String   @default("USD")
-  status           String   @default("created") // created | submitted | processing | completed | failed | retrying
+  status           String   @default("created") // created | claiming | submitted | processing | completed | failed | retrying
   idempotencyKey   String?
   provider         String   @default("payswap_sandbox")
   providerPayoutId String?
   failureReason    String?
+  // Task 2: worker lease for settlement processing.
+  claimedAt       DateTime?
+  leaseExpiresAt  DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 

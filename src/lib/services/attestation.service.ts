@@ -4,9 +4,16 @@
 // Rule 1: Telemetry is not proof.
 // An Attestation is a verified claim about an event. Multiple attestations per
 // event are supported. Verification is NOT collapsed into a boolean.
+//
+// Task 4: the attestation uses the event's explicit `capabilityType` to
+// resolve the specific capability (not capabilities[0]). The quantity is
+// derived from the specific capability's first defined field.
+//
+// Task 3: quantity is stored as Decimal.
 // =============================================================================
 
 import { db } from '@/lib/db'
+import { Prisma } from '@prisma/client'
 import { NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import { emit, DomainEventTypes } from '@/lib/domain/events'
@@ -21,8 +28,12 @@ export interface CreateAttestationInput {
 
 /**
  * Auto-create an attestation from a verified event. Derives quantity/unit from
- * the event payload + capability definition. This is the canonical
- * "this happened" claim.
+ * the event payload + the event's specific capability definition.
+ *
+ * Task 4: uses `capabilityType` from the event to find the specific capability,
+ * NOT capabilities[0]. This ensures a multi-capability asset (e.g. a battery
+ * with energy_discharge + frequency_response) is attested against the correct
+ * capability schema.
  *
  * The claim is derived SERVER-SIDE from the verified payload — never from
  * client-supplied economic values.
@@ -31,6 +42,7 @@ export async function createAttestationForEvent(
   tenantId: string,
   eventId: string,
   configuration: VersionConfiguration,
+  capabilityType?: string | null,
   actorId?: string,
 ) {
   const event = await db.event.findFirst({ where: { id: eventId, tenantId }, include: { verification: true } })
@@ -39,35 +51,54 @@ export async function createAttestationForEvent(
     throw new ValidationError('Cannot attest an unverified event')
   }
 
-  // Derive the claim quantity from the payload. The capability definition
-  // tells us which field is the "measured" quantity.
-  const payload = JSON.parse(event.payloadJson) as Record<string, number>
-  const cap = configuration.capabilities[0]
+  // Task 4: resolve the SPECIFIC capability for this event, not capabilities[0].
+  const resolvedCapType = capabilityType ?? event.capabilityType ?? configuration.capabilities[0]?.type
+  const cap = configuration.capabilities.find((c) => c.type === resolvedCapType) ?? configuration.capabilities[0]
   const unit = cap?.unit ?? 'unit'
-  // Heuristic: prefer the first numeric field that matches a capability field.
-  let quantity = 0
+
+  // Derive the claim quantity from the payload using the specific capability's fields.
+  const payload = JSON.parse(event.payloadJson) as Record<string, unknown>
+  let quantity = new Prisma.Decimal(0)
   if (cap) {
     const fieldNames = Object.keys(cap.fields)
     const measuredField = fieldNames.find((f) => payload[f] != null) ?? fieldNames[0]
-    quantity = typeof payload[measuredField] === 'number' ? payload[measuredField] : 0
+    if (measuredField && typeof payload[measuredField] === 'number') {
+      quantity = new Prisma.Decimal(payload[measuredField] as number)
+    }
   } else {
     const firstNum = Object.values(payload).find((v) => typeof v === 'number')
-    quantity = (firstNum as number) ?? 0
+    if (firstNum != null) quantity = new Prisma.Decimal(firstNum as number)
   }
 
   const claimType = `valid_${event.eventType}`
 
-  const attestation = await db.attestation.create({
-    data: {
-      tenantId,
-      eventId,
-      claimType,
-      quantity,
-      unit,
-      status: 'verified',
-      verificationPolicyVersion: event.verification.policyVersion,
-      verifierVersion: event.verification.verifierVersion,
-    },
+  const attestation = await db.$transaction(async (tx) => {
+    const created = await tx.attestation.create({
+      data: {
+        tenantId,
+        eventId,
+        claimType,
+        quantity,
+        unit,
+        status: 'verified',
+        verificationPolicyVersion: event.verification!.policyVersion,
+        verifierVersion: event.verification!.verifierVersion,
+      },
+    })
+
+    // ATOMIC (task 1): emit outbox in the same transaction.
+    await emit(
+      {
+        event_type: DomainEventTypes.AttestationCreated,
+        aggregate_id: created.id,
+        tenant_id: tenantId,
+        version: 1,
+        payload: { eventId, claimType, quantity: quantity.toString(), unit },
+      },
+      tx,
+    )
+
+    return created
   })
 
   await appendAudit({
@@ -76,14 +107,7 @@ export async function createAttestationForEvent(
     eventType: AuditEvents.AttestationCreated,
     resourceType: 'attestation',
     resourceId: attestation.id,
-    metadata: { eventId, claimType, quantity, unit },
-  })
-  await emit({
-    event_type: DomainEventTypes.AttestationCreated,
-    aggregate_id: attestation.id,
-    tenant_id: tenantId,
-    version: 1,
-    payload: { eventId, claimType, quantity, unit },
+    metadata: { eventId, claimType, quantity: quantity.toString(), unit, capabilityType: resolvedCapType },
   })
 
   return attestation

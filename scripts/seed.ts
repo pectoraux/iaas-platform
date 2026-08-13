@@ -147,12 +147,15 @@ async function main() {
     if (updatedEvent?.attestations[0]) {
       const contribution = await createContribution(tenant.id, { attestationIds: [updatedEvent.attestations[0].id] }, `seed-att-${updatedEvent.attestations[0].id}`)
       const reward = await calculateReward(tenant.id, contribution.id, `seed-contrib-${contribution.id}`)
+      // Task 5: fund the buyer account before posting to ledger.
+      const { recordBuyerFunding } = await import('../src/lib/services/ledger.service')
+      await recordBuyerFunding(tenant.id, 1000, `seed-funding-${Date.now()}`)
       const ledger = await postRewardToLedger(tenant.id, { rewardId: reward.id }, `seed-reward-${reward.id}`)
 
       // Process settlement outbox.
       const settlement = await createSettlement(tenant.id, reward.id)
       await processSettlementOutbox(tenant.id)
-      console.log(`  ↳ Chain: contribution ${contribution.id} → reward $${reward.amount.toFixed(4)} → ledger balance $${ledger.operator_balance_after.toFixed(4)} → settlement ${settlement.status}`)
+      console.log(`  ↳ Chain: contribution ${contribution.id} → reward $${Number(reward.amount).toFixed(4)} → ledger balance $${ledger.operator_balance_after.toFixed(4)} → settlement ${settlement.status}`)
     }
   } else {
     console.log('  ↳ Device already exists, skipping telemetry chain')

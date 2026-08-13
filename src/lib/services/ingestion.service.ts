@@ -1,21 +1,21 @@
 // =============================================================================
-// Ingestion service — ASYNC (task 10).
+// Ingestion service — ASYNC + ATOMIC OUTBOX (tasks 1, 4, 10).
 //
 // POST /v1/ingest/events
 //   - device authentication (resolve credential)
 //   - tenant resolution (session)
-//   - signature presence check (actual verification in worker)
+//   - network membership resolution (task 4: explicit capability binding)
 //   - timestamp validation
 //   - sequence/replay protection (unique constraint on externalEventId)
-//   - schema presence check (actual validation in worker)
 //   - enqueue for ASYNCHRONOUS verification via outbox
 //
-// The API no longer runs verification synchronously. It persists the event
-// (status: queued) + emits a domain event to the outbox, then returns 202.
-// A worker (processEventOutbox) picks up queued events, runs verification, and
-// creates attestations.
+// Task 1: the Event row + DomainEvent outbox row are created in the SAME
+// database transaction. If either fails, both roll back — no orphaned events,
+// no missing outbox rows.
 //
-// Idempotent: same (tenant, event_id) → same response, no duplicate.
+// Task 4: the event's `capabilityType` is resolved from the asset's network
+// assignment at ingest time. Verification validates against this specific
+// capability's schema, NOT capabilities[0].
 // =============================================================================
 
 import { db } from '@/lib/db'
@@ -23,7 +23,7 @@ import { ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import { emit, DomainEventTypes } from '@/lib/domain/events'
 import { resolveDeviceCredential, resolveAssetNetworkAssignment } from './registry.service'
-import { getPublishedConfiguration, getNetworkVersion } from './network.service'
+import { getNetworkVersion } from './network.service'
 import { canonicalEventMessage } from '@/lib/domain/crypto'
 
 export interface IngestEventInput {
@@ -49,7 +49,8 @@ export interface IngestResult {
  * Ingest a signed device event. Idempotent on (tenantId, event_id).
  *
  * The event is persisted with status='queued' and a domain event is emitted to
- * the outbox. Verification runs asynchronously in the worker.
+ * the outbox — both in the SAME transaction (task 1). Verification runs
+ * asynchronously in the worker.
  */
 export async function ingestEvent(
   tenantId: string,
@@ -69,22 +70,22 @@ export async function ingestEvent(
   const asset = device.asset
 
   // ---- Network membership resolution (task 4) ----
-  // Resolve the network assignment for this asset. If the caller provides
-  // network_version_id, validate the asset is assigned to that network.
+  // Resolve the network assignment + capability type for this asset.
   let networkVersionId: string | null = null
+  let capabilityType: string | null = null
+
   if (input.network_version_id) {
-    // Validate the version exists + is published + belongs to this tenant's network.
     const version = await getNetworkVersion(tenantId, input.network_version_id)
     const assignment = await resolveAssetNetworkAssignment(tenantId, asset.id, version.networkId)
     networkVersionId = input.network_version_id
-    void assignment
+    capabilityType = assignment.capabilityType
   } else {
-    // Resolve from the asset's active network assignment.
     const assignment = await resolveAssetNetworkAssignment(tenantId, asset.id)
     const network = await db.networkDefinition.findFirst({
       where: { id: assignment.networkId, tenantId, currentVersionId: { not: null } },
     })
     networkVersionId = network?.currentVersionId ?? null
+    capabilityType = assignment.capabilityType
   }
   if (!networkVersionId) throw new ValidationError('Could not resolve a published network version for this asset')
 
@@ -102,39 +103,53 @@ export async function ingestEvent(
     }
   }
 
-  // ---- Persist the event (queued) + emit outbox ----
-  const event = await db.event.create({
-    data: {
-      tenantId,
-      networkVersionId,
-      assetId: asset.id,
-      deviceId: device.id,
-      externalEventId: input.event_id,
-      eventType: input.event_type,
-      occurredAt,
-      receivedAt: new Date(),
-      sequence: input.sequence ?? null,
-      payloadJson: JSON.stringify(input.payload ?? {}),
-      schemaVersion: 1,
-      status: 'queued',
-      signature: input.signature ?? null,
-    },
+  // ---- ATOMIC: persist event + emit outbox in the SAME transaction (task 1) ----
+  const event = await db.$transaction(async (tx) => {
+    const created = await tx.event.create({
+      data: {
+        tenantId,
+        networkVersionId,
+        assetId: asset.id,
+        deviceId: device.id,
+        capabilityType, // task 4: explicit capability binding
+        externalEventId: input.event_id,
+        eventType: input.event_type,
+        occurredAt,
+        receivedAt: new Date(),
+        sequence: input.sequence ?? null,
+        payloadJson: JSON.stringify(input.payload ?? {}),
+        schemaVersion: 1,
+        status: 'queued',
+        signature: input.signature ?? null,
+      },
+    })
+
+    // Emit the outbox event IN THE SAME TRANSACTION (task 1).
+    // If the transaction commits, both the event + outbox row are persisted.
+    // If it rolls back, neither is — no orphaned events, no missing outbox rows.
+    await emit(
+      {
+        event_type: DomainEventTypes.DeviceEventAccepted,
+        aggregate_id: created.id,
+        tenant_id: tenantId,
+        version: 1,
+        payload: { externalEventId: input.event_id, deviceId: device.id, capabilityType },
+      },
+      tx, // pass the transaction client
+    )
+
+    return created
   })
 
+  // Audit is best-effort (outside the transaction — it's a side effect, not
+  // part of the atomic operation).
   await appendAudit({
     tenantId,
     actorId,
     eventType: AuditEvents.EventReceived,
     resourceType: 'event',
     resourceId: event.id,
-    metadata: { externalEventId: input.event_id, deviceId: device.id, eventType: input.event_type },
-  })
-  await emit({
-    event_type: DomainEventTypes.DeviceEventAccepted,
-    aggregate_id: event.id,
-    tenant_id: tenantId,
-    version: 1,
-    payload: { externalEventId: input.event_id, deviceId: device.id },
+    metadata: { externalEventId: input.event_id, deviceId: device.id, eventType: input.event_type, capabilityType },
   })
 
   return {

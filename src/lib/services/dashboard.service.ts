@@ -14,7 +14,7 @@ import { createOperator, createAsset, createDevice, assignAssetToNetwork } from 
 import { ingestEvent, buildCanonicalMessage } from './ingestion.service'
 import { createContribution } from './contribution.service'
 import { calculateReward } from './reward.service'
-import { postRewardToLedger } from './ledger.service'
+import { postRewardToLedger, recordBuyerFunding } from './ledger.service'
 import { createSettlement } from './settlement.service'
 import { processEventOutbox, processSettlementOutbox } from './worker.service'
 import { signMessage, deriveSigningKey } from '@/lib/domain/crypto'
@@ -72,8 +72,9 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     attestations, contributions, rewards, ledger_entries: ledgerEntries, ledger_postings: ledgerPostings, settlements,
     settlements_completed: settlementsCompleted,
     settlements_failed: settlementsFailed,
-    total_reward_amount: rewardAgg._sum.amount ?? 0,
-    total_settled_amount: settledAgg._sum.amount ?? 0,
+    // Task 3: Decimal → string for JSON safety
+    total_reward_amount: rewardAgg._sum.amount?.toString() ?? '0',
+    total_settled_amount: settledAgg._sum.amount?.toString() ?? '0',
   }
 }
 
@@ -200,6 +201,10 @@ export async function runE2EFlow(opts?: {
   // 11. Reward
   const reward = await calculateReward(tenant.id, contribution.id, `contrib-${contribution.id}`)
 
+  // Task 5: fund the buyer account before posting to ledger (enforced by ledger).
+  const grossEstimate = parseFloat(reward.calculation.gross) || 1
+  await recordBuyerFunding(tenant.id, grossEstimate + 100, `e2e-funding-${Date.now()}`)
+
   // 12. Ledger (double-entry)
   const ledger = await postRewardToLedger(tenant.id, { rewardId: reward.id }, `reward-${reward.id}`)
 
@@ -226,19 +231,19 @@ export async function runE2EFlow(opts?: {
     },
     attestation: {
       id: attestationId,
-      quantity: processedEvent.attestations[0].quantity,
+      quantity: processedEvent.attestations[0].quantity.toString(),
       unit: processedEvent.attestations[0].unit,
     },
     contribution: { id: contribution.id, quantity: contribution.quantity, unit: contribution.unit },
     reward: {
       id: reward.id,
-      amount: reward.amount,
+      amount: reward.amount, // already a string from reward service
       currency: reward.currency,
       breakdown: reward.calculation,
     },
     ledger: {
       posting_id: ledger.posting_id,
-      balance_after: ledger.operator_balance_after,
+      balance_after: ledger.operator_balance_after.toString(),
       balanced: ledger.breakdown.balanced,
     },
     settlement: {

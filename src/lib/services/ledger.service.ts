@@ -1,33 +1,23 @@
 // =============================================================================
-// Ledger service — DOUBLE-ENTRY accounting (task 7).
+// Ledger service — DOUBLE-ENTRY accounting with DECIMAL arithmetic (tasks 3, 7).
 //
-// Rule 5: PaySwap is a settlement provider, not the internal accounting system.
-// The ledger is the source of truth for balances. Balances are derived by
-// summing entries; there is no mutable balance column.
+// Task 3: all monetary amounts use Prisma.Decimal (PostgreSQL numeric), NOT
+// Float. Balance checks use exact decimal comparison, not floating-point
+// epsilon. This is safe for micropayments, stablecoins, and high-volume
+// billing.
 //
-// DOUBLE-ENTRY: every posting creates a LedgerPosting + multiple LedgerEntry
-// rows. The sum of amounts in a posting MUST equal zero.
+// Task 5: enforces sufficient buyer funding before reward posting. If the
+// buyer_funds account balance is less than the gross reward amount, the
+// posting is rejected. This prevents liabilities from exceeding funded amounts.
+//
+// Task 7: every posting creates a LedgerPosting + multiple LedgerEntry rows.
+// The sum of amounts MUST equal zero (exact decimal comparison).
 //
 // Convention: amount is signed. Positive = credit. Negative = debit.
-//   - Assets (cash, settlement_clearing): credit reduces, debit increases
-//   - Liabilities (buyer_funds, operator_payable): credit increases, debit reduces
-//   - Revenue (platform_revenue): credit increases, debit reduces
-//
-// Example reward posting ($100 to operator, $5 fee, funded by buyer):
-//   buyer_funds       (liability): -105  (debit: reduces buyer's prepaid funds)
-//   operator_payable  (liability): +100  (credit: increases what we owe operator)
-//   platform_revenue  (revenue):   +5    (credit: increases platform revenue)
-//   Sum: -105 + 100 + 5 = 0  ✓
-//
-// Example settlement (pay operator $100):
-//   operator_payable  (liability): -100  (debit: reduces what we owe)
-//   cash              (asset):     +100  (credit: reduces our cash)
-//   Sum: -100 + 100 = 0  ✓
-//
-// All mutations are idempotent on (tenantId, idempotencyKey) at the posting level.
 // =============================================================================
 
 import { db } from '@/lib/db'
+import { Prisma } from '@prisma/client'
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import { emit, DomainEventTypes } from '@/lib/domain/events'
@@ -36,7 +26,6 @@ import { emit, DomainEventTypes } from '@/lib/domain/events'
 // Account helpers
 // ---------------------------------------------------------------------------
 
-/** Get-or-create the operator's payable (liability) account. */
 export async function ensureOperatorAccount(
   tenantId: string,
   operatorId: string,
@@ -46,11 +35,7 @@ export async function ensureOperatorAccount(
   const existing = await db.ledgerAccount.findUnique({
     where: {
       tenantId_ownerId_ownerType_accountType_currency: {
-        tenantId,
-        ownerId: operatorId,
-        ownerType: 'operator',
-        accountType,
-        currency,
+        tenantId, ownerId: operatorId, ownerType: 'operator', accountType, currency,
       },
     },
   })
@@ -60,16 +45,11 @@ export async function ensureOperatorAccount(
   })
 }
 
-/** Get-or-create a platform account (cash, revenue, etc.). */
 export async function ensurePlatformAccount(tenantId: string, currency = 'USD', accountType: string = 'asset') {
   const existing = await db.ledgerAccount.findUnique({
     where: {
       tenantId_ownerId_ownerType_accountType_currency: {
-        tenantId,
-        ownerId: 'platform',
-        ownerType: 'platform',
-        accountType,
-        currency,
+        tenantId, ownerId: 'platform', ownerType: 'platform', accountType, currency,
       },
     },
   })
@@ -79,16 +59,11 @@ export async function ensurePlatformAccount(tenantId: string, currency = 'USD', 
   })
 }
 
-/** Get-or-create the buyer funds (liability) account for a tenant. */
 export async function ensureBuyerFundsAccount(tenantId: string, currency = 'USD') {
   const existing = await db.ledgerAccount.findUnique({
     where: {
       tenantId_ownerId_ownerType_accountType_currency: {
-        tenantId,
-        ownerId: 'buyer',
-        ownerType: 'buyer',
-        accountType: 'liability',
-        currency,
+        tenantId, ownerId: 'buyer', ownerType: 'buyer', accountType: 'liability', currency,
       },
     },
   })
@@ -99,12 +74,12 @@ export async function ensureBuyerFundsAccount(tenantId: string, currency = 'USD'
 }
 
 // ---------------------------------------------------------------------------
-// Balanced posting (the core of double-entry)
+// Balanced posting (the core of double-entry) — DECIMAL arithmetic (task 3)
 // ---------------------------------------------------------------------------
 
 export interface PostingEntryInput {
   accountId: string
-  amount: number // signed: +credit / -debit
+  amount: Prisma.Decimal | number | string // signed: +credit / -debit
   entryType: string
 }
 
@@ -115,27 +90,33 @@ export interface PostingResult {
   duplicate: boolean
 }
 
+function toDecimal(v: Prisma.Decimal | number | string): Prisma.Decimal {
+  return v instanceof Prisma.Decimal ? v : new Prisma.Decimal(v)
+}
+
 /**
  * Post a balanced double-entry transaction. All entries are created atomically
- * in a single posting. The sum of amounts MUST equal zero.
+ * in a single posting. The sum of amounts MUST equal zero (EXACT decimal
+ * comparison, not floating-point epsilon — task 3).
  *
  * Idempotent on (tenantId, idempotencyKey) at the posting level.
  */
 export async function postBalancedPosting(opts: {
   tenantId: string
   idempotencyKey: string
-  postingType: string // reward | settlement | funding | adjustment
+  postingType: string
   referenceType?: string
   referenceId?: string
   entries: PostingEntryInput[]
 }): Promise<PostingResult> {
-  // Validate balance.
-  const sum = opts.entries.reduce((acc, e) => acc + e.amount, 0)
-  if (Math.abs(sum) > 0.001) {
-    throw new ValidationError(`Unbalanced posting: sum=${sum}, must be 0. Entries: ${JSON.stringify(opts.entries)}`)
+  // Task 3: exact decimal balance validation.
+  const decimalEntries = opts.entries.map((e) => ({ ...e, amount: toDecimal(e.amount) }))
+  const sum = decimalEntries.reduce((acc, e) => acc.plus(e.amount), new Prisma.Decimal(0))
+  if (!sum.equals(0)) {
+    throw new ValidationError(`Unbalanced posting: sum=${sum.toString()}, must be 0`)
   }
 
-  // Idempotency: check for existing posting.
+  // Idempotency.
   const existing = await db.ledgerPosting.findUnique({
     where: { tenantId_idempotencyKey: { tenantId: opts.tenantId, idempotencyKey: opts.idempotencyKey } },
     include: { entries: true },
@@ -149,7 +130,7 @@ export async function postBalancedPosting(opts: {
     }
   }
 
-  // Create the posting + all entries atomically.
+  // ATOMIC (task 1): create posting + entries + outbox event in ONE transaction.
   const posting = await db.$transaction(async (tx) => {
     const post = await tx.ledgerPosting.create({
       data: {
@@ -160,7 +141,7 @@ export async function postBalancedPosting(opts: {
         idempotencyKey: opts.idempotencyKey,
       },
     })
-    for (const entry of opts.entries) {
+    for (const entry of decimalEntries) {
       await tx.ledgerEntry.create({
         data: {
           tenantId: opts.tenantId,
@@ -172,6 +153,17 @@ export async function postBalancedPosting(opts: {
         },
       })
     }
+    // Emit outbox in the same transaction (task 1).
+    await emit(
+      {
+        event_type: DomainEventTypes.LedgerEntryPosted,
+        aggregate_id: post.id,
+        tenant_id: opts.tenantId,
+        version: 1,
+        payload: { postingType: opts.postingType, entryCount: decimalEntries.length },
+      },
+      tx,
+    )
     return post
   })
 
@@ -187,15 +179,8 @@ export async function postBalancedPosting(opts: {
       referenceType: opts.referenceType,
       referenceId: opts.referenceId,
       entryCount: entries.length,
-      sum: 0,
+      sum: '0',
     },
-  })
-  await emit({
-    event_type: DomainEventTypes.LedgerEntryPosted,
-    aggregate_id: posting.id,
-    tenant_id: opts.tenantId,
-    version: 1,
-    payload: { postingType: opts.postingType, entryCount: entries.length },
   })
 
   return {
@@ -219,28 +204,34 @@ export interface LedgerPostingResult {
   reward_credit_entry_id: string
   platform_fee_entry_id: string
   buyer_debit_entry_id: string
-  operator_balance_after: number
+  operator_balance_after: Prisma.Decimal
   currency: string
   duplicate: boolean
-  // Breakdown for transparency
   breakdown: {
-    gross: number
-    operator_credit: number
-    platform_fee: number
-    buyer_debit: number
+    gross: string
+    operator_credit: string
+    platform_fee: string
+    buyer_debit: string
+    buyer_balance_before: string
+    buyer_balance_after: string
     balanced: boolean
+    funding_sufficient: boolean
   }
 }
 
 /**
- * Post a reward to the ledger as a BALANCED double-entry posting (task 7).
+ * Post a reward to the ledger as a BALANCED double-entry posting.
+ *
+ * Task 5: enforces sufficient buyer funding. If buyer_funds balance < gross
+ * amount, the posting is REJECTED. This prevents liabilities from exceeding
+ * funded amounts.
  *
  *   buyer_funds       (liability): -gross   (debit: reduces buyer's prepaid funds)
  *   operator_payable  (liability): +net     (credit: increases what we owe operator)
  *   platform_revenue  (revenue):   +fee     (credit: increases platform revenue)
  *   Sum = 0 ✓
  *
- * Idempotent on (tenantId, idempotencyKey).
+ * Task 3: all arithmetic uses Prisma.Decimal (exact, no floating-point loss).
  */
 export async function postRewardToLedger(
   tenantId: string,
@@ -248,7 +239,7 @@ export async function postRewardToLedger(
   idempotencyKey: string,
   actorId?: string,
 ): Promise<LedgerPostingResult> {
-  void actorId // audit handled in postBalancedPosting
+  void actorId
 
   // Idempotency: check for existing posting.
   const existingPosting = await db.ledgerPosting.findUnique({
@@ -272,11 +263,14 @@ export async function postRewardToLedger(
       currency: reward.currency,
       duplicate: true,
       breakdown: {
-        gross: 0,
-        operator_credit: reward.amount,
-        platform_fee: 0,
-        buyer_debit: 0,
+        gross: '0',
+        operator_credit: reward.amount.toString(),
+        platform_fee: '0',
+        buyer_debit: '0',
+        buyer_balance_before: '0',
+        buyer_balance_after: '0',
         balanced: true,
+        funding_sufficient: true,
       },
     }
   }
@@ -290,16 +284,25 @@ export async function postRewardToLedger(
     throw new ConflictError(`Reward ${reward.id} already posted`)
   }
 
-  // Recompute the gross + fee from the rule (don't trust stored reward only).
-  const rate = parseFloat(reward.rule.rate)
-  const grossAmount = reward.contribution.quantity * rate
-  const platformFee = grossAmount - reward.amount
-  const netAmount = reward.amount
+  // Task 3: Decimal arithmetic for all monetary calculations.
+  const rate = new Prisma.Decimal(reward.rule.rate)
+  const grossAmount = new Prisma.Decimal(reward.contribution.quantity).times(rate)
+  const netAmount = new Prisma.Decimal(reward.amount)
+  const platformFee = grossAmount.minus(netAmount)
 
   // Ensure all required accounts exist.
   const payableAccount = await ensureOperatorAccount(tenantId, reward.operatorId, reward.currency, 'liability')
   const revenueAccount = await ensurePlatformAccount(tenantId, reward.currency, 'revenue')
   const buyerFundsAccount = await ensureBuyerFundsAccount(tenantId, reward.currency)
+
+  // Task 5: check sufficient buyer funding.
+  const buyerBalanceBefore = await computeBalance(tenantId, buyerFundsAccount.id)
+  if (buyerBalanceBefore.lessThan(grossAmount)) {
+    throw new ValidationError(
+      `Insufficient buyer funding: balance ${buyerBalanceBefore.toString()} < gross ${grossAmount.toString()}. ` +
+      `Fund the buyer account via POST /api/v1/funding first.`,
+    )
+  }
 
   // Post the balanced transaction.
   const posting = await postBalancedPosting({
@@ -309,28 +312,16 @@ export async function postRewardToLedger(
     referenceType: 'reward',
     referenceId: reward.id,
     entries: [
-      {
-        accountId: buyerFundsAccount.id,
-        amount: -grossAmount, // debit: reduces buyer's prepaid funds
-        entryType: 'buyer_debit',
-      },
-      {
-        accountId: payableAccount.id,
-        amount: netAmount, // credit: increases what we owe operator
-        entryType: 'reward_credit',
-      },
-      {
-        accountId: revenueAccount.id,
-        amount: platformFee, // credit: increases platform revenue
-        entryType: 'platform_fee',
-      },
+      { accountId: buyerFundsAccount.id, amount: grossAmount.negated(), entryType: 'buyer_debit' },
+      { accountId: payableAccount.id, amount: netAmount, entryType: 'reward_credit' },
+      { accountId: revenueAccount.id, amount: platformFee, entryType: 'platform_fee' },
     ],
   })
 
-  // Mark reward as posted.
   await db.reward.update({ where: { id: reward.id }, data: { status: 'posted' } })
 
   const balance = await computeBalance(tenantId, payableAccount.id)
+  const buyerBalanceAfter = await computeBalance(tenantId, buyerFundsAccount.id)
 
   return {
     posting_id: posting.posting_id,
@@ -341,11 +332,14 @@ export async function postRewardToLedger(
     currency: reward.currency,
     duplicate: posting.duplicate,
     breakdown: {
-      gross: grossAmount,
-      operator_credit: netAmount,
-      platform_fee: platformFee,
-      buyer_debit: grossAmount,
+      gross: grossAmount.toString(),
+      operator_credit: netAmount.toString(),
+      platform_fee: platformFee.toString(),
+      buyer_debit: grossAmount.toString(),
+      buyer_balance_before: buyerBalanceBefore.toString(),
+      buyer_balance_after: buyerBalanceAfter.toString(),
       balanced: true,
+      funding_sufficient: true,
     },
   }
 }
@@ -356,21 +350,20 @@ export async function postRewardToLedger(
 
 export interface FundingResult {
   posting_id: string
-  balance_after: number
+  balance_after: Prisma.Decimal
   duplicate: boolean
 }
 
-/**
- * Record a buyer funding (prepayment). Balanced:
- *   cash (asset):             -amount  (debit: increases cash — we received money)
- *   buyer_funds (liability):  +amount  (credit: increases what we owe the buyer)
- *   Sum = 0 ✓
- */
 export async function recordBuyerFunding(
   tenantId: string,
-  amount: number,
+  amount: Prisma.Decimal | number | string,
   idempotencyKey: string,
 ): Promise<FundingResult> {
+  const decimalAmount = toDecimal(amount)
+  if (decimalAmount.lte(0)) {
+    throw new ValidationError('Funding amount must be positive')
+  }
+
   const cashAccount = await ensurePlatformAccount(tenantId, 'USD', 'asset')
   const buyerFundsAccount = await ensureBuyerFundsAccount(tenantId, 'USD')
 
@@ -381,16 +374,8 @@ export async function recordBuyerFunding(
     referenceType: 'funding',
     referenceId: idempotencyKey,
     entries: [
-      {
-        accountId: cashAccount.id,
-        amount: -amount, // debit: increases cash (asset)
-        entryType: 'funding_debit',
-      },
-      {
-        accountId: buyerFundsAccount.id,
-        amount: amount, // credit: increases buyer funds (liability)
-        entryType: 'funding_credit',
-      },
+      { accountId: cashAccount.id, amount: decimalAmount.negated(), entryType: 'funding_debit' },
+      { accountId: buyerFundsAccount.id, amount: decimalAmount, entryType: 'funding_credit' },
     ],
   })
 
@@ -399,15 +384,15 @@ export async function recordBuyerFunding(
 }
 
 // ---------------------------------------------------------------------------
-// Queries
+// Queries — return Decimal
 // ---------------------------------------------------------------------------
 
-/** Compute an account balance by summing append-only entries. */
-export async function computeBalance(tenantId: string, accountId: string): Promise<number> {
+/** Compute an account balance by summing append-only entries. Returns Decimal. */
+export async function computeBalance(tenantId: string, accountId: string): Promise<Prisma.Decimal> {
   const account = await db.ledgerAccount.findFirst({ where: { id: accountId, tenantId } })
   if (!account) throw new NotFoundError('ledger_account', accountId)
   const entries = await db.ledgerEntry.findMany({ where: { accountId, tenantId } })
-  return entries.reduce((sum, e) => sum + e.amount, 0)
+  return entries.reduce((sum, e) => sum.plus(e.amount), new Prisma.Decimal(0))
 }
 
 export async function listLedgerEntries(tenantId: string) {
@@ -437,9 +422,9 @@ export async function listLedgerPostings(tenantId: string) {
     orderBy: { createdAt: 'desc' },
     take: 100,
   })
-  // Verify balance for each posting (transparency).
+  // Verify balance for each posting (transparency) — Decimal sum.
   return postings.map((p) => ({
     ...p,
-    sum: p.entries.reduce((acc, e) => acc + e.amount, 0),
+    sum: p.entries.reduce((acc, e) => acc.plus(e.amount), new Prisma.Decimal(0)),
   }))
 }

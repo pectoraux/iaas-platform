@@ -1,17 +1,17 @@
 // =============================================================================
-// Reward service — configurable engine.
+// Reward service — configurable engine with DECIMAL arithmetic (task 3).
 //
 // Rule 3: Contribution is not payment.
 // Rule 4: Reward calculation must not directly send money.
 // Rule 7: Reward references the exact policy version used.
 //
-// Supported rule types: fixed_rate | revenue_share.
-// Reward output is derived SERVER-SIDE from the contribution quantity + the
-// versioned RewardRule attached to the network version. Never from client input.
+// Task 3: all monetary calculations use Prisma.Decimal (exact, no float loss).
+// Task 1: reward creation + outbox emit are atomic (same transaction).
 // =============================================================================
 
 import { db } from '@/lib/db'
-import { ConflictError, NotFoundError, ValidationError } from '@/lib/domain/errors'
+import { Prisma } from '@prisma/client'
+import { NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import { emit, DomainEventTypes } from '@/lib/domain/events'
 
@@ -48,33 +48,28 @@ export interface RewardResult {
   id: string
   contribution_id: string
   operator_id: string
-  amount: number
+  amount: string // Decimal as string for JSON safety
   currency: string
   rule_version: number
   status: string
   duplicate: boolean
-  // Breakdown for transparency
   calculation: {
     rule_type: string
     rate: string
-    quantity: number
+    quantity: string
     unit: string
     platform_fee_pct: number
-    platform_fee: number
-    net_amount: number
+    platform_fee: string
+    net_amount: string
+    gross: string
   }
 }
 
 /**
  * Calculate a reward for a contribution. Idempotent on (tenantId, idempotencyKey).
  *
- * The reward amount is derived from:
- *   amount = quantity * rate   (fixed_rate)
- *   amount = quantity * rate   (revenue_share; rate is the share fraction)
- * minus platform_fee_pct.
- *
- * The reward does NOT move money. It only records an economic claim. The
- * ledger + settlement services handle movement.
+ * Task 3: all arithmetic uses Prisma.Decimal (exact, no floating-point loss).
+ * Task 1: reward creation + outbox emit are atomic.
  */
 export async function calculateReward(
   tenantId: string,
@@ -92,7 +87,7 @@ export async function calculateReward(
       id: existing.id,
       contribution_id: existing.contributionId,
       operator_id: existing.operatorId,
-      amount: existing.amount,
+      amount: existing.amount.toString(),
       currency: existing.currency,
       rule_version: existing.ruleVersion,
       status: existing.status,
@@ -100,11 +95,12 @@ export async function calculateReward(
       calculation: {
         rule_type: rule?.ruleType ?? 'fixed_rate',
         rate: rule?.rate ?? '0',
-        quantity: 0,
+        quantity: '0',
         unit: rule?.unit ?? '',
         platform_fee_pct: 0,
-        platform_fee: 0,
-        net_amount: existing.amount,
+        platform_fee: '0',
+        net_amount: existing.amount.toString(),
+        gross: '0',
       },
     }
   }
@@ -115,34 +111,49 @@ export async function calculateReward(
   })
   if (!contribution) throw new NotFoundError('contribution', contributionId)
 
-  // Resolve the reward rule for this network version.
   const rule = await db.rewardRule.findFirst({
     where: { tenantId, networkVersionId: contribution.networkVersionId },
     orderBy: { ruleVersion: 'desc' },
   })
   if (!rule) throw new NotFoundError('reward_rule', `for version ${contribution.networkVersionId}`)
 
-  // Derive amount SERVER-SIDE.
-  const rate = parseFloat(rule.rate)
-  if (Number.isNaN(rate)) throw new ValidationError(`Invalid rate on rule ${rule.id}`)
-  const gross = contribution.quantity * rate
+  // Task 3: Decimal arithmetic — no floating-point loss.
+  const rate = new Prisma.Decimal(rule.rate)
+  if (rate.isNaN()) throw new ValidationError(`Invalid rate on rule ${rule.id}`)
+  const gross = new Prisma.Decimal(contribution.quantity).times(rate)
   const config = JSON.parse(rule.configJson || '{}') as { platform_fee_pct?: number }
   const feePct = config.platform_fee_pct ?? 0
-  const platformFee = gross * (feePct / 100)
-  const net = gross - platformFee
+  const platformFee = gross.times(feePct).div(100)
+  const net = gross.minus(platformFee)
 
-  const reward = await db.reward.create({
-    data: {
-      tenantId,
-      contributionId,
-      operatorId: contribution.operatorId,
-      amount: net,
-      currency: rule.currency,
-      ruleVersion: rule.ruleVersion,
-      ruleId: rule.id,
-      status: 'calculated',
-      idempotencyKey,
-    },
+  // Task 1: atomic reward creation + outbox emit.
+  const reward = await db.$transaction(async (tx) => {
+    const created = await tx.reward.create({
+      data: {
+        tenantId,
+        contributionId,
+        operatorId: contribution.operatorId,
+        amount: net,
+        currency: rule.currency,
+        ruleVersion: rule.ruleVersion,
+        ruleId: rule.id,
+        status: 'calculated',
+        idempotencyKey,
+      },
+    })
+
+    await emit(
+      {
+        event_type: DomainEventTypes.RewardCalculated,
+        aggregate_id: created.id,
+        tenant_id: tenantId,
+        version: 1,
+        payload: { contributionId, amount: net.toString(), currency: rule.currency, ruleVersion: rule.ruleVersion },
+      },
+      tx,
+    )
+
+    return created
   })
 
   await appendAudit({
@@ -154,26 +165,19 @@ export async function calculateReward(
     metadata: {
       contributionId,
       operatorId: contribution.operatorId,
-      amount: net,
+      amount: net.toString(),
       currency: rule.currency,
       ruleVersion: rule.ruleVersion,
-      gross,
-      platformFee,
+      gross: gross.toString(),
+      platformFee: platformFee.toString(),
     },
-  })
-  await emit({
-    event_type: DomainEventTypes.RewardCalculated,
-    aggregate_id: reward.id,
-    tenant_id: tenantId,
-    version: 1,
-    payload: { contributionId, amount: net, currency: rule.currency, ruleVersion: rule.ruleVersion },
   })
 
   return {
     id: reward.id,
     contribution_id: contributionId,
     operator_id: contribution.operatorId,
-    amount: net,
+    amount: net.toString(),
     currency: rule.currency,
     rule_version: rule.ruleVersion,
     status: reward.status,
@@ -181,11 +185,12 @@ export async function calculateReward(
     calculation: {
       rule_type: rule.ruleType,
       rate: rule.rate,
-      quantity: contribution.quantity,
+      quantity: contribution.quantity.toString(),
       unit: contribution.unit,
       platform_fee_pct: feePct,
-      platform_fee: platformFee,
-      net_amount: net,
+      platform_fee: platformFee.toString(),
+      net_amount: net.toString(),
+      gross: gross.toString(),
     },
   }
 }
