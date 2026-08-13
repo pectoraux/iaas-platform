@@ -241,3 +241,26 @@ Stage Summary:
 - Vercel production verified: E2E all 5 checks pass, ledger balanced, settlement completed.
 - GitHub: pectoraux/iaas-platform (commit 9cac478)
 - Generic platform core is now correctness-hardened. Ready for VPP.
+
+---
+Task ID: schema-fix (pre-VPP final)
+Agent: orchestrator
+Task: Fix schema/DB consistency — unique constraint + non-null capabilityType.
+
+Work Log:
+- Verified schema file has @@unique([assetId, networkId, capabilityType]) — correct on main.
+- Verified Neon database has the unique index: AssetNetworkAssignment_assetId_networkId_capabilityType_key (UNIQUE INDEX on assetId, networkId, capabilityType).
+- Made Event.capabilityType NON-NULL (String? → String). Database now enforces the invariant.
+- Re-seeded Neon (was reset during schema push — this caused the login failure).
+- Production login restored + verified.
+- Multi-capability test passes: one asset, two capabilities in same network.
+- Capability persistence test passes: capabilityType stored at ingest.
+
+Root cause of login failure: the Neon database was force-reset during the previous schema push, wiping all user accounts. The Vercel production deployment pointed to the same database, so login failed until re-seeding.
+
+Stage Summary:
+- Schema, generated Prisma client, and Neon database are all consistent.
+- Event.capabilityType is non-null at the database level.
+- Production login + E2E verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit 9192b01)
+- Generic platform core is fully hardened. Ready for VPP implementation.
