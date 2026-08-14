@@ -387,3 +387,32 @@ Stage Summary:
 - 4 lifecycle tests pass on Neon.
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit d14ed2e)
+
+---
+Task ID: per-assignment-commitment-correctness
+Agent: orchestrator
+Task: Fix 4 implementation bugs — multi-asset commitment identity, concurrent execution guard, failure release, atomic usage.
+
+Work Log:
+1. MULTI-ASSET COMMITMENT/USAGE: each VppDispatchAssignment has explicit capacityCommitmentId. Commitments created with unique sourceId per assignment. recordUsage takes commitmentId directly. No more multi-asset ambiguity.
+2. CONCURRENT EXECUTION: atomic claim WHERE status='assigned' ONLY (not IN ['assigned','dispatching']). Two concurrent callers cannot both proceed. Test A: 2 concurrent 10kW dispatches → exactly 1 succeeds.
+3. FAILURE RELEASE: missing device, verification failure, funding failure all release commitment. Centralized releaseAssignmentCapacity helper.
+4. ATOMIC + IDEMPOTENT USAGE: recordUsage creates usage + marks consumed in ONE transaction with FOR UPDATE. @@unique([commitmentId]) prevents duplicates. Idempotent.
+
+Tests (all pass):
+- Test A: concurrent 10kW dispatches → 1 succeeds
+- Test B: 6+4 dispatches → both succeed
+- Test C: 6+4+1 → third fails
+- Usage recorded as kWh (separate from kW commitment)
+- Failed dispatch releases commitment
+- Non-energy resource (100 TB) works
+- Unit mismatch rejected
+
+Stage Summary:
+- All 4 implementation bugs fixed.
+- Per-assignment commitment identity is deterministic.
+- Concurrent execution is properly guarded.
+- All failure paths release capacity.
+- Usage recording is atomic + idempotent.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit c78f133)
