@@ -419,19 +419,31 @@ export async function recordUsage(input: RecordUsageInput): Promise<{ usageId: s
  * Release a commitment (dispatch cancelled/failed).
  * Returns the committed amount to the reservation's remaining.
  * This prevents stranded capacity on failed dispatches.
+ *
+ * CONCURRENCY-SAFE: locks the commitment FOR UPDATE inside the transaction,
+ * then re-checks its status. This prevents two concurrent release calls from
+ * both crediting the reservation's remaining amount.
  */
 export async function releaseCommitment(
   tenantId: string,
   sourceType: string,
   sourceId: string,
 ): Promise<void> {
-  const commitment = await db.capacityCommitment.findFirst({
-    where: { tenantId, sourceType, sourceId },
-  })
-  if (!commitment) return
-  if (commitment.status === 'released' || commitment.status === 'consumed') return
-
   await db.$transaction(async (tx) => {
+    // Lock the commitment FOR UPDATE (concurrency-safe).
+    const commitments = await tx.$queryRaw<Array<{ id: string; status: string; reservationId: string; committedAmount: string }>>`
+      SELECT * FROM "CapacityCommitment"
+      WHERE "tenantId" = ${tenantId}
+        AND "sourceType" = ${sourceType}
+        AND "sourceId" = ${sourceId}
+      FOR UPDATE
+    `
+    const commitment = commitments[0]
+    if (!commitment) return
+    // Re-check status inside the lock (another caller may have already released/consumed).
+    if (commitment.status === 'released' || commitment.status === 'consumed') return
+
+    // Lock the reservation FOR UPDATE.
     await tx.$queryRaw`SELECT * FROM "CapacityReservation" WHERE id = ${commitment.reservationId} FOR UPDATE`
 
     const reservation = await tx.capacityReservation.findUnique({ where: { id: commitment.reservationId } })

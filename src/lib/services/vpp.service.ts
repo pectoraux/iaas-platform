@@ -499,15 +499,16 @@ export async function executeDispatchAssignment(
       `vpp-baseline-${baseline.id}`,
     )
 
-    // --- Reward + Ledger + Settlement ---
-    const reward = await calculateReward(tenantId, contribution.id, `vpp-contrib-${contribution.id}`)
-    await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
-    const settlement = await createSettlement(tenantId, reward.id)
-    await processSettlementOutbox(tenantId)
-
-    // Fix 2: RECORD USAGE BEFORE marking assignment completed.
-    // The assignment CANNOT become 'completed' until its capacity commitment
-    // has been consumed. This prevents the state: completed + active commitment.
+    // --- RECORD USAGE BEFORE ANY IRREVERSIBLE FINANCIAL SETTLEMENT ---
+    // State machine: DELIVERY_VERIFIED → USAGE_RECORDED → ECONOMICALLY_SETTLED → COMPLETED
+    //
+    // Usage is recorded (commitment consumed) BEFORE reward/ledger/settlement.
+    // This ensures:
+    //   - If usage recording fails → assignment fails → commitment released.
+    //     No money has moved yet. Safe to release.
+    //   - If settlement fails after usage → commitment is already consumed.
+    //     Capacity is NOT released. Financial reconciliation is needed.
+    //   - A successful settlement ALWAYS has a consumed commitment + usage.
     if (assignment.capacityCommitmentId) {
       await recordUsage({
         tenantId,
@@ -521,7 +522,13 @@ export async function executeDispatchAssignment(
       })
     }
 
-    // Now safe to mark assignment as completed (commitment is consumed).
+    // --- Reward + Ledger + Settlement (after usage is recorded) ---
+    const reward = await calculateReward(tenantId, contribution.id, `vpp-contrib-${contribution.id}`)
+    await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
+    const settlement = await createSettlement(tenantId, reward.id)
+    await processSettlementOutbox(tenantId)
+
+    // Now safe to mark assignment as completed (usage recorded + settled).
     await db.vppDispatchAssignment.update({
       where: { id: assignmentId },
       data: {

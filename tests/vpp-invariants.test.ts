@@ -699,20 +699,53 @@ describe('VPP invariant: concurrent execution + state machine', () => {
     expect(usage).toBeNull()
   })
 
-  it('no completed assignment can have an active commitment', async () => {
-    // Query ALL completed assignments and verify none have active commitments.
+  it('no completed assignment can have an active or released commitment', async () => {
+    // Query ALL completed assignments and verify their commitments are CONSUMED
+    // (not active, not released — a completed assignment must have consumed capacity).
     const completedAssignments = await db.vppDispatchAssignment.findMany({
       where: { status: 'completed', capacityCommitmentId: { not: null } },
-      include: { baseline: true },
     })
 
     for (const a of completedAssignments) {
       const commitment = await db.capacityCommitment.findUnique({
         where: { id: a.capacityCommitmentId! },
       })
-      // A completed assignment's commitment must NOT be 'active'.
-      // It must be 'consumed' (success) or 'released' (edge case).
-      expect(commitment?.status).not.toBe('active')
+      // A completed assignment's commitment MUST be 'consumed'.
+      // 'released' is only valid for FAILED assignments.
+      expect(commitment?.status).toBe('consumed')
+
+      // A usage record MUST exist for the commitment.
+      const usage = await db.capacityUsage.findUnique({
+        where: { commitmentId: a.capacityCommitmentId! },
+      })
+      expect(usage).toBeTruthy()
     }
+  })
+
+  it('successful settlement always has consumed commitment + usage', async () => {
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const { assignments } = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '5', requestedKwh: '10',
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+    })
+
+    const result = await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret)
+
+    // Verify the settlement exists and is completed.
+    const settlement = await db.settlement.findUnique({ where: { id: result.settlement_id! } })
+    expect(settlement?.status).toBe('completed')
+
+    // Verify the commitment is consumed (NOT released — settlement succeeded).
+    const commitment = await db.capacityCommitment.findUnique({
+      where: { id: assignments[0].capacityCommitmentId! },
+    })
+    expect(commitment?.status).toBe('consumed')
+
+    // Verify usage exists.
+    const usage = await db.capacityUsage.findUnique({
+      where: { commitmentId: assignments[0].capacityCommitmentId! },
+    })
+    expect(usage).toBeTruthy()
   })
 })
