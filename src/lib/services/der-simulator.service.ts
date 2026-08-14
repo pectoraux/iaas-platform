@@ -1,52 +1,50 @@
 // =============================================================================
 // DER History Simulator — generates synthetic load histories with KNOWN ground truth.
 //
-// This is the foundation of VPP-2: instead of using real telemetry (which we
-// don't have), we generate synthetic histories where we KNOW what the asset
-// would have done without dispatch. This lets us measure baseline accuracy
-// against true counterfactuals.
+// VPP-2 FIX: The simulator now generates ONE latent base day per date,
+// then derives both the counterfactual (no dispatch) and treatment (dispatch)
+// profiles from the SAME base. This ensures the only intentional difference
+// between counterfactual and actual is the dispatch effect itself.
 //
-// The simulator generates:
-//   1. Historical load profiles (what the battery did on past days)
-//   2. A "true counterfactual" for the dispatch day (what it WOULD have done)
-//   3. An "actual with dispatch" profile (what it DID do during dispatch)
-//
-// The baseline strategies then predict the counterfactual from history.
-// We compare: predicted_counterfactual vs true_counterfactual
-//             → baseline bias, MAE, over/underpayment
+// Previous bug: two separate generateDayProfile() calls produced different
+// temperatures and noise, contaminating trueIncrementalKwh.
 // =============================================================================
 
-import { Prisma } from '@prisma/client'
-
 export interface LoadProfilePoint {
-  timestamp: string // ISO
-  powerKw: number   // signed: positive = charging/drawing from grid, negative = discharging
-  energyKwh: number // cumulative energy in this interval
+  timestamp: string
+  powerKw: number
+  energyKwh: number
 }
 
 export interface DayProfile {
-  date: string         // YYYY-MM-DD
-  dayOfWeek: number    // 0=Sunday ... 6=Saturday
+  date: string
+  dayOfWeek: number
   isWeekend: boolean
-  temperatureC: number // ambient temperature (affects battery efficiency)
-  points: LoadProfilePoint[] // 96 points (15-min intervals for 24h)
+  temperatureC: number
+  points: LoadProfilePoint[]
   totalEnergyKwh: number
   peakPowerKw: number
 }
 
+// A latent base day contains the deterministic + stochastic inputs that
+// define a day's behavior, BEFORE dispatch is applied.
+interface LatentBaseDay {
+  date: Date
+  dayOfWeek: number
+  isWeekend: boolean
+  temperatureC: number
+  // The base load profile WITHOUT dispatch (the counterfactual).
+  basePoints: LoadProfilePoint[]
+}
+
 export interface DispatchDayGroundTruth {
   date: string
-  dispatchStartIndex: number  // 15-min interval index (0-95)
+  dispatchStartIndex: number
   dispatchEndIndex: number
-  // The TRUE counterfactual: what the battery would have done without dispatch.
   trueCounterfactualKwh: number
-  // What the battery actually did during the dispatch window WITH dispatch.
   actualWithDispatchKwh: number
-  // The TRUE incremental performance (actual - counterfactual).
   trueIncrementalKwh: number
-  // The full day profile (with dispatch applied).
   dayProfile: DayProfile
-  // The counterfactual profile (without dispatch).
   counterfactualProfile: DayProfile
 }
 
@@ -55,15 +53,10 @@ export interface SyntheticHistory {
   dispatchDay: DispatchDayGroundTruth
 }
 
-// ---------------------------------------------------------------------------
-// Simulator
-// ---------------------------------------------------------------------------
-
 export class DERHistorySimulator {
   private rng: () => number
 
   constructor(seed = 42) {
-    // Simple seeded PRNG (mulberry32).
     let s = seed
     this.rng = () => {
       s |= 0
@@ -77,17 +70,9 @@ export class DERHistorySimulator {
   /**
    * Generate a synthetic history of a residential battery.
    *
-   * Model:
-   *   - Charges from solar during the day (10:00-15:00)
-   *   - Discharges during evening peak (18:00-21:00)
-   *   - Weekend patterns are different (more midday usage)
-   *   - Temperature affects efficiency
-   *   - Random noise on each interval
-   *
-   * @param numDays Number of historical days to generate (before dispatch day)
-   * @param dispatchHour Hour of dispatch (e.g. 17 for 5 PM)
-   * @param dispatchDurationHours Duration of dispatch in hours
-   * @param dispatchPowerKw Power requested during dispatch
+   * FIX: Each day is generated as a LatentBaseDay (fixed temperature + noise),
+   * then the counterfactual profile IS the base day, and the treatment profile
+   * is the same base day with dispatch overlaid. The only difference is dispatch.
    */
   generateHistory(
     numDays: number,
@@ -98,30 +83,49 @@ export class DERHistorySimulator {
     const days: DayProfile[] = []
     const today = new Date()
 
-    // Generate historical days (before dispatch day).
+    // Generate historical days (each as a latent base day → profile).
     for (let i = numDays; i >= 1; i--) {
       const date = new Date(today)
       date.setDate(date.getDate() - i)
-      days.push(this.generateDayProfile(date, false, 0, 0, 0))
+      const baseDay = this.generateLatentBaseDay(date)
+      days.push(this.latentToProfile(baseDay))
     }
 
-    // Generate the dispatch day with known counterfactual.
+    // Generate the dispatch day as ONE latent base day.
     const dispatchDate = new Date(today)
-    const dispatchStartIndex = dispatchHour * 4 // 15-min intervals
+    const dispatchBaseDay = this.generateLatentBaseDay(dispatchDate)
+
+    const dispatchStartIndex = dispatchHour * 4
     const dispatchEndIndex = Math.min(95, dispatchStartIndex + dispatchDurationHours * 4)
 
-    // First, generate the counterfactual (what would have happened without dispatch).
-    const counterfactualProfile = this.generateDayProfile(dispatchDate, false, 0, 0, 0)
+    // Counterfactual profile = base day with NO dispatch (just the latent base).
+    const counterfactualProfile = this.latentToProfile(dispatchBaseDay)
 
-    // Then, generate the actual profile WITH dispatch overlaid.
-    const actualProfile = this.generateDayProfile(dispatchDate, true, dispatchStartIndex, dispatchEndIndex, dispatchPowerKw)
+    // Treatment profile = SAME base day + dispatch overlay.
+    const treatmentPoints = dispatchBaseDay.basePoints.map((p, i) => {
+      if (i >= dispatchStartIndex && i < dispatchEndIndex) {
+        const efficiency = Math.max(0.85, 1.0 - (dispatchBaseDay.temperatureC - 20) * 0.005)
+        const dispatchPower = -dispatchPowerKw * efficiency
+        return {
+          ...p,
+          powerKw: dispatchPower,
+          energyKwh: Math.abs(dispatchPower) * 0.25,
+        }
+      }
+      return p
+    })
+    const treatmentBaseDay: LatentBaseDay = {
+      ...dispatchBaseDay,
+      basePoints: treatmentPoints,
+    }
+    const treatmentProfile = this.latentToProfile(treatmentBaseDay)
 
-    // Calculate ground truth values.
-    const trueCounterfactualKwh = this.sumEnergyInWindow(
+    // Calculate ground truth (the ONLY difference is dispatch).
+    const trueCounterfactualKwh = this.sumDischargeEnergy(
       counterfactualProfile.points, dispatchStartIndex, dispatchEndIndex,
     )
-    const actualWithDispatchKwh = this.sumEnergyInWindow(
-      actualProfile.points, dispatchStartIndex, dispatchEndIndex,
+    const actualWithDispatchKwh = this.sumDischargeEnergy(
+      treatmentProfile.points, dispatchStartIndex, dispatchEndIndex,
     )
     const trueIncrementalKwh = actualWithDispatchKwh - trueCounterfactualKwh
 
@@ -134,102 +138,113 @@ export class DERHistorySimulator {
         trueCounterfactualKwh,
         actualWithDispatchKwh,
         trueIncrementalKwh,
-        dayProfile: actualProfile,
+        dayProfile: treatmentProfile,
         counterfactualProfile,
       },
     }
   }
 
-  private generateDayProfile(
-    date: Date,
-    isDispatchDay: boolean,
-    dispatchStart: number,
-    dispatchEnd: number,
-    dispatchPowerKw: number,
-  ): DayProfile {
+  /**
+   * Generate a latent base day: fixed temperature, fixed noise sequence,
+   * and the load profile that results from the underlying behavioral model
+   * (solar charging, evening discharge, etc.) WITHOUT any dispatch.
+   */
+  private generateLatentBaseDay(date: Date): LatentBaseDay {
     const dayOfWeek = date.getDay()
     const isWeekend = dayOfWeek === 0 || dayOfWeek === 6
-    const temperatureC = 15 + this.rng() * 20 // 15-35°C
-    const efficiency = Math.max(0.85, 1.0 - (temperatureC - 20) * 0.005) // ~95-100% at 20°C
+    const temperatureC = 15 + this.rng() * 20
+    const efficiency = Math.max(0.85, 1.0 - (temperatureC - 20) * 0.005)
 
-    const points: LoadProfilePoint[] = []
-    let totalEnergy = 0
-    let peakPower = 0
+    // Pre-generate the noise sequence for this day (FIX: same noise for both
+    // counterfactual and treatment — the only difference is dispatch).
+    const noise: number[] = []
+    for (let i = 0; i < 96; i++) {
+      noise.push((this.rng() - 0.5) * 0.5)
+    }
 
+    const basePoints: LoadProfilePoint[] = []
     for (let i = 0; i < 96; i++) {
       const hour = i / 4
-      let powerKw = 0
+      let powerKw = this.getBaseLoad(hour, isWeekend, efficiency)
 
-      // Solar charging: 10:00-15:00 (indices 40-60)
-      if (hour >= 10 && hour < 15) {
-        const solarIntensity = Math.sin(((hour - 10) / 5) * Math.PI) // bell curve
-        powerKw = (3 + this.rng() * 2) * solarIntensity * efficiency
-      }
-      // Evening discharge: 18:00-21:00 (indices 72-84)
-      else if (hour >= 18 && hour < 21) {
-        const eveningPeak = Math.sin(((hour - 18) / 3) * Math.PI)
-        powerKw = -(2.5 + this.rng() * 1.5) * eveningPeak * efficiency
-      }
-      // Overnight: minimal
-      else if (hour >= 0 && hour < 6) {
-        powerKw = 0.2 + this.rng() * 0.3
-      }
-      // Morning: moderate
-      else if (hour >= 6 && hour < 10) {
-        powerKw = 0.5 + this.rng() * 0.8
-      }
-      // Afternoon: moderate
-      else if (hour >= 15 && hour < 18) {
-        powerKw = 0.8 + this.rng() * 0.5
-      }
-      // Late evening: low
-      else {
-        powerKw = 0.3 + this.rng() * 0.4
-      }
+      // Apply the pre-generated noise (same for counterfactual and treatment).
+      powerKw += noise[i]
 
-      // Weekend adjustment: more midday usage, less evening peak.
-      if (isWeekend) {
-        if (hour >= 10 && hour < 16) powerKw *= 1.3
-        if (hour >= 18 && hour < 21) powerKw *= 0.7
-      }
-
-      // Apply dispatch override.
-      if (isDispatchDay && i >= dispatchStart && i < dispatchEnd) {
-        powerKw = -dispatchPowerKw * efficiency // discharge at dispatch power
-      }
-
-      // Add noise.
-      powerKw += (this.rng() - 0.5) * 0.5
-
-      const energyKwh = Math.abs(powerKw) * 0.25 // 15-min interval
-      totalEnergy += energyKwh
-      peakPower = Math.max(peakPower, Math.abs(powerKw))
+      const energyKwh = Math.abs(powerKw) * 0.25
 
       const timestamp = new Date(date)
       timestamp.setHours(Math.floor(hour), (i % 4) * 15, 0, 0)
 
-      points.push({
+      basePoints.push({
         timestamp: timestamp.toISOString(),
         powerKw: parseFloat(powerKw.toFixed(4)),
         energyKwh: parseFloat(energyKwh.toFixed(4)),
       })
     }
 
+    return { date, dayOfWeek, isWeekend, temperatureC, basePoints }
+  }
+
+  /**
+   * The underlying behavioral model: what the battery does based on time of day,
+   * day type, and efficiency. This is the SAME for counterfactual and treatment
+   * (dispatch is applied separately as an overlay).
+   */
+  private getBaseLoad(hour: number, isWeekend: boolean, efficiency: number): number {
+    let powerKw: number
+
+    if (hour >= 10 && hour < 15) {
+      const solarIntensity = Math.sin(((hour - 10) / 5) * Math.PI)
+      powerKw = (3 + 0.5) * solarIntensity * efficiency // deterministic component
+    } else if (hour >= 18 && hour < 21) {
+      const eveningPeak = Math.sin(((hour - 18) / 3) * Math.PI)
+      powerKw = -(2.5 + 0.3) * eveningPeak * efficiency
+    } else if (hour >= 0 && hour < 6) {
+      powerKw = 0.2
+    } else if (hour >= 6 && hour < 10) {
+      powerKw = 0.5
+    } else if (hour >= 15 && hour < 18) {
+      powerKw = 0.8
+    } else {
+      powerKw = 0.3
+    }
+
+    if (isWeekend) {
+      if (hour >= 10 && hour < 16) powerKw *= 1.3
+      if (hour >= 18 && hour < 21) powerKw *= 0.7
+    }
+
+    return powerKw
+  }
+
+  /**
+   * Convert a latent base day to a full DayProfile (with totals).
+   */
+  private latentToProfile(base: LatentBaseDay): DayProfile {
+    let totalEnergy = 0
+    let peakPower = 0
+    for (const p of base.basePoints) {
+      totalEnergy += p.energyKwh
+      peakPower = Math.max(peakPower, Math.abs(p.powerKw))
+    }
+
     return {
-      date: date.toISOString().split('T')[0],
-      dayOfWeek,
-      isWeekend,
-      temperatureC: parseFloat(temperatureC.toFixed(1)),
-      points,
+      date: base.date.toISOString().split('T')[0],
+      dayOfWeek: base.dayOfWeek,
+      isWeekend: base.isWeekend,
+      temperatureC: parseFloat(base.temperatureC.toFixed(1)),
+      points: base.basePoints,
       totalEnergyKwh: parseFloat(totalEnergy.toFixed(4)),
       peakPowerKw: parseFloat(peakPower.toFixed(4)),
     }
   }
 
-  private sumEnergyInWindow(points: LoadProfilePoint[], start: number, end: number): number {
+  /**
+   * Sum discharge energy (negative power = energy delivered to grid) in a window.
+   */
+  private sumDischargeEnergy(points: LoadProfilePoint[], start: number, end: number): number {
     let sum = 0
     for (let i = start; i < end && i < points.length; i++) {
-      // Only count discharge (negative power = energy delivered to grid).
       if (points[i].powerKw < 0) {
         sum += points[i].energyKwh
       }

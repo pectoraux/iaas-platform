@@ -7,7 +7,7 @@
 //
 // Three baseline strategies are implemented:
 //   1. SameTimeHistoricalBaseline — uses the same time window from past days
-//   2. SimilarDayAverageBaseline — averages similar days (same day-of-week)
+//   2. WeekdayWeekendAverageBaseline — averages similar days (same day-of-week)
 //   3. RegressionBaseline — linear regression on temperature + day-of-week
 //
 // Each strategy is evaluated against known ground truth from the simulator
@@ -133,8 +133,8 @@ export class SameTimeHistoricalBaseline implements BaselineStrategy {
  *
  * Typically has lower bias than same-time historical for mixed day types.
  */
-export class SimilarDayAverageBaseline implements BasaselineStrategy {
-  readonly name = 'similar_day_average'
+export class WeekdayWeekendAverageBaseline implements BasaselineStrategy {
+  readonly name = 'weekday_weekend_average'
 
   predict(history: DayProfile[], dispatchDay: DispatchDayGroundTruth): BaselineResult {
     const { dispatchStartIndex, dispatchEndIndex } = dispatchDay
@@ -354,7 +354,7 @@ export function evaluateAllBaselines(
 ): BaselineEvaluation[] {
   const strategies: BaselineStrategy[] = [
     new SameTimeHistoricalBaseline(),
-    new SimilarDayAverageBaseline(),
+    new WeekdayWeekendAverageBaseline(),
     new RegressionBaseline(),
   ]
 

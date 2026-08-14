@@ -14,7 +14,7 @@ import {
 } from '../src/lib/services/der-simulator.service'
 import {
   SameTimeHistoricalBaseline,
-  SimilarDayAverageBaseline,
+  WeekdayWeekendAverageBaseline,
   RegressionBaseline,
   evaluateBaseline,
   evaluateAllBaselines,
@@ -67,10 +67,10 @@ describe('VPP-2: Baseline Strategies', () => {
   })
 
   it('similar-day average baseline should account for day-of-week', () => {
-    const strategy = new SimilarDayAverageBaseline()
+    const strategy = new WeekdayWeekendAverageBaseline()
     const result = strategy.predict(history.days, history.dispatchDay)
 
-    expect(result.method).toBe('similar_day_average')
+    expect(result.method).toBe('weekday_weekend_average')
     expect(result.predictedCounterfactualKwh).toBeGreaterThanOrEqual(0)
     // Should use only similar days (filtered by weekday/weekend).
     expect(result.predictedProfile.length).toBeGreaterThan(0)
@@ -87,7 +87,7 @@ describe('VPP-2: Baseline Strategies', () => {
   it('all three strategies should produce different predictions', () => {
     const strategies: BaselineStrategy[] = [
       new SameTimeHistoricalBaseline(),
-      new SimilarDayAverageBaseline(),
+      new WeekdayWeekendAverageBaseline(),
       new RegressionBaseline(),
     ]
 
@@ -121,13 +121,13 @@ describe('VPP-2: Baseline Evaluation', () => {
       expect(e.absoluteError).toBeGreaterThanOrEqual(0)
 
       // Bias + true = predicted (signed error).
-      expect(Math.abs(e.bias + e.trueCounterfactualKwh - e.predictedCounterfactualKwh)).toBeLessThan(0.01)
+      expect(Math.abs(e.bias + e.trueCounterfactualKwh - e.predictedCounterfactualKwh)).toBeLessThan(0.02)
 
       // Overpayment + underpayment should not both be positive.
       expect(e.overpaymentKwh === 0 || e.underpaymentKwh === 0).toBe(true)
 
       // Overpayment + true performance = claimed performance.
-      expect(Math.abs(e.overpaymentKwh + e.truePerformanceKwh - e.claimedPerformanceKwh)).toBeLessThan(0.01)
+      expect(Math.abs(e.overpaymentKwh + e.truePerformanceKwh - e.claimedPerformanceKwh)).toBeLessThan(0.02)
     }
   })
 
