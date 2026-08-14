@@ -115,4 +115,62 @@ function sha(s: string): string {
 }
 
 // Singleton sandbox instance. In production this would be configured via DI.
-export const paymentsService: PaymentsService = new PaySwapSandboxAdapter({ autoComplete: true })
+// Uses a mutable container so test swapping (setPaymentsService) affects all
+// modules that imported the reference.
+export const paymentsContainer: { service: PaymentsService } = {
+  service: new PaySwapSandboxAdapter({ autoComplete: true }),
+}
+
+// Backward-compatible accessor.
+export const paymentsService: PaymentsService = new Proxy({} as PaymentsService, {
+  get(_target, prop) {
+    return (paymentsContainer.service as any)[prop]
+  },
+})
+
+// ---------------------------------------------------------------------------
+// Failing payment adapter — for testing the real failure/recovery path.
+// Can be swapped in to simulate provider failures during executeDispatchAssignment.
+// ---------------------------------------------------------------------------
+
+export class FailingPaymentsAdapter implements PaymentsService {
+  readonly provider = 'failing_test'
+  private failCount = 0
+  private maxFails: number
+
+  constructor(maxFails = 1) {
+    this.maxFails = maxFails
+  }
+
+  async create_payout(req: PayoutRequest): Promise<PayoutResult> {
+    if (this.failCount < this.maxFails) {
+      this.failCount++
+      throw new Error(`Simulated provider failure ${this.failCount}/${this.maxFails}`)
+    }
+    // After maxFails, succeed.
+    const providerPayoutId = `psp_ok_${sha(req.idempotency_key)}`
+    return { provider_payout_id: providerPayoutId, status: 'completed', raw: { recovered: true } }
+  }
+
+  async get_payout(provider_payout_id: string): Promise<PayoutStatus> {
+    return { provider_payout_id, status: 'completed' }
+  }
+
+  async handle_webhook(payload: unknown): Promise<{ payout_id: string; status: PayoutStatus['status'] }> {
+    return { payout_id: 'recovered', status: 'completed' }
+  }
+
+  async reconcile(provider_payout_id: string): Promise<PayoutStatus> {
+    return { provider_payout_id, status: 'completed' }
+  }
+}
+
+/**
+ * Swap the global payments service instance (for testing).
+ * Returns the previous instance so it can be restored.
+ */
+export function setPaymentsService(newService: PaymentsService): PaymentsService {
+  const previous = paymentsContainer.service
+  paymentsContainer.service = newService
+  return previous
+}

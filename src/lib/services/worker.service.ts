@@ -381,6 +381,13 @@ export async function processSettlementOutbox(tenantId?: string): Promise<{ proc
  * Process a single specific settlement by reward ID.
  * Used by reconciliation to target a specific assignment's settlement
  * rather than processing the entire tenant's settlement outbox.
+ *
+ * LEASE-BASED CLAIMING:
+ * - Claims created/failed/retrying settlements atomically with a lease.
+ * - A submitted/processing settlement with a LIVE lease is NOT reclaimable.
+ * - A submitted/processing settlement with an EXPIRED lease IS reclaimable
+ *   (worker crashed before completing the provider call).
+ * - This prevents both double-payouts AND permanent underpayments.
  */
 export async function processSettlementForReward(tenantId: string, rewardId: string): Promise<{ completed: boolean; settlementId: string | null }> {
   const settlement = await db.settlement.findUnique({
@@ -391,28 +398,36 @@ export async function processSettlementForReward(tenantId: string, rewardId: str
   if (settlement.status === 'completed') return { completed: true, settlementId: settlement.id }
   if (settlement.tenantId !== tenantId) return { completed: false, settlementId: settlement.id }
 
+  const LEASE_DURATION_MS = 60_000 // 60 seconds — enough for a provider call
+
   try {
-    // Claim atomically: only created/failed/retrying are directly claimable.
-    // A 'processing' settlement is NOT claimable — another worker is actively
-    // talking to the payment provider. Reclaiming it would cause a double-payout.
-    // (A lease-expiry mechanism could reclaim stale 'processing' settlements,
-    // but for the MVP we simply skip them.)
+    // Determine if this settlement is claimable.
     const claimable = ['created', 'failed', 'retrying']
-    if (!claimable.includes(settlement.status)) {
-      // submitted/processing — another worker may be handling it. Check if completed.
-      const current = await db.settlement.findUnique({ where: { id: settlement.id } })
-      return { completed: current?.status === 'completed', settlementId: settlement.id }
+    const leaseExpired = settlement.leaseExpiresAt && settlement.leaseExpiresAt < new Date()
+
+    if (!claimable.includes(settlement.status) && !leaseExpired) {
+      // submitted/processing with a live lease — another worker is handling it.
+      return { completed: false, settlementId: settlement.id }
     }
 
+    // Atomic claim with lease.
+    // If the status is claimable OR the lease has expired, we can claim.
+    const claimCondition = claimable.includes(settlement.status)
+      ? { id: settlement.id, status: { in: claimable } }
+      : { id: settlement.id, status: { in: ['submitted', 'processing'] }, leaseExpiresAt: { lt: new Date() } }
+
+    const leaseExpiresAt = new Date(Date.now() + LEASE_DURATION_MS)
     const claimed = await db.settlement.updateMany({
-      where: { id: settlement.id, status: { in: claimable } },
-      data: { status: 'submitted' },
+      where: claimCondition,
+      data: { status: 'submitted', claimedAt: new Date(), leaseExpiresAt },
     })
     if (claimed.count === 0) {
+      // Another worker just claimed it, or it was completed.
       const current = await db.settlement.findUnique({ where: { id: settlement.id } })
       return { completed: current?.status === 'completed', settlementId: settlement.id }
     }
 
+    // We own the lease. Call the payment provider.
     const payout = await paymentsService.create_payout({
       idempotency_key: settlement.idempotencyKey!,
       recipient_ref: settlement.operatorId,
@@ -482,6 +497,9 @@ export async function processSettlementForReward(tenantId: string, rewardId: str
       })
       return { completed: true, settlementId: settlement.id }
     } else {
+      // Provider returned non-completed (processing/submitted).
+      // Keep the lease active — the provider is still processing.
+      // The lease will expire if this worker crashes, allowing recovery.
       await db.settlement.update({
         where: { id: settlement.id },
         data: { status: payout.status as 'processing' | 'submitted', providerPayoutId: payout.provider_payout_id },
@@ -489,10 +507,12 @@ export async function processSettlementForReward(tenantId: string, rewardId: str
       return { completed: false, settlementId: settlement.id }
     }
   } catch (err) {
+    // Provider call failed (exception). Clear the lease and mark as failed
+    // so it can be reclaimed by another worker or reconciliation.
     const reason = err instanceof Error ? err.message : 'Unknown error'
     await db.settlement.update({
       where: { id: settlement.id },
-      data: { status: 'failed', failureReason: reason },
+      data: { status: 'failed', failureReason: reason, leaseExpiresAt: new Date() },
     })
     return { completed: false, settlementId: settlement.id }
   }
