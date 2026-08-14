@@ -189,6 +189,11 @@ model Asset {
 /// or earn contributions without an active assignment. This replaces the old
 /// "pick the tenant's most recent network" heuristic, which was unsafe for
 /// multi-network tenants.
+///
+/// This model is also the AUTHORITATIVE source of an asset's verified physical
+/// capacity for a capability. The `verifiedCapacityKw` field is set when the
+/// asset is registered/assigned and is used by the capacity allocator.
+/// Callers can NEVER supply physical capacity — it always comes from here.
 model AssetNetworkAssignment {
   id              String   @id @default(cuid())
   tenantId        String
@@ -199,6 +204,9 @@ model AssetNetworkAssignment {
   effectiveFrom   DateTime @default(now())
   effectiveTo     DateTime?
   createdAt       DateTime @default(now())
+  // Authoritative verified physical capacity for this asset+capability.
+  // Set during assignment; used by the capacity allocator (never from caller).
+  verifiedCapacityKw String? // decimal as string (nullable for capabilities without power)
 
   asset   Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
   network NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
@@ -425,6 +433,7 @@ model CapacityAllocation {
   networkId       String
   capabilityType  String
   // The verified physical capacity of this asset for this capability.
+  // ALWAYS derived from AssetNetworkAssignment.verifiedCapacityKw — never from caller.
   physicalCapacity String  // decimal as string
   // The amount allocated to this specific reservation/dispatch.
   allocatedAmount String  // decimal as string
@@ -434,7 +443,14 @@ model CapacityAllocation {
   // What this allocation is for.
   sourceType      String   // vpp_reservation | vpp_dispatch | storage_reservation | ...
   sourceId        String?
-  status          String   @default("active") // active | released | expired
+  // Task 4: full capacity lifecycle.
+  //   allocated → reserved → committed → consumed → released
+  //   allocated: capacity held by a reservation
+  //   committed: capacity committed to a specific dispatch
+  //   consumed:  capacity actually used (dispatch completed)
+  //   released:  capacity released back to the pool (dispatch cancelled/expired)
+  lifecycleState  String   @default("allocated") // allocated | committed | consumed | released
+  status          String   @default("active") // active | released | expired (legacy, kept for compat)
   createdAt       DateTime @default(now())
 
   tenant  Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)

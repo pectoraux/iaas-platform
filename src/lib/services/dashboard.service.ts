@@ -142,7 +142,7 @@ export async function runE2EFlow(opts?: {
 
   // Task 4: explicitly assign asset to the network.
   const capType = templateKey === 'energy-vpp' ? 'energy_discharge' : 'measured_output'
-  await assignAssetToNetwork(tenant.id, asset.id, network.id, capType)
+  await assignAssetToNetwork(tenant.id, asset.id, network.id, capType, '10') // 10 kW verified capacity
 
   // 6-7. Device + credential provisioning
   const provisioned = await createDevice(tenant.id, {

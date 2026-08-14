@@ -55,7 +55,7 @@ beforeAll(async () => {
   })
   assetId = asset.id
 
-  await assignAssetToNetwork(tenantId, assetId, networkId, 'energy_discharge')
+  await assignAssetToNetwork(tenantId, assetId, networkId, 'energy_discharge', '10')
 
   const provisioned = await createDevice(tenantId, {
     assetId,

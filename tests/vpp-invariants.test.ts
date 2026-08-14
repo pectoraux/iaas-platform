@@ -57,7 +57,7 @@ beforeAll(async () => {
   const asset = await createAsset(tenantId, { operatorId, assetType: 'battery', name: 'Inv Battery' })
   assetId = asset.id
 
-  await assignAssetToNetwork(tenantId, assetId, networkId, 'energy_discharge')
+  await assignAssetToNetwork(tenantId, assetId, networkId, 'energy_discharge', '10') // 10 kW verified
 
   const provisioned = await createDevice(tenantId, { assetId, deviceType: 'battery_controller' })
   deviceId = provisioned.device.id
@@ -69,7 +69,6 @@ beforeAll(async () => {
 
 // Helper to create a fully-wired program + reservation.
 async function setupProgramAndReservation(opts?: {
-  physicalCapacityKw?: string
   reservedKw?: string
   startTime?: Date
   endTime?: Date
@@ -77,7 +76,6 @@ async function setupProgramAndReservation(opts?: {
   const now = new Date()
   const start = opts?.startTime ?? now
   const end = opts?.endTime ?? new Date(now.getTime() + 3600000)
-  const physical = opts?.physicalCapacityKw ?? '10'
   const reserved = opts?.reservedKw ?? '10'
 
   const program = await createBuyerProgram(tenantId, {
@@ -88,7 +86,7 @@ async function setupProgramAndReservation(opts?: {
 
   const { reservation } = await createCapacityReservation(tenantId, {
     programId: program.id, operatorId, assetId, capabilityType: 'energy_discharge',
-    reservedKw: reserved, physicalCapacityKw: physical,
+    reservedKw: reserved,
     startTime: start.toISOString(), endTime: end.toISOString(),
   })
 
@@ -101,7 +99,7 @@ async function setupProgramAndReservation(opts?: {
 
 describe('VPP invariant: derived contribution', () => {
   it('should use VppBaseline.performanceKwh as the Contribution quantity', async () => {
-    const { program } = await setupProgramAndReservation({ physicalCapacityKw: '10', reservedKw: '5' })
+    const { program } = await setupProgramAndReservation({ reservedKw: '5' })
 
     const { assignments } = await createDispatch(tenantId, {
       programId: program.id, requestedKw: '5', requestedKwh: '10',
@@ -144,7 +142,7 @@ describe('VPP invariant: capacity integrity', () => {
     await expect(
       createCapacityReservation(tenantId, {
         programId: program.id, operatorId, assetId, capabilityType: 'energy_discharge',
-        reservedKw: '15', physicalCapacityKw: '10',
+        reservedKw: '15',
         startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
       }),
     ).rejects.toThrow(/exceeds physical capacity/)
@@ -161,7 +159,7 @@ describe('VPP invariant: capacity integrity', () => {
     await expect(
       createCapacityReservation(tenantId, {
         programId: program.id, operatorId: otherOperator.id, assetId, capabilityType: 'energy_discharge',
-        reservedKw: '5', physicalCapacityKw: '10',
+        reservedKw: '5',
         startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
       }),
     ).rejects.toThrow(/does not own asset/)
@@ -177,7 +175,7 @@ describe('VPP invariant: capacity integrity', () => {
     await expect(
       createCapacityReservation(tenantId, {
         programId: program.id, operatorId, assetId, capabilityType: 'frequency_response',
-        reservedKw: '5', physicalCapacityKw: '10',
+        reservedKw: '5',
         startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
       }),
     ).rejects.toThrow(/not assigned.*capability/)
@@ -203,7 +201,7 @@ describe('VPP invariant: no double-selling', () => {
     // First reservation: 8 kW of 10 kW.
     await createCapacityReservation(tenantId, {
       programId: program.id, operatorId, assetId, capabilityType: 'energy_discharge',
-      reservedKw: '8', physicalCapacityKw: '10',
+      reservedKw: '8',
       startTime: start.toISOString(), endTime: end.toISOString(),
     })
 
@@ -211,7 +209,7 @@ describe('VPP invariant: no double-selling', () => {
     await expect(
       createCapacityReservation(tenantId, {
         programId: program.id, operatorId, assetId, capabilityType: 'energy_discharge',
-        reservedKw: '5', physicalCapacityKw: '10',
+        reservedKw: '5',
         startTime: start.toISOString(), endTime: end.toISOString(),
       }),
     ).rejects.toThrow(/Insufficient capacity/)
@@ -233,14 +231,14 @@ describe('VPP invariant: no double-selling', () => {
     // First reservation: 10 kW.
     await createCapacityReservation(tenantId, {
       programId: program.id, operatorId, assetId, capabilityType: 'energy_discharge',
-      reservedKw: '10', physicalCapacityKw: '10',
+      reservedKw: '10',
       startTime: start1.toISOString(), endTime: end1.toISOString(),
     })
 
     // Second reservation: 10 kW in a non-overlapping window — should succeed.
     const { reservation } = await createCapacityReservation(tenantId, {
       programId: program.id, operatorId, assetId, capabilityType: 'energy_discharge',
-      reservedKw: '10', physicalCapacityKw: '10',
+      reservedKw: '10',
       startTime: start2.toISOString(), endTime: end2.toISOString(),
     })
 
@@ -254,7 +252,7 @@ describe('VPP invariant: no double-selling', () => {
 
 describe('VPP invariant: idempotent execution', () => {
   it('should not create duplicate rewards on repeated execution', async () => {
-    const { program } = await setupProgramAndReservation({ physicalCapacityKw: '10', reservedKw: '5' })
+    const { program } = await setupProgramAndReservation({ reservedKw: '5' })
 
     const { assignments } = await createDispatch(tenantId, {
       programId: program.id, requestedKw: '5', requestedKwh: '10',
@@ -287,7 +285,7 @@ describe('VPP invariant: multi-asset aggregation', () => {
   it('should distribute dispatch across multiple assets proportionally', async () => {
     // Create a second asset.
     const asset2 = await createAsset(tenantId, { operatorId, assetType: 'battery', name: 'Multi Asset 2' })
-    await assignAssetToNetwork(tenantId, asset2.id, networkId, 'energy_discharge')
+    await assignAssetToNetwork(tenantId, asset2.id, networkId, 'energy_discharge', '10')
     const provisioned2 = await createDevice(tenantId, { assetId: asset2.id, deviceType: 'battery_controller' })
 
     const now = new Date()
@@ -300,12 +298,12 @@ describe('VPP invariant: multi-asset aggregation', () => {
     // Reserve 6 kW on asset1, 4 kW on asset2.
     await createCapacityReservation(tenantId, {
       programId: program.id, operatorId, assetId: assetId, capabilityType: 'energy_discharge',
-      reservedKw: '6', physicalCapacityKw: '10',
+      reservedKw: '6',
       startTime: now.toISOString(), endTime: new Date(now.getTime() + 3600000).toISOString(),
     })
     await createCapacityReservation(tenantId, {
       programId: program.id, operatorId, assetId: asset2.id, capabilityType: 'energy_discharge',
-      reservedKw: '4', physicalCapacityKw: '10',
+      reservedKw: '4',
       startTime: now.toISOString(), endTime: new Date(now.getTime() + 3600000).toISOString(),
     })
 
@@ -326,9 +324,91 @@ describe('VPP invariant: multi-asset aggregation', () => {
     // 6/10 * 10 = 6 kW, 4/10 * 10 = 4 kW.
     const a1Kw = new Prisma.Decimal(a1!.assignedKw)
     const a2Kw = new Prisma.Decimal(a2!.assignedKw)
-    expect(a1Kw.greaterThan(a2Kw)).toBe(true)
+    // Exact proportional allocation: 6 kW and 4 kW.
+    expect(a1Kw.toFixed(2)).toBe('6.00')
+    expect(a2Kw.toFixed(2)).toBe('4.00')
 
     // Clean up the second device to avoid interfering with other tests.
     await db.deviceCredential.deleteMany({ where: { deviceId: provisioned2.device.id } }).catch(() => {})
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Test: concurrent first allocations (the critical concurrency bug)
+// ---------------------------------------------------------------------------
+
+describe('VPP invariant: concurrent capacity allocation', () => {
+  it('should not allow two concurrent 7 kW allocations against 10 kW capacity', async () => {
+    // Create a fresh asset with 10 kW verified capacity.
+    const freshAsset = await createAsset(tenantId, { operatorId, assetType: 'battery', name: `Conc-${Date.now()}` })
+    await assignAssetToNetwork(tenantId, freshAsset.id, networkId, 'energy_discharge', '10')
+
+    const program = await createBuyerProgram(tenantId, {
+      networkId, name: `ConcProg-${Date.now()}`,
+      rewardRuleId, dispatchWindowStart: '00:00', dispatchWindowEnd: '23:59',
+      pricePerKwh: '0.12', minCapacityKw: '1',
+    })
+
+    const now = new Date()
+    const start = now.toISOString()
+    const end = new Date(now.getTime() + 3600000).toISOString()
+
+    // Two concurrent reservations of 7 kW each against 10 kW capacity.
+    const results = await Promise.allSettled([
+      createCapacityReservation(tenantId, {
+        programId: program.id, operatorId, assetId: freshAsset.id, capabilityType: 'energy_discharge',
+        reservedKw: '7', startTime: start, endTime: end,
+      }),
+      createCapacityReservation(tenantId, {
+        programId: program.id, operatorId, assetId: freshAsset.id, capabilityType: 'energy_discharge',
+        reservedKw: '7', startTime: start, endTime: end,
+      }),
+    ])
+
+    // Exactly one must succeed, the other must fail with insufficient capacity.
+    const succeeded = results.filter((r) => r.status === 'fulfilled')
+    const failed = results.filter((r) => r.status === 'rejected')
+    expect(succeeded.length).toBe(1)
+    expect(failed.length).toBe(1)
+
+    // The failed one should be an insufficient capacity error.
+    const failedReason = (failed[0] as PromiseRejectedResult).reason
+    expect(failedReason.message).toMatch(/Insufficient capacity|exceeds verified physical capacity/)
+
+    // Verify total allocated capacity does not exceed 10 kW.
+    const allocations = await db.capacityAllocation.findMany({
+      where: { assetId: freshAsset.id, capabilityType: 'energy_discharge', lifecycleState: { not: 'released' } },
+    })
+    const totalAllocated = allocations.reduce(
+      (sum, a) => sum.plus(new Prisma.Decimal(a.allocatedAmount)),
+      new Prisma.Decimal(0),
+    )
+    expect(totalAllocated.toString()).toBe('7')
+    expect(totalAllocated.lte(10)).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Test: physical capacity cannot be spoofed by caller
+// ---------------------------------------------------------------------------
+
+describe('VPP invariant: no untrusted capacity', () => {
+  it('should reject reservation exceeding verified capacity even if caller provides higher value', async () => {
+    // Asset has 10 kW verified capacity (set in beforeAll).
+    const program = await createBuyerProgram(tenantId, {
+      networkId, name: `Spoof-${Date.now()}`,
+      rewardRuleId, dispatchWindowStart: '00:00', dispatchWindowEnd: '23:59',
+      pricePerKwh: '0.12', minCapacityKw: '1',
+    })
+
+    // Try to reserve 50 kW. The CreateReservationInput no longer accepts
+    // physicalCapacityKw, so the allocator will use the verified 10 kW.
+    await expect(
+      createCapacityReservation(tenantId, {
+        programId: program.id, operatorId, assetId, capabilityType: 'energy_discharge',
+        reservedKw: '50',
+        startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
+      }),
+    ).rejects.toThrow(/exceeds verified physical capacity/)
   })
 })

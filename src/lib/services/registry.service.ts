@@ -132,6 +132,11 @@ export interface AssignAssetNetworkInput {
  * Explicitly assign an asset to a network. An asset MUST have an active
  * assignment to ingest events or earn contributions in that network.
  *
+ * Task 2: the assignment includes `verifiedCapacityKw` — the authoritative
+ * physical capacity for this asset+capability. This is set at assignment time
+ * and used by the capacity allocator. Callers can NEVER override it during
+ * allocation.
+ *
  * This replaces the old "pick the tenant's most recent network" heuristic,
  * which was unsafe for multi-network tenants.
  */
@@ -140,6 +145,7 @@ export async function assignAssetToNetwork(
   assetId: string,
   networkId: string,
   capabilityType: string,
+  verifiedCapacityKw?: string,
   actorId?: string,
 ) {
   // Validate asset + network belong to tenant.
@@ -152,17 +158,24 @@ export async function assignAssetToNetwork(
   })
   if (existing) {
     if (existing.status === 'active') {
+      // Update verified capacity if provided.
+      if (verifiedCapacityKw && existing.verifiedCapacityKw !== verifiedCapacityKw) {
+        return db.assetNetworkAssignment.update({
+          where: { id: existing.id },
+          data: { verifiedCapacityKw },
+        })
+      }
       return existing
     }
     // Reactivate.
     return db.assetNetworkAssignment.update({
       where: { id: existing.id },
-      data: { status: 'active', effectiveTo: null, capabilityType },
+      data: { status: 'active', effectiveTo: null, capabilityType, verifiedCapacityKw: verifiedCapacityKw ?? null },
     })
   }
 
   const assignment = await db.assetNetworkAssignment.create({
-    data: { tenantId, assetId, networkId, capabilityType, status: 'active' },
+    data: { tenantId, assetId, networkId, capabilityType, status: 'active', verifiedCapacityKw: verifiedCapacityKw ?? null },
   })
 
   await appendAudit({
