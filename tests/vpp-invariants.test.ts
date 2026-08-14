@@ -73,8 +73,10 @@ async function setupProgramAndReservation(opts?: {
   reservedKw?: string
   startTime?: Date
   endTime?: Date
+  offsetMs?: number // unique time window per test to avoid overlap
 }) {
-  const now = new Date()
+  const offset = opts?.offsetMs ?? Math.floor(Math.random() * 86400000) // random offset within 24h
+  const now = new Date(Date.now() + offset)
   const start = opts?.startTime ?? now
   const end = opts?.endTime ?? new Date(now.getTime() + 3600000)
   const reserved = opts?.reservedKw ?? '10'
@@ -91,7 +93,7 @@ async function setupProgramAndReservation(opts?: {
     startTime: start.toISOString(), endTime: end.toISOString(),
   })
 
-  return { program, reservation }
+  return { program, reservation, startTime: start, endTime: end }
 }
 
 // ---------------------------------------------------------------------------
@@ -100,11 +102,11 @@ async function setupProgramAndReservation(opts?: {
 
 describe('VPP invariant: derived contribution', () => {
   it('should use VppBaseline.performanceKwh as the Contribution quantity', async () => {
-    const { program } = await setupProgramAndReservation({ reservedKw: '5' })
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '5' })
 
     const { assignments } = await createDispatch(tenantId, {
       programId: program.id, requestedKw: '5', requestedKwh: '10',
-      startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
     })
 
     const result = await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret)
@@ -144,7 +146,7 @@ describe('VPP invariant: capacity integrity', () => {
       createCapacityReservation(tenantId, {
         programId: program.id, operatorId, assetId, capabilityType: 'energy_discharge',
         reservedKw: '15',
-        startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
+        startTime: startTime.toISOString(), endTime: endTime.toISOString(),
       }),
     ).rejects.toThrow(/exceeds physical capacity/)
   })
@@ -161,7 +163,7 @@ describe('VPP invariant: capacity integrity', () => {
       createCapacityReservation(tenantId, {
         programId: program.id, operatorId: otherOperator.id, assetId, capabilityType: 'energy_discharge',
         reservedKw: '5',
-        startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
+        startTime: startTime.toISOString(), endTime: endTime.toISOString(),
       }),
     ).rejects.toThrow(/does not own asset/)
   })
@@ -177,7 +179,7 @@ describe('VPP invariant: capacity integrity', () => {
       createCapacityReservation(tenantId, {
         programId: program.id, operatorId, assetId, capabilityType: 'frequency_response',
         reservedKw: '5',
-        startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
+        startTime: startTime.toISOString(), endTime: endTime.toISOString(),
       }),
     ).rejects.toThrow(/not assigned.*capability/)
   })
@@ -253,11 +255,11 @@ describe('VPP invariant: no double-selling', () => {
 
 describe('VPP invariant: idempotent execution', () => {
   it('should not create duplicate rewards on repeated execution', async () => {
-    const { program } = await setupProgramAndReservation({ reservedKw: '5' })
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '5' })
 
     const { assignments } = await createDispatch(tenantId, {
       programId: program.id, requestedKw: '5', requestedKwh: '10',
-      startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
     })
 
     // First execution.
@@ -410,7 +412,7 @@ describe('VPP invariant: no untrusted capacity', () => {
       createCapacityReservation(tenantId, {
         programId: program.id, operatorId, assetId, capabilityType: 'energy_discharge',
         reservedKw: '50',
-        startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
+        startTime: startTime.toISOString(), endTime: endTime.toISOString(),
       }),
     ).rejects.toThrow(/exceeds verified physical capacity/)
   })
@@ -422,7 +424,7 @@ describe('VPP invariant: no untrusted capacity', () => {
 
 describe('VPP invariant: concurrent dispatch consumption', () => {
   it('Test A: two concurrent 10 kW dispatches against one 10 kW reservation → exactly 1 succeeds', async () => {
-    const { program } = await setupProgramAndReservation({ reservedKw: '10' })
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
 
     const now = new Date()
     const start = now.toISOString()
@@ -446,7 +448,7 @@ describe('VPP invariant: concurrent dispatch consumption', () => {
   })
 
   it('Test B: 6 kW + 4 kW dispatches against 10 kW reservation → both succeed', async () => {
-    const { program } = await setupProgramAndReservation({ reservedKw: '10' })
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
 
     const now = new Date()
     const start = now.toISOString()
@@ -466,7 +468,7 @@ describe('VPP invariant: concurrent dispatch consumption', () => {
   })
 
   it('Test C: 6 kW + 4 kW + 1 kW against 10 kW → third fails', async () => {
-    const { program } = await setupProgramAndReservation({ reservedKw: '10' })
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
 
     const now = new Date()
     const start = now.toISOString()
@@ -497,11 +499,11 @@ describe('VPP invariant: concurrent dispatch consumption', () => {
 
 describe('VPP invariant: capacity lifecycle', () => {
   it('should record usage (kWh) separate from commitment (kW) on successful dispatch', async () => {
-    const { program } = await setupProgramAndReservation({ reservedKw: '10' })
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
 
     const { assignments } = await createDispatch(tenantId, {
       programId: program.id, requestedKw: '5', requestedKwh: '10',
-      startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
     })
 
     const result = await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret)
@@ -523,11 +525,11 @@ describe('VPP invariant: capacity lifecycle', () => {
   })
 
   it('should release commitment when dispatch verification fails', async () => {
-    const { program } = await setupProgramAndReservation({ reservedKw: '10' })
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
 
     const { assignments } = await createDispatch(tenantId, {
       programId: program.id, requestedKw: '5', requestedKwh: '10',
-      startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
     })
 
     // Execute with WRONG provisioning secret → verification should fail.
@@ -580,7 +582,7 @@ describe('VPP invariant: capacity lifecycle', () => {
 
   it('should reject commitment with mismatched unit', async () => {
     const { createCapacityCommitment } = await import('../src/lib/services/capacity.service')
-    const { program } = await setupProgramAndReservation({ reservedKw: '10' })
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
 
     const vppReservation = await db.vppCapacityReservation.findFirst({ where: { programId: program.id } })
     const capacityReservation = await findReservationBySource(tenantId, 'vpp_reservation', vppReservation!.id)

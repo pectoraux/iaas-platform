@@ -404,12 +404,13 @@ export async function executeDispatchAssignment(
   // Sign + submit telemetry as a generic Event.
   const eventId = `vpp-dispatch-${assignmentId}-${Date.now()}`
   const timestamp = new Date().toISOString()
+  const sequence = Math.floor(Date.now() / 1000) // compute ONCE (fix: was computed twice with await between)
   const message = buildCanonicalMessage({
     device_id: device.id,
     event_id: eventId,
     timestamp,
     event_type: 'telemetry',
-    sequence: Math.floor(Date.now() / 1000),
+    sequence,
     payload: dischargeResult.telemetry.payload,
   })
   const signingKey = deriveSigningKey(provisioningSecret)
@@ -426,7 +427,7 @@ export async function executeDispatchAssignment(
     event_id: eventId,
     timestamp,
     event_type: 'telemetry',
-    sequence: Math.floor(Date.now() / 1000),
+    sequence, // reuse the same value (fix: was Math.floor(Date.now()/1000) again)
     payload: dischargeResult.telemetry.payload,
     signature,
     network_version_id: networkVersion?.id,
