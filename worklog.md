@@ -333,3 +333,37 @@ Stage Summary:
 - Capacity lifecycle is modeled: allocated → committed → consumed → released.
 - Production verified: login + E2E work on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit a986313)
+
+---
+Task ID: capacity-lifecycle-redesign
+Agent: orchestrator
+Task: Redesign capacity model from single allocation to 4-layer Resource→Reservation→Commitment→Consumption.
+
+Work Log:
+- Replaced CapacityAllocation with CapacityResource + CapacityReservation + CapacityCommitment
+- CapacityResource: verified physical capacity, stable lock target (FOR UPDATE)
+- CapacityReservation: operator commits capacity for a window; tracks remainingAmount
+- CapacityCommitment: a dispatch commits some of the reserved capacity; decrements remaining
+- Consumption: recorded per commitment on completion
+- Fixed consumption source ID (was using dispatchId on vpp_reservation source)
+- Moved capacity commit INSIDE the dispatch transaction (no race window)
+- Multiple commitments can share a reservation (6+4=10)
+- Removed competing commitCapacityForDispatch model
+- Fixed getAvailableCapacity to require networkId
+- Added 30s transaction timeout for concurrent operations
+
+Tests (all pass):
+- Test A: two concurrent 10 kW dispatches → exactly 1 succeeds
+- Test B: 6 kW + 4 kW → both succeed (partial consumption)
+- Test C: 6 + 4 + 1 kW → third fails (remaining tracked correctly)
+- Concurrent first allocations (7+7 vs 10): exactly 1 wins
+- Spoofed capacity rejection (50 vs 10 verified)
+- Exact 6:4 multi-asset allocation
+
+Stage Summary:
+- Capacity lifecycle is now properly modeled as 4-layer resource system.
+- No double-dispatch possible (atomic commitments with FOR UPDATE).
+- Partial consumption works (6+4=10, third fails).
+- Platform primitive reusable by Storage, Compute, Wireless.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit b7001db)
