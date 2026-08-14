@@ -460,3 +460,29 @@ Stage Summary:
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit ff2f301)
 - EXECUTION/CAPACITY LAYER IS NOW FROZEN. Ready for VPP-2.
+
+---
+Task ID: reconciliation-state
+Agent: orchestrator
+Task: Fix final state-machine inconsistency — post-usage failure enters reconciliation, not release.
+
+Work Log:
+- Split catch block: pre-usage failure → FAILED+released; post-usage failure → RECONCILIATION_REQUIRED (no release)
+- usageRecorded flag tracks whether capacity has been consumed
+- markReconciliationRequired: sets status, audits, does NOT release commitment
+- New retrySettlement() function: re-processes settlement outbox, transitions to COMPLETED on success
+- New API: POST /api/v1/vpp/dispatches/:id/retry-settlement
+- Tests: successful flow (COMPLETED+consumed), pre-usage failure (FAILED+released+no usage), no-released-after-usage invariant (18 assignments), no-completed+active (34 assignments)
+
+State machine:
+  ASSIGNED → DISPATCHING → DELIVERY_VERIFIED → USAGE_RECORDED → SETTLEMENT_PENDING → COMPLETED
+  Pre-usage failure → FAILED → RELEASED
+  Post-usage failure → RECONCILIATION_REQUIRED → (retry) → COMPLETED
+
+Stage Summary:
+- The state machine now correctly distinguishes delivery failure from economic failure.
+- Consumed capacity is never released.
+- Financial liability is preserved for reconciliation.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit cad11ef)
+- EXECUTION/CAPACITY LAYER IS NOW FROZEN. Ready for VPP-2.
