@@ -272,14 +272,35 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
     })
 
     // Assign assets proportionally + create capacity commitments (atomic).
-    // Task 4: each assignment creates a CapacityCommitment against the
-    // reservation's platform CapacityReservation. This decrements the
-    // reservation's remaining capacity, preventing over-commitment.
+    // Fix 1: each assignment creates its OWN CapacityCommitment (1:1).
+    // The commitmentId is stored on the assignment for direct lookup.
     for (const reservation of reservations) {
       const ratio = new Prisma.Decimal(reservation.reservedKw).div(totalReservedKw)
       const assignedKw = requestedKw.times(ratio)
       const assignedKwh = requestedKwh.times(ratio)
 
+      // Find the platform capacity reservation for this VPP reservation (inside tx).
+      const capacityReservation = await tx.capacityReservation.findFirst({
+        where: { tenantId, sourceType: 'vpp_reservation', sourceId: reservation.id, status: 'active' },
+      })
+
+      let commitmentId: string | null = null
+      if (capacityReservation) {
+        // Create a capacity commitment for THIS assignment (not the dispatch).
+        const commitment = await createCapacityCommitment({
+          tenantId,
+          reservationId: capacityReservation.id,
+          committedAmount: assignedKw.toFixed(8),
+          unit: 'kW',
+          startTime,
+          endTime,
+          sourceType: 'vpp_dispatch_assignment',
+          sourceId: `assignment-${created.id}-${reservation.assetId}`, // unique per assignment
+        }, tx)
+        commitmentId = commitment.commitmentId
+      }
+
+      // Store the commitmentId on the assignment for direct lookup.
       await tx.vppDispatchAssignment.create({
         data: {
           tenantId,
@@ -289,25 +310,9 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
           capabilityType: reservation.capabilityType,
           assignedKw: assignedKw.toFixed(8),
           assignedKwh: assignedKwh.toFixed(8),
+          capacityCommitmentId: commitmentId,
         },
       })
-
-      // Find the platform capacity reservation for this VPP reservation.
-      const capacityReservation = await findReservationBySource(tenantId, 'vpp_reservation', reservation.id)
-      if (capacityReservation) {
-        // Create a capacity commitment (atomic, inside the dispatch transaction).
-        // This locks the reservation FOR UPDATE and decrements remaining.
-        await createCapacityCommitment({
-          tenantId,
-          reservationId: capacityReservation.id,
-          committedAmount: assignedKw.toFixed(8),
-          unit: 'kW', // capacity unit (not kWh — usage is recorded separately)
-          startTime,
-          endTime,
-          sourceType: 'vpp_dispatch',
-          sourceId: created.id,
-        }, tx)
-      }
     }
 
     return created
@@ -377,18 +382,31 @@ export async function executeDispatchAssignment(
     }
   }
 
-  // Task 7: atomic status transition — only one execution can proceed.
-  // Use a conditional update to claim the assignment.
+  // Fix 2: atomic status transition — ONLY 'assigned' can transition to 'dispatching'.
+  // A 'dispatching' assignment means another caller is already executing; we
+  // must NOT allow a second caller to enter. (Previous bug: status IN ['assigned', 'dispatching']
+  // allowed two concurrent callers to both proceed.)
   const updated = await db.vppDispatchAssignment.updateMany({
-    where: { id: assignmentId, status: { in: ['assigned', 'dispatching'] } },
+    where: { id: assignmentId, status: 'assigned' },
     data: { status: 'dispatching' },
   })
   if (updated.count === 0) {
-    throw new ConflictError(`Assignment ${assignmentId} is not in an executable state (status: ${assignment.status})`)
+    throw new ConflictError(`Assignment ${assignmentId} is not in 'assigned' state (current: ${assignment.status}). Concurrent execution rejected.`)
+  }
+
+  // Helper: release the assignment's commitment on any failure (fix 3).
+  const releaseAssignmentCapacity = async () => {
+    if (assignment.capacityCommitmentId) {
+      await releaseCommitment(tenantId, 'vpp_dispatch_assignment', `assignment-${assignment.dispatchId}-${assignment.assetId}`)
+    }
   }
 
   const device = assignment.asset.devices.find((d) => d.credential && d.credential.status === 'active')
-  if (!device) throw new ValidationError(`Asset ${assignment.assetId} has no active device with credential`)
+  if (!device) {
+    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
+    await releaseAssignmentCapacity() // fix 3: release on missing device
+    throw new ValidationError(`Asset ${assignment.assetId} has no active device with credential`)
+  }
 
   // --- Task 2: use DER adapter interface ---
   const durationSeconds = Math.floor(
@@ -443,8 +461,7 @@ export async function executeDispatchAssignment(
 
   if (event?.status !== 'verified' || !event.attestations[0]) {
     await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
-    // Release the capacity commitment so the capacity is not stranded.
-    await releaseCommitment(tenantId, 'vpp_dispatch', assignment.dispatchId)
+    await releaseAssignmentCapacity() // fix 3: release on verification failure
     throw new Error(`Dispatch telemetry verification failed: ${event?.status}`)
   }
 
@@ -492,7 +509,7 @@ export async function executeDispatchAssignment(
     ledger = await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
   } catch (err) {
     await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
-    await releaseCommitment(tenantId, 'vpp_dispatch', assignment.dispatchId)
+    await releaseAssignmentCapacity() // fix 3: release on funding failure
     throw err
   }
 
@@ -513,23 +530,27 @@ export async function executeDispatchAssignment(
     },
   })
 
+  // Fix 1: record usage for THIS assignment's commitment (not the dispatch).
+  // Each assignment has its own commitmentId — no multi-asset ambiguity.
+  if (assignment.capacityCommitmentId) {
+    await recordUsage({
+      tenantId,
+      commitmentId: assignment.capacityCommitmentId,
+      quantity: actualKwh.toString(), // THIS assignment's actual kWh
+      unit: 'kWh',
+      startTime: assignment.dispatch.startTime,
+      endTime: assignment.dispatch.endTime,
+      sourceType: 'vpp_dispatch_assignment',
+      sourceId: `assignment-${assignment.dispatchId}-${assignment.assetId}`,
+    })
+  }
+
   // Update dispatch status if all assignments completed.
   const pendingAssignments = await db.vppDispatchAssignment.count({
     where: { dispatchId: assignment.dispatchId, status: { not: 'completed' } },
   })
   if (pendingAssignments === 0) {
     await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
-    // Record ACTUAL USAGE (kWh — energy delivered, not kW capacity).
-    // This is dimensionally separate from the commitment (kW).
-    await recordUsage({
-      tenantId,
-      sourceType: 'vpp_dispatch',
-      sourceId: assignment.dispatchId,
-      quantity: assignment.actualKwh ?? assignment.assignedKwh,
-      unit: 'kWh', // usage unit (capacity was committed in kW)
-      startTime: assignment.dispatch.startTime,
-      endTime: assignment.dispatch.endTime,
-    })
   }
 
   await appendAudit({

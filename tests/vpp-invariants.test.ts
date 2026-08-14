@@ -69,20 +69,23 @@ beforeAll(async () => {
 })
 
 // Helper to create a fully-wired program + reservation.
+let testCounter = 0
 async function setupProgramAndReservation(opts?: {
   reservedKw?: string
   startTime?: Date
   endTime?: Date
-  offsetMs?: number // unique time window per test to avoid overlap
 }) {
-  const offset = opts?.offsetMs ?? Math.floor(Math.random() * 86400000) // random offset within 24h
-  const now = new Date(Date.now() + offset)
+  // Use a unique time window per test to avoid overlap.
+  // Each test gets a window 10 hours in the future, offset by testCounter * 2 hours.
+  testCounter++
+  const baseTime = Date.now() + 3600000 * (10 + testCounter * 2) // 10h + 2h per test
+  const now = new Date(baseTime)
   const start = opts?.startTime ?? now
   const end = opts?.endTime ?? new Date(now.getTime() + 3600000)
   const reserved = opts?.reservedKw ?? '10'
 
   const program = await createBuyerProgram(tenantId, {
-    networkId, name: `Program-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    networkId, name: `Program-${testCounter}-${Date.now()}`,
     rewardRuleId, dispatchWindowStart: '00:00', dispatchWindowEnd: '23:59',
     pricePerKwh: '0.12', minCapacityKw: '1',
   })
@@ -426,9 +429,8 @@ describe('VPP invariant: concurrent dispatch consumption', () => {
   it('Test A: two concurrent 10 kW dispatches against one 10 kW reservation → exactly 1 succeeds', async () => {
     const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
 
-    const now = new Date()
-    const start = now.toISOString()
-    const end = new Date(now.getTime() + 3600000).toISOString()
+    const start = startTime.toISOString()
+    const end = endTime.toISOString()
 
     const results = await Promise.allSettled([
       createDispatch(tenantId, {
@@ -441,6 +443,13 @@ describe('VPP invariant: concurrent dispatch consumption', () => {
       }),
     ])
 
+    // Log errors for debugging.
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        console.log(`  Dispatch ${i} failed:`, r.reason?.message ?? r.reason)
+      }
+    })
+
     const succeeded = results.filter((r) => r.status === 'fulfilled')
     const failed = results.filter((r) => r.status === 'rejected')
     expect(succeeded.length).toBe(1)
@@ -450,9 +459,8 @@ describe('VPP invariant: concurrent dispatch consumption', () => {
   it('Test B: 6 kW + 4 kW dispatches against 10 kW reservation → both succeed', async () => {
     const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
 
-    const now = new Date()
-    const start = now.toISOString()
-    const end = new Date(now.getTime() + 3600000).toISOString()
+    const start = startTime.toISOString()
+    const end = endTime.toISOString()
 
     const result1 = await createDispatch(tenantId, {
       programId: program.id, requestedKw: '6', requestedKwh: '6',
@@ -470,9 +478,8 @@ describe('VPP invariant: concurrent dispatch consumption', () => {
   it('Test C: 6 kW + 4 kW + 1 kW against 10 kW → third fails', async () => {
     const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
 
-    const now = new Date()
-    const start = now.toISOString()
-    const end = new Date(now.getTime() + 3600000).toISOString()
+    const start = startTime.toISOString()
+    const end = endTime.toISOString()
 
     await createDispatch(tenantId, {
       programId: program.id, requestedKw: '6', requestedKwh: '6',
@@ -509,15 +516,15 @@ describe('VPP invariant: capacity lifecycle', () => {
     const result = await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret)
 
     // Verify the commitment is consumed.
-    const commitment = await db.capacityCommitment.findFirst({
-      where: { sourceType: 'vpp_dispatch', sourceId: assignments[0].dispatchId },
+    const commitment = await db.capacityCommitment.findUnique({
+      where: { id: assignments[0].capacityCommitmentId! },
     })
     expect(commitment?.status).toBe('consumed')
     expect(commitment?.unit).toBe('kW') // capacity unit
 
     // Verify the usage is recorded with kWh (not kW).
     const usage = await db.capacityUsage.findFirst({
-      where: { sourceType: 'vpp_dispatch', sourceId: assignments[0].dispatchId },
+      where: { commitmentId: commitment?.id },
     })
     expect(usage).toBeTruthy()
     expect(usage?.unit).toBe('kWh') // usage unit (different dimension!)
@@ -538,8 +545,8 @@ describe('VPP invariant: capacity lifecycle', () => {
     ).rejects.toThrow()
 
     // The commitment should be released (not consumed).
-    const commitment = await db.capacityCommitment.findFirst({
-      where: { sourceType: 'vpp_dispatch', sourceId: assignments[0].dispatchId },
+    const commitment = await db.capacityCommitment.findUnique({
+      where: { id: assignments[0].capacityCommitmentId! },
     })
     expect(commitment?.status).toBe('released')
 

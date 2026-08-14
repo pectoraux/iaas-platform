@@ -312,56 +312,103 @@ export async function createCapacityCommitment(
 
 export interface RecordUsageInput {
   tenantId: string
-  sourceType: string // vpp_dispatch | storage_job | ...
-  sourceId: string
+  commitmentId: string // Fix 1: use commitmentId directly (not sourceType/sourceId)
   // Usage quantity + unit (may differ from commitment unit).
   // e.g. commitment = 6 kW, usage = 2.85 kWh.
   quantity: string
   unit: string // kWh | TB | GPU-hours | ...
   startTime: Date
   endTime: Date
+  sourceType?: string // optional metadata
+  sourceId?: string   // optional metadata
   attestationId?: string
 }
 
 /**
  * Record actual usage for a commitment.
  *
- * This is SEPARATE from the commitment because capacity (kW) and usage (kWh)
- * are different physical dimensions. The commitment represents promised
- * capacity; the usage represents actual consumption.
+ * Fix 1: takes commitmentId directly (not sourceType/sourceId) — eliminates
+ *   multi-asset dispatch ambiguity where all assignments shared the same lookup.
+ * Fix 4: ATOMIC + IDEMPOTENT — creates usage + marks commitment consumed in
+ *   ONE transaction. The unique constraint on commitmentId prevents duplicate
+ *   usage records. If called twice, returns the existing usage.
  *
- * Also marks the commitment as 'consumed' (terminal state).
+ * Capacity (kW) and usage (kWh) are different physical dimensions.
  */
-export async function recordUsage(input: RecordUsageInput): Promise<{ usageId: string }> {
-  const commitment = await db.capacityCommitment.findFirst({
-    where: { tenantId: input.tenantId, sourceType: input.sourceType, sourceId: input.sourceId },
+export async function recordUsage(input: RecordUsageInput): Promise<{ usageId: string; duplicate: boolean }> {
+  // Idempotency: check for existing usage on this commitment.
+  const existing = await db.capacityUsage.findUnique({
+    where: { commitmentId: input.commitmentId },
   })
-  if (!commitment) {
-    throw new NotFoundError('capacity_commitment', `${input.sourceType}/${input.sourceId}`)
+  if (existing) {
+    return { usageId: existing.id, duplicate: true }
   }
 
-  // Create the usage record.
-  const usage = await db.capacityUsage.create({
-    data: {
-      tenantId: input.tenantId,
-      commitmentId: commitment.id,
-      quantity: input.quantity,
-      unit: input.unit,
-      startTime: input.startTime,
-      endTime: input.endTime,
-      sourceType: input.sourceType,
-      sourceId: input.sourceId,
-      attestationId: input.attestationId ?? null,
-    },
-  })
+  // Atomic: create usage + mark commitment consumed in ONE transaction.
+  try {
+    const result = await db.$transaction(async (tx) => {
+      // Lock the commitment FOR UPDATE.
+      await tx.$queryRaw`SELECT * FROM "CapacityCommitment" WHERE id = ${input.commitmentId} FOR UPDATE`
 
-  // Mark the commitment as consumed (terminal state).
-  await db.capacityCommitment.update({
-    where: { id: commitment.id },
-    data: { status: 'consumed', completedAt: new Date() },
-  })
+      const commitment = await tx.capacityCommitment.findUnique({
+        where: { id: input.commitmentId },
+      })
+      if (!commitment) {
+        throw new NotFoundError('capacity_commitment', input.commitmentId)
+      }
 
-  return { usageId: usage.id }
+      // Idempotency: double-check inside the lock.
+      const existingUsage = await tx.capacityUsage.findUnique({
+        where: { commitmentId: input.commitmentId },
+      })
+      if (existingUsage) {
+        return { usageId: existingUsage.id, duplicate: true }
+      }
+
+      // Verify commitment is active (can't record usage on released/consumed).
+      if (commitment.status !== 'active') {
+        throw new ValidationError(
+          `Cannot record usage for commitment ${input.commitmentId}: status is ${commitment.status}`,
+        )
+      }
+
+      // Create the usage record.
+      const usage = await tx.capacityUsage.create({
+        data: {
+          tenantId: input.tenantId,
+          commitmentId: input.commitmentId,
+          quantity: input.quantity,
+          unit: input.unit,
+          startTime: input.startTime,
+          endTime: input.endTime,
+          sourceType: input.sourceType ?? '',
+          sourceId: input.sourceId ?? null,
+          attestationId: input.attestationId ?? null,
+        },
+      })
+
+      // Mark the commitment as consumed (terminal state).
+      await tx.capacityCommitment.update({
+        where: { id: input.commitmentId },
+        data: { status: 'consumed', completedAt: new Date() },
+      })
+
+      return { usageId: usage.id, duplicate: false }
+    }, { timeout: 30000 })
+
+    return result
+  } catch (err: any) {
+    // If the unique constraint was violated (race), return the existing usage.
+    if (err?.code === 'P2002') {
+      const existing = await db.capacityUsage.findUnique({
+        where: { commitmentId: input.commitmentId },
+      })
+      if (existing) {
+        return { usageId: existing.id, duplicate: true }
+      }
+    }
+    throw err
+  }
 }
 
 // ---------------------------------------------------------------------------

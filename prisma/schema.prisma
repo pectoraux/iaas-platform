@@ -573,8 +573,9 @@ model CapacityUsage {
   tenant      Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   commitment  CapacityCommitment @relation(fields: [commitmentId], references: [id], onDelete: Cascade)
 
+  // Fix 4: one usage per commitment (idempotency — prevents duplicate usage records).
+  @@unique([commitmentId])
   @@index([tenantId])
-  @@index([commitmentId])
   @@index([sourceType, sourceId])
 }
 
@@ -1007,6 +1008,10 @@ model VppDispatchAssignment {
   // Link to the generic pipeline (filled when the asset reports telemetry).
   eventId         String?  // the generic Event created by the asset's discharge telemetry
   contributionId  String?  // the generic Contribution created from the performance
+  // Fix 1: explicit link to the capacity commitment (1:1 per assignment).
+  // This prevents multi-asset dispatch ambiguity where all assignments shared
+  // the same (sourceType=vpp_dispatch, sourceId=dispatchId) lookup.
+  capacityCommitmentId String?
   createdAt       DateTime @default(now())
   completedAt     DateTime?
 
