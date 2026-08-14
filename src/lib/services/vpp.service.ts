@@ -668,74 +668,61 @@ export async function reconcileAssignment(
   if (!assignment) throw new NotFoundError('vpp_dispatch_assignment', assignmentId)
 
   try {
-    const stage = assignment.economicStage
+    // Inspect DURABLE OBJECTS (not just economicStage) to determine the actual
+    // next stage. The economicStage checkpoint is a hint, but the existence/state
+    // of reward, ledger posting, and settlement is the source of truth.
+    if (!assignment.contributionId) {
+      throw new Error('Cannot reconcile: contributionId missing')
+    }
 
-    // Stage: usage_recorded but reward not yet calculated.
-    if (stage === 'usage_recorded' || stage === 'delivery_verified') {
-      if (!assignment.contributionId) {
-        throw new Error('Cannot reconcile: contributionId missing but usage was not recorded')
-      }
-      const reward = await calculateReward(tenantId, assignment.contributionId, `vpp-contrib-${assignment.contributionId}`)
+    // 1. Check if reward exists. If not, calculate it.
+    let reward = await db.reward.findFirst({ where: { contributionId: assignment.contributionId } })
+    if (!reward) {
+      reward = await calculateReward(tenantId, assignment.contributionId, `vpp-contrib-${assignment.contributionId}`)
       await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'reward_calculated' } })
-      // Fall through to ledger.
+    }
+
+    // 2. Check if reward is posted to ledger. If not, post it.
+    if (reward.status === 'calculated') {
       await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
+      // Reload reward to get updated status.
+      reward = (await db.reward.findUnique({ where: { id: reward.id } }))!
       await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'ledger_posted' } })
-      // Fall through to settlement.
-      await createSettlement(tenantId, reward.id)
-      await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'settlement_pending' } })
-      await processSettlementForReward(tenantId, reward.id)
     }
 
-    // Stage: reward_calculated but ledger not posted.
-    if (stage === 'reward_calculated') {
-      const reward = await db.reward.findFirst({ where: { contributionId: assignment.contributionId! } })
-      if (!reward) throw new Error('Reward missing during reconciliation')
-      await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
-      await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'ledger_posted' } })
-      // Fall through to settlement.
-      await createSettlement(tenantId, reward.id)
+    // 3. Check if settlement exists. If not, create it.
+    let settlement = await db.settlement.findUnique({ where: { rewardId: reward.id } })
+    if (!settlement) {
+      settlement = await createSettlement(tenantId, reward.id)
       await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'settlement_pending' } })
-      await processSettlementForReward(tenantId, reward.id)
     }
 
-    // Stage: ledger_posted but settlement not created.
-    if (stage === 'ledger_posted') {
-      const reward = await db.reward.findFirst({ where: { contributionId: assignment.contributionId! } })
-      if (!reward) throw new Error('Reward missing during reconciliation')
-      await createSettlement(tenantId, reward.id)
-      await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'settlement_pending' } })
+    // 4. Process the specific settlement if not yet completed.
+    if (settlement.status !== 'completed') {
       await processSettlementForReward(tenantId, reward.id)
+      settlement = (await db.settlement.findUnique({ where: { rewardId: reward.id } }))!
     }
 
-    // Stage: settlement_pending → process specific settlement, then check.
-    if (stage === 'settlement_pending' || stage === 'reward_calculated' || stage === 'ledger_posted' || stage === 'usage_recorded' || stage === 'delivery_verified') {
-      const reward = await db.reward.findFirst({ where: { contributionId: assignment.contributionId! } })
-      if (reward) {
-        // Target this specific settlement, not the entire tenant outbox.
-        await processSettlementForReward(tenantId, reward.id)
-        const settlement = await db.settlement.findUnique({ where: { rewardId: reward.id } })
-        if (settlement?.status === 'completed') {
-          // Settlement succeeded → COMPLETED.
-          await db.vppDispatchAssignment.update({
-            where: { id: assignmentId },
-            data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
-          })
-          const pending = await db.vppDispatchAssignment.count({
-            where: { dispatchId: assignment.dispatchId, status: { not: 'completed' } },
-          })
-          if (pending === 0) {
-            await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
-          }
-          await appendAudit({
-            tenantId, actorId,
-            eventType: 'vpp.reconciliation_completed',
-            resourceType: 'vpp_dispatch_assignment',
-            resourceId: assignmentId,
-            metadata: { rewardId: reward.id, settlementId: settlement.id },
-          })
-          return { assignment_id: assignmentId, status: 'completed', economic_stage: 'completed', message: 'Reconciliation succeeded' }
-        }
+    // 5. Check if settlement is now completed.
+    if (settlement.status === 'completed') {
+      await db.vppDispatchAssignment.update({
+        where: { id: assignmentId },
+        data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
+      })
+      const pending = await db.vppDispatchAssignment.count({
+        where: { dispatchId: assignment.dispatchId, status: { not: 'completed' } },
+      })
+      if (pending === 0) {
+        await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
       }
+      await appendAudit({
+        tenantId, actorId,
+        eventType: 'vpp.reconciliation_completed',
+        resourceType: 'vpp_dispatch_assignment',
+        resourceId: assignmentId,
+        metadata: { rewardId: reward.id, settlementId: settlement.id },
+      })
+      return { assignment_id: assignmentId, status: 'completed', economic_stage: 'completed', message: 'Reconciliation succeeded' }
     }
 
     // Settlement still not completed.

@@ -392,13 +392,23 @@ export async function processSettlementForReward(tenantId: string, rewardId: str
   if (settlement.tenantId !== tenantId) return { completed: false, settlementId: settlement.id }
 
   try {
-    // Claim atomically: only process if in a claimable state.
+    // Claim atomically: only created/failed/retrying are directly claimable.
+    // A 'processing' settlement is NOT claimable — another worker is actively
+    // talking to the payment provider. Reclaiming it would cause a double-payout.
+    // (A lease-expiry mechanism could reclaim stale 'processing' settlements,
+    // but for the MVP we simply skip them.)
+    const claimable = ['created', 'failed', 'retrying']
+    if (!claimable.includes(settlement.status)) {
+      // submitted/processing — another worker may be handling it. Check if completed.
+      const current = await db.settlement.findUnique({ where: { id: settlement.id } })
+      return { completed: current?.status === 'completed', settlementId: settlement.id }
+    }
+
     const claimed = await db.settlement.updateMany({
-      where: { id: settlement.id, status: { in: ['created', 'submitted', 'processing', 'failed', 'retrying'] } },
+      where: { id: settlement.id, status: { in: claimable } },
       data: { status: 'submitted' },
     })
     if (claimed.count === 0) {
-      // Already being processed or completed by another worker.
       const current = await db.settlement.findUnique({ where: { id: settlement.id } })
       return { completed: current?.status === 'completed', settlementId: settlement.id }
     }

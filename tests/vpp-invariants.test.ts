@@ -866,4 +866,95 @@ describe('VPP invariant: reconciliation', () => {
     expect(result.status).toBe('assigned')
     expect(result.message).toContain('not in reconciliation_required')
   })
+
+  it('force settlement failure after usage → reconciliation_required → reconcile → COMPLETED', async () => {
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const { assignments } = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '5', requestedKwh: '10',
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+    })
+
+    // Execute successfully — this will record usage, calculate reward,
+    // post ledger, create settlement, and process it (all in the sandbox,
+    // settlement succeeds immediately).
+    const result = await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret)
+
+    // Simulate a post-completion settlement failure by manually setting
+    // the settlement status to 'failed' and the assignment to 'reconciliation_required'.
+    const settlement = await db.settlement.findUnique({ where: { rewardId: result.reward_id! } })
+    await db.settlement.update({ where: { id: settlement!.id }, data: { status: 'failed', failureReason: 'Simulated failure' } })
+    await db.vppDispatchAssignment.update({ where: { id: assignments[0].id }, data: { status: 'reconciliation_required' } })
+
+    // Verify the pre-reconciliation state.
+    const preAssignment = await db.vppDispatchAssignment.findUnique({ where: { id: assignments[0].id } })
+    expect(preAssignment?.status).toBe('reconciliation_required')
+
+    // Commitment must remain consumed (not released — usage was recorded).
+    const commitment = await db.capacityCommitment.findUnique({
+      where: { id: assignments[0].capacityCommitmentId! },
+    })
+    expect(commitment?.status).toBe('consumed')
+
+    // Usage must still exist.
+    const usage = await db.capacityUsage.findUnique({
+      where: { commitmentId: assignments[0].capacityCommitmentId! },
+    })
+    expect(usage).toBeTruthy()
+
+    // Now reconcile.
+    const reconcileResult = await reconcileAssignment(tenantId, assignments[0].id)
+
+    // Reconciliation should succeed (settlement was 'failed' → claimable → reprocessed).
+    expect(reconcileResult.status).toBe('completed')
+    expect(reconcileResult.economic_stage).toBe('completed')
+
+    // Verify final state.
+    const postAssignment = await db.vppDispatchAssignment.findUnique({ where: { id: assignments[0].id } })
+    expect(postAssignment?.status).toBe('completed')
+
+    // Settlement must now be completed.
+    const postSettlement = await db.settlement.findUnique({ where: { rewardId: result.reward_id! } })
+    expect(postSettlement?.status).toBe('completed')
+
+    // Exactly one usage record (no duplicate from reconciliation).
+    const usages = await db.capacityUsage.findMany({
+      where: { commitmentId: assignments[0].capacityCommitmentId! },
+    })
+    expect(usages.length).toBe(1)
+  })
+
+  it('concurrent reconciliation of same assignment — exactly one wins', async () => {
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const { assignments } = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '5', requestedKwh: '10',
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+    })
+
+    // Execute successfully, then force settlement failure.
+    const result = await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret)
+    const settlement = await db.settlement.findUnique({ where: { rewardId: result.reward_id! } })
+    await db.settlement.update({ where: { id: settlement!.id }, data: { status: 'failed', failureReason: 'Simulated' } })
+    await db.vppDispatchAssignment.update({ where: { id: assignments[0].id }, data: { status: 'reconciliation_required' } })
+
+    // Two concurrent reconciliation attempts.
+    const results = await Promise.allSettled([
+      reconcileAssignment(tenantId, assignments[0].id),
+      reconcileAssignment(tenantId, assignments[0].id),
+    ])
+
+    // One should succeed (claim), one should be rejected (not in reconciliation_required).
+    const succeeded = results.filter((r) => r.status === 'fulfilled' && r.value.status === 'completed')
+    const rejected = results.filter((r) => r.status === 'fulfilled' && r.value.status !== 'completed')
+    expect(succeeded.length + rejected.length).toBe(2)
+
+    // At least one must have completed.
+    const completedCount = results.filter((r) => r.status === 'fulfilled' && r.value.status === 'completed').length
+    expect(completedCount).toBe(1)
+
+    // Verify only one settlement exists (no duplicate).
+    const settlements = await db.settlement.findMany({ where: { rewardId: result.reward_id! } })
+    expect(settlements.length).toBe(1)
+  })
 })
