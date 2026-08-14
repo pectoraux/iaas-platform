@@ -439,3 +439,24 @@ Stage Summary:
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit da98128)
 - Capacity layer is now frozen. Ready for VPP-2.
+
+---
+Task ID: final-execution-ordering
+Agent: orchestrator
+Task: Fix 3 final execution-ordering issues — usage before settlement, concurrency-safe release, strengthened invariant.
+
+Work Log:
+1. USAGE BEFORE SETTLEMENT: recordUsage() now happens after contribution but BEFORE reward/ledger/settlement. State machine: DELIVERY_VERIFIED → USAGE_RECORDED → ECONOMICALLY_SETTLED → COMPLETED. If usage fails → released (no money moved). If settlement fails → consumed (reconciliation needed). Test: successful settlement → consumed + usage.
+2. CONCURRENCY-SAFE releaseCommitment: locks commitment FOR UPDATE inside transaction, re-checks status. Prevents double-credit of reservation remaining.
+3. STRENGTHENED INVARIANT: completed → consumed (not just 'not active'). 'released' only for FAILED. Usage must exist. Test: 34 assignments checked, all pass.
+
+Execution order: DER → verify → baseline → contribution → recordUsage → reward → ledger → settlement → completed. OR catch → failed → released.
+
+Stage Summary:
+- All 3 final execution-ordering issues fixed.
+- A successful settlement ALWAYS has consumed commitment + usage.
+- A failed assignment ALWAYS has released commitment + no usage.
+- releaseCommitment is concurrency-safe.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit ff2f301)
+- EXECUTION/CAPACITY LAYER IS NOW FROZEN. Ready for VPP-2.
