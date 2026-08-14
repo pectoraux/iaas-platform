@@ -559,9 +559,19 @@ export async function executeDispatchAssignment(
     // --- Settlement ---
     const settlement = await createSettlement(tenantId, reward.id)
     await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'settlement_pending' } })
-    await processSettlementOutbox(tenantId)
 
-    // --- COMPLETED ---
+    // Use the TARGETED, LEASE-SAFE settlement processor — NOT the tenant-wide outbox.
+    // This ensures: settlement status is the source of truth for assignment completion.
+    // If settlement fails → assignment enters RECONCILIATION_REQUIRED (not COMPLETED).
+    const settlementResult = await processSettlementForReward(tenantId, reward.id)
+    if (!settlementResult.completed) {
+      // Settlement did not complete. The assignment must NOT be marked COMPLETED.
+      // Enter reconciliation state — capacity stays consumed, usage stays,
+      // financial liability exists. Reconciliation can retry.
+      throw new Error(`Settlement not completed (status: ${settlementResult.settlementId})`)
+    }
+
+    // --- COMPLETED (only reached if settlement succeeded) ---
     await db.vppDispatchAssignment.update({
       where: { id: assignmentId },
       data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },

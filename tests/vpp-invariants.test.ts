@@ -972,56 +972,47 @@ describe('VPP invariant: reconciliation', () => {
 
     try {
       // Execute — the failing provider will cause settlement processing to fail.
-      // However, processSettlementOutbox catches provider errors internally and
-      // marks the settlement as 'failed' without throwing to the caller.
-      // So the execution may succeed (assignment completed) but settlement is failed.
-      // OR the assignment may enter reconciliation_required if the failure
-      // propagates through the catch block.
-      const execResult = await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret).catch(e => e)
+      // Because the VPP now uses processSettlementForReward (not the old outbox),
+      // the settlement failure propagates to the catch block, which sets
+      // assignment = reconciliation_required (because usageRecorded = true).
+      await expect(
+        executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret),
+      ).rejects.toThrow()
 
-      // Check the actual state after execution.
+      // Verify the assignment is in reconciliation_required (NOT completed).
       const assignment = await db.vppDispatchAssignment.findUnique({ where: { id: assignments[0].id } })
+      expect(assignment?.status).toBe('reconciliation_required')
+
+      // Commitment must remain consumed (usage was recorded before settlement).
       const commitment = await db.capacityCommitment.findUnique({
         where: { id: assignments[0].capacityCommitmentId! },
       })
-      const usage = await db.capacityUsage.findUnique({
-        where: { commitmentId: assignments[0].capacityCommitmentId! },
-      })
-
-      // Regardless of whether execution threw or not:
-      // Commitment must be consumed (usage was recorded before settlement).
       expect(commitment?.status).toBe('consumed')
 
       // Usage must exist.
+      const usage = await db.capacityUsage.findUnique({
+        where: { commitmentId: assignments[0].capacityCommitmentId! },
+      })
       expect(usage).toBeTruthy()
 
       // Reward must exist.
       const reward = await db.reward.findFirst({ where: { contributionId: assignment!.contributionId! } })
       expect(reward).toBeTruthy()
 
-      // Settlement must exist. It should be 'failed' (provider threw).
+      // Settlement must exist and be in 'failed' state.
       const settlement = await db.settlement.findUnique({ where: { rewardId: reward!.id } })
       expect(settlement).toBeTruthy()
-      expect(['failed', 'completed']).toContain(settlement?.status)
+      expect(settlement?.status).toBe('failed')
 
-      // If settlement failed, the assignment should be in reconciliation_required
-      // or completed (if processSettlementOutbox caught the error internally).
-      if (settlement?.status === 'failed') {
-        // Force the assignment into reconciliation_required if it isn't already.
-        if (assignment?.status === 'completed') {
-          await db.vppDispatchAssignment.update({ where: { id: assignments[0].id }, data: { status: 'reconciliation_required' } })
-        }
+      // Now restore the working provider and reconcile.
+      setPaymentsService(new FailingPaymentsAdapter(0)) // 0 fails = always succeeds
 
-        // Restore the working provider and reconcile.
-        setPaymentsService(new FailingPaymentsAdapter(0)) // 0 fails = always succeeds
+      const reconcileResult = await reconcileAssignment(tenantId, assignments[0].id)
+      expect(reconcileResult.status).toBe('completed')
 
-        const reconcileResult = await reconcileAssignment(tenantId, assignments[0].id)
-        expect(reconcileResult.status).toBe('completed')
-
-        // Settlement must now be completed.
-        const finalSettlement = await db.settlement.findUnique({ where: { rewardId: reward!.id } })
-        expect(finalSettlement?.status).toBe('completed')
-      }
+      // Settlement must now be completed.
+      const finalSettlement = await db.settlement.findUnique({ where: { rewardId: reward!.id } })
+      expect(finalSettlement?.status).toBe('completed')
 
       // Final state: assignment completed.
       const finalAssignment = await db.vppDispatchAssignment.findUnique({ where: { id: assignments[0].id } })
@@ -1067,5 +1058,44 @@ describe('VPP invariant: reconciliation', () => {
     // Settlement must be completed.
     const finalSettlement = await db.settlement.findUnique({ where: { rewardId: result.reward_id! } })
     expect(finalSettlement?.status).toBe('completed')
+  })
+
+  it('ABSOLUTE INVARIANT: no completed assignment can exist without completed settlement', async () => {
+    // Global invariant: every completed assignment MUST have:
+    // - consumed capacity commitment
+    // - exactly one usage record
+    // - reward
+    // - ledger posting
+    // - settlement with status 'completed'
+    const completed = await db.vppDispatchAssignment.findMany({
+      where: { status: 'completed', contributionId: { not: null } },
+    })
+
+    for (const a of completed) {
+      // Commitment consumed.
+      if (a.capacityCommitmentId) {
+        const commitment = await db.capacityCommitment.findUnique({ where: { id: a.capacityCommitmentId } })
+        expect(commitment?.status).toBe('consumed')
+
+        // Exactly one usage.
+        const usages = await db.capacityUsage.findMany({ where: { commitmentId: a.capacityCommitmentId } })
+        expect(usages.length).toBe(1)
+      }
+
+      // Reward exists.
+      const reward = await db.reward.findFirst({ where: { contributionId: a.contributionId! } })
+      expect(reward).toBeTruthy()
+
+      // Settlement exists and is completed.
+      const settlement = await db.settlement.findUnique({ where: { rewardId: reward!.id } })
+      expect(settlement).toBeTruthy()
+      expect(settlement?.status).toBe('completed')
+
+      // Ledger posting exists for this reward.
+      const ledgerEntry = await db.ledgerEntry.findFirst({
+        where: { referenceType: 'reward', referenceId: reward!.id },
+      })
+      expect(ledgerEntry).toBeTruthy()
+    }
   })
 })

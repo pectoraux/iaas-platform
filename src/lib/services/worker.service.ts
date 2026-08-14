@@ -248,133 +248,38 @@ async function claimSettlements(tenantId?: string): Promise<string[]> {
 }
 
 /**
- * Process 'created' settlements: call the payment provider + finalize ledger.
- * Returns the number of settlements processed.
+ * Process 'created' settlements by delegating to the canonical
+ * processSettlementForReward(). This is the batch entry point — it finds
+ * eligible settlements and processes each through the same lease-safe,
+ * targeted settlement engine used by the VPP execution path.
  */
 export async function processSettlementOutbox(tenantId?: string): Promise<{ processed: number; completed: number; failed: number }> {
-  // Task 2: atomically claim settlements.
-  const claimedIds = await claimSettlements(tenantId)
-  if (claimedIds.length === 0) {
-    return { processed: 0, completed: 0, failed: 0 }
-  }
-
-  const settlements = await db.settlement.findMany({
-    where: { id: { in: claimedIds } },
-    include: { reward: { include: { contribution: true, operator: true } } },
+  // Find settlements that need processing (created/failed/retrying or expired lease).
+  const eligible = await db.settlement.findMany({
+    where: {
+      ...(tenantId ? { tenantId } : {}),
+      OR: [
+        { status: { in: ['created', 'failed', 'retrying'] } },
+        { status: { in: ['submitted', 'processing'] }, leaseExpiresAt: { lt: new Date() } },
+      ],
+    },
+    select: { rewardId: true, tenantId: true },
+    take: BATCH_SIZE,
   })
 
   let completed = 0
   let failed = 0
 
-  for (const settlement of settlements) {
-    try {
-      await db.settlement.update({ where: { id: settlement.id }, data: { status: 'submitted' } })
-
-      const payout = await paymentsService.create_payout({
-        idempotency_key: settlement.idempotencyKey!,
-        recipient_ref: settlement.operatorId,
-        amount: settlement.amount.toString(), // PRECISION: string, not JS number
-        currency: settlement.currency,
-        reference: `reward:${settlement.rewardId}`,
-      })
-
-      if (payout.status === 'completed') {
-        // Issue 4: atomic settlement completion — status update + reward update
-        // + settlement debit posting + outbox emit all in ONE transaction.
-        // If any part fails, the entire completion rolls back.
-        await db.$transaction(async (tx) => {
-          // Post the settlement debit (balanced double-entry).
-          const payableAccount = await ensureOperatorAccount(settlement.tenantId, settlement.operatorId, settlement.currency, 'liability')
-          const cashAccount = await ensurePlatformAccount(settlement.tenantId, settlement.currency, 'asset')
-          const debitKey = `${settlement.idempotencyKey}:settlement_debit`
-
-          // Idempotency check for the posting.
-          const existingPosting = await tx.ledgerPosting.findUnique({
-            where: { tenantId_idempotencyKey: { tenantId: settlement.tenantId, idempotencyKey: debitKey } },
-          })
-          if (!existingPosting) {
-            const post = await tx.ledgerPosting.create({
-              data: {
-                tenantId: settlement.tenantId,
-                postingType: 'settlement',
-                referenceType: 'settlement',
-                referenceId: settlement.id,
-                idempotencyKey: debitKey,
-              },
-            })
-            await tx.ledgerEntry.create({
-              data: {
-                tenantId: settlement.tenantId, postingId: post.id, accountId: payableAccount.id,
-                amount: new Prisma.Decimal(settlement.amount).negated(),
-                currency: settlement.currency, entryType: 'settlement_debit',
-              },
-            })
-            await tx.ledgerEntry.create({
-              data: {
-                tenantId: settlement.tenantId, postingId: post.id, accountId: cashAccount.id,
-                amount: new Prisma.Decimal(settlement.amount),
-                currency: settlement.currency, entryType: 'settlement_credit',
-              },
-            })
-          }
-
-          // Update settlement status.
-          await tx.settlement.update({
-            where: { id: settlement.id },
-            data: { status: 'completed', providerPayoutId: payout.provider_payout_id },
-          })
-
-          // Update reward status.
-          await tx.reward.update({ where: { id: settlement.rewardId }, data: { status: 'settled' } })
-
-          // Emit outbox in the same transaction.
-          await emit(
-            {
-              event_type: DomainEventTypes.SettlementCompleted,
-              aggregate_id: settlement.id,
-              tenant_id: settlement.tenantId,
-              version: 1,
-              payload: { rewardId: settlement.rewardId, amount: settlement.amount.toString() },
-            },
-            tx,
-          )
-        })
-
-        await appendAudit({
-          tenantId: settlement.tenantId,
-          eventType: AuditEvents.SettlementCompleted,
-          resourceType: 'settlement',
-          resourceId: settlement.id,
-          metadata: { rewardId: settlement.rewardId, amount: settlement.amount.toString() },
-        })
-        completed++
-      } else {
-        await db.settlement.update({
-          where: { id: settlement.id },
-          data: {
-            status: payout.status as 'processing' | 'submitted',
-            providerPayoutId: payout.provider_payout_id,
-          },
-        })
-      }
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : 'Unknown error'
-      await db.settlement.update({
-        where: { id: settlement.id },
-        data: { status: 'failed', failureReason: reason },
-      })
-      await appendAudit({
-        tenantId: settlement.tenantId,
-        eventType: 'settlement.failed',
-        resourceType: 'settlement',
-        resourceId: settlement.id,
-        metadata: { reason },
-      })
+  for (const { rewardId, tenantId: stTenantId } of eligible) {
+    const result = await processSettlementForReward(stTenantId, rewardId)
+    if (result.completed) {
+      completed++
+    } else {
       failed++
     }
   }
 
-  return { processed: settlements.length, completed, failed }
+  return { processed: eligible.length, completed, failed }
 }
 
 /**
