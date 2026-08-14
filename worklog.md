@@ -506,3 +506,24 @@ Stage Summary:
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit 081bb56)
 - EXECUTION/CAPACITY/ECONOMIC LAYER IS NOW FROZEN. Ready for VPP-2.
+
+---
+Task ID: settlement-claim-semantics
+Agent: orchestrator
+Task: Fix settlement claiming + durable-object reconciliation + failure/recovery tests.
+
+Work Log:
+1. SETTLEMENT CLAIMING: processSettlementForReward only claims created/failed/retrying. 'processing' is NOT claimable (prevents double-payout).
+2. DURABLE-OBJECT RECONCILIATION: reconcileAssignment inspects actual reward/ledger/settlement existence, not just economicStage. Prevents duplicates.
+3. END-TO-END FAILURE/RECOVERY TEST: execute → usage → force settlement failure → reconciliation_required → reconcile → COMPLETED. Verifies commitment consumed, usage preserved, no duplicates.
+4. CONCURRENT RECONCILIATION TEST: Promise.all of two reconcileAssignment. Exactly 1 wins (atomic claim), 1 settlement (no duplicate payout).
+5. All existing tests still pass.
+
+Stage Summary:
+- Settlement claiming is safe (no double-payout from concurrent processing).
+- Reconciliation inspects durable objects, not just checkpoints.
+- Failure/recovery is end-to-end tested.
+- Concurrent reconciliation is tested.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit 06a3bc0)
+- EXECUTION/CAPACITY/ECONOMIC/RECONCILIATION LAYER IS NOW FROZEN. Ready for VPP-2.
