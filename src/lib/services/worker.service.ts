@@ -377,4 +377,115 @@ export async function processSettlementOutbox(tenantId?: string): Promise<{ proc
   return { processed: settlements.length, completed, failed }
 }
 
+/**
+ * Process a single specific settlement by reward ID.
+ * Used by reconciliation to target a specific assignment's settlement
+ * rather than processing the entire tenant's settlement outbox.
+ */
+export async function processSettlementForReward(tenantId: string, rewardId: string): Promise<{ completed: boolean; settlementId: string | null }> {
+  const settlement = await db.settlement.findUnique({
+    where: { rewardId },
+    include: { reward: { include: { contribution: true, operator: true } } },
+  })
+  if (!settlement) return { completed: false, settlementId: null }
+  if (settlement.status === 'completed') return { completed: true, settlementId: settlement.id }
+  if (settlement.tenantId !== tenantId) return { completed: false, settlementId: settlement.id }
+
+  try {
+    // Claim atomically: only process if in a claimable state.
+    const claimed = await db.settlement.updateMany({
+      where: { id: settlement.id, status: { in: ['created', 'submitted', 'processing', 'failed', 'retrying'] } },
+      data: { status: 'submitted' },
+    })
+    if (claimed.count === 0) {
+      // Already being processed or completed by another worker.
+      const current = await db.settlement.findUnique({ where: { id: settlement.id } })
+      return { completed: current?.status === 'completed', settlementId: settlement.id }
+    }
+
+    const payout = await paymentsService.create_payout({
+      idempotency_key: settlement.idempotencyKey!,
+      recipient_ref: settlement.operatorId,
+      amount: settlement.amount.toString(),
+      currency: settlement.currency,
+      reference: `reward:${settlement.rewardId}`,
+    })
+
+    if (payout.status === 'completed') {
+      await db.$transaction(async (tx) => {
+        const payableAccount = await ensureOperatorAccount(settlement.tenantId, settlement.operatorId, settlement.currency, 'liability')
+        const cashAccount = await ensurePlatformAccount(settlement.tenantId, settlement.currency, 'asset')
+        const debitKey = `${settlement.idempotencyKey}:settlement_debit`
+
+        const existingPosting = await tx.ledgerPosting.findUnique({
+          where: { tenantId_idempotencyKey: { tenantId: settlement.tenantId, idempotencyKey: debitKey } },
+        })
+        if (!existingPosting) {
+          const post = await tx.ledgerPosting.create({
+            data: {
+              tenantId: settlement.tenantId,
+              postingType: 'settlement',
+              referenceType: 'settlement',
+              referenceId: settlement.id,
+              idempotencyKey: debitKey,
+            },
+          })
+          await tx.ledgerEntry.create({
+            data: {
+              tenantId: settlement.tenantId, postingId: post.id, accountId: payableAccount.id,
+              amount: new Prisma.Decimal(settlement.amount).negated(),
+              currency: settlement.currency, entryType: 'settlement_debit',
+            },
+          })
+          await tx.ledgerEntry.create({
+            data: {
+              tenantId: settlement.tenantId, postingId: post.id, accountId: cashAccount.id,
+              amount: new Prisma.Decimal(settlement.amount),
+              currency: settlement.currency, entryType: 'settlement_credit',
+            },
+          })
+        }
+
+        await tx.settlement.update({
+          where: { id: settlement.id },
+          data: { status: 'completed', providerPayoutId: payout.provider_payout_id },
+        })
+        await tx.reward.update({ where: { id: settlement.rewardId }, data: { status: 'settled' } })
+        await emit(
+          {
+            event_type: DomainEventTypes.SettlementCompleted,
+            aggregate_id: settlement.id,
+            tenant_id: settlement.tenantId,
+            version: 1,
+            payload: { rewardId: settlement.rewardId, amount: settlement.amount.toString() },
+          },
+          tx,
+        )
+      })
+
+      await appendAudit({
+        tenantId: settlement.tenantId,
+        eventType: AuditEvents.SettlementCompleted,
+        resourceType: 'settlement',
+        resourceId: settlement.id,
+        metadata: { rewardId: settlement.rewardId, amount: settlement.amount.toString() },
+      })
+      return { completed: true, settlementId: settlement.id }
+    } else {
+      await db.settlement.update({
+        where: { id: settlement.id },
+        data: { status: payout.status as 'processing' | 'submitted', providerPayoutId: payout.provider_payout_id },
+      })
+      return { completed: false, settlementId: settlement.id }
+    }
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : 'Unknown error'
+    await db.settlement.update({
+      where: { id: settlement.id },
+      data: { status: 'failed', failureReason: reason },
+    })
+    return { completed: false, settlementId: settlement.id }
+  }
+}
+
 export { ensureOperatorAccount, computeBalance }

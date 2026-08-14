@@ -29,6 +29,7 @@ import {
   createCapacityReservation,
   createDispatch,
   executeDispatchAssignment,
+  reconcileAssignment,
 } from '../src/lib/services/vpp.service'
 import { ValidationError } from '@/lib/domain/errors'
 
@@ -795,5 +796,74 @@ describe('VPP invariant: concurrent execution + state machine', () => {
         expect(commitment?.status).not.toBe('released')
       }
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// End-to-end reconciliation tests
+// ---------------------------------------------------------------------------
+
+describe('VPP invariant: reconciliation', () => {
+  it('successful delivery + usage + successful settlement → COMPLETED', async () => {
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const { assignments } = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '5', requestedKwh: '10',
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+    })
+
+    await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret)
+
+    // Verify completed state.
+    const assignment = await db.vppDispatchAssignment.findUnique({ where: { id: assignments[0].id } })
+    expect(assignment?.status).toBe('completed')
+    expect(assignment?.economicStage).toBe('completed')
+
+    // Verify commitment consumed + usage exists.
+    const commitment = await db.capacityCommitment.findUnique({
+      where: { id: assignments[0].capacityCommitmentId! },
+    })
+    expect(commitment?.status).toBe('consumed')
+
+    const usage = await db.capacityUsage.findUnique({
+      where: { commitmentId: assignments[0].capacityCommitmentId! },
+    })
+    expect(usage).toBeTruthy()
+
+    // Verify reward + settlement exist.
+    const reward = await db.reward.findFirst({ where: { contributionId: assignment!.contributionId! } })
+    expect(reward).toBeTruthy()
+    const settlement = await db.settlement.findUnique({ where: { rewardId: reward!.id } })
+    expect(settlement?.status).toBe('completed')
+  })
+
+  it('completed assignment always has reward + ledger + settlement', async () => {
+    // Global invariant: every completed assignment must have the full economic chain.
+    const completed = await db.vppDispatchAssignment.findMany({
+      where: { status: 'completed', contributionId: { not: null } },
+    })
+
+    for (const a of completed) {
+      const reward = await db.reward.findFirst({ where: { contributionId: a.contributionId! } })
+      expect(reward).toBeTruthy()
+
+      const settlement = await db.settlement.findUnique({ where: { rewardId: reward!.id } })
+      expect(settlement).toBeTruthy()
+      expect(settlement?.status).toBe('completed')
+    }
+  })
+
+  it('reconcileAssignment on non-reconciliation assignment returns current status', async () => {
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const { assignments } = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '5', requestedKwh: '10',
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+    })
+
+    // Assignment is in 'assigned' state, not 'reconciliation_required'.
+    const result = await reconcileAssignment(tenantId, assignments[0].id)
+    expect(result.status).toBe('assigned')
+    expect(result.message).toContain('not in reconciliation_required')
   })
 })

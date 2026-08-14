@@ -25,7 +25,7 @@ import { Prisma } from '@prisma/client'
 import { NotFoundError, ValidationError, ConflictError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import { ingestEvent, buildCanonicalMessage } from './ingestion.service'
-import { processEventOutbox, processSettlementOutbox } from './worker.service'
+import { processEventOutbox, processSettlementOutbox, processSettlementForReward } from './worker.service'
 import { createContribution } from './contribution.service'
 import { calculateReward } from './reward.service'
 import { postRewardToLedger } from './ledger.service'
@@ -683,7 +683,7 @@ export async function reconcileAssignment(
       // Fall through to settlement.
       await createSettlement(tenantId, reward.id)
       await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'settlement_pending' } })
-      await processSettlementOutbox(tenantId)
+      await processSettlementForReward(tenantId, reward.id)
     }
 
     // Stage: reward_calculated but ledger not posted.
@@ -695,7 +695,7 @@ export async function reconcileAssignment(
       // Fall through to settlement.
       await createSettlement(tenantId, reward.id)
       await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'settlement_pending' } })
-      await processSettlementOutbox(tenantId)
+      await processSettlementForReward(tenantId, reward.id)
     }
 
     // Stage: ledger_posted but settlement not created.
@@ -704,13 +704,15 @@ export async function reconcileAssignment(
       if (!reward) throw new Error('Reward missing during reconciliation')
       await createSettlement(tenantId, reward.id)
       await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'settlement_pending' } })
-      await processSettlementOutbox(tenantId)
+      await processSettlementForReward(tenantId, reward.id)
     }
 
-    // Stage: settlement_pending → check if settlement completed.
+    // Stage: settlement_pending → process specific settlement, then check.
     if (stage === 'settlement_pending' || stage === 'reward_calculated' || stage === 'ledger_posted' || stage === 'usage_recorded' || stage === 'delivery_verified') {
       const reward = await db.reward.findFirst({ where: { contributionId: assignment.contributionId! } })
       if (reward) {
+        // Target this specific settlement, not the entire tenant outbox.
+        await processSettlementForReward(tenantId, reward.id)
         const settlement = await db.settlement.findUnique({ where: { rewardId: reward.id } })
         if (settlement?.status === 'completed') {
           // Settlement succeeded → COMPLETED.
