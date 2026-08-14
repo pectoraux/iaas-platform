@@ -367,3 +367,23 @@ Stage Summary:
 - Platform primitive reusable by Storage, Compute, Wireless.
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit b7001db)
+
+---
+Task ID: generic-capacity-usage-separation
+Agent: orchestrator
+Task: Fix 4 capacity model issues — generic units, usage/consumption separation, failure release, lifecycle tests.
+
+Work Log:
+1. GENERIC CAPACITY: renamed verifiedCapacityKw → verifiedQuantity + verifiedUnit on AssetNetworkAssignment. CapacityResource.unit resolved from assignment (not hardcoded kW). Test: 100 TB storage resource created + allocated via same service.
+2. USAGE/CONSUMPTION SEPARATION: new CapacityUsage model (quantity + unit, e.g. 2.85 kWh). CapacityCommitment stores capacity only (e.g. 6 kW). No dimensional confusion. Test: commitment unit = kW, usage unit = kWh (verified separate).
+3. FAILURE RELEASE: verification failure → releaseCommitment. Ledger posting failure → releaseCommitment. Cancelled dispatch → releaseCommitment. Test: wrong secret → commitment released, remaining restored.
+4. LIFECYCLE TESTS (4 new, all pass): successful dispatch → consumed + usage recorded; failed dispatch → released; non-energy (100 TB) → works; unit mismatch → rejected.
+5. Bug fix: sequence number race in executeDispatchAssignment (computed twice with await between → signature mismatch).
+
+Stage Summary:
+- Capacity primitive is now truly generic (kW, TB, GPU, Gbps all work).
+- Capacity (kW) and usage (kWh) are dimensionally separated.
+- Failed dispatches release capacity (no stranded resources).
+- 4 lifecycle tests pass on Neon.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit d14ed2e)
