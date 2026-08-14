@@ -607,3 +607,23 @@ Stage Summary:
 - Economic consequences of baseline error are quantified.
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit d72c2ad)
+
+---
+Task ID: VPP-2A-baseline-fix
+Agent: orchestrator
+Task: Fix simulator ground truth contamination + HistoricalTelemetryProvider + 100-scenario eval.
+
+Work Log:
+1. FIXED SIMULATOR: generateLatentBaseDay generates ONE base day (fixed temp + noise). Counterfactual = base day. Treatment = same base + dispatch overlay. Only difference is dispatch. Test proves profiles identical outside dispatch window.
+2. HistoricalTelemetryProvider interface + SimulatedHistoricalTelemetryProvider. VPP execution uses provider (not inline simulator). Training data strictly before dispatch.
+3. Renamed SimilarDayAverage → WeekdayWeekendAverage.
+4. 100-scenario evaluation: bias, MAE, RMSE, P95, median, false-positive/negative, overpayment/underpayment per strategy. Regression within 1.5x of historical.
+5. Hard scenarios: weekday/weekend, 3AM vs 7PM, sparse history, negative performance, zero incremental.
+6. Ground truth integrity tests: identical temperature, identical profiles outside dispatch, true incremental = actual - counterfactual.
+
+Stage Summary:
+- Simulator ground truth is uncontaminated (same base day for counterfactual + treatment).
+- HistoricalTelemetryProvider is the seam for real telemetry.
+- 100-scenario statistical evaluation provides meaningful criteria.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit b0079a2)
