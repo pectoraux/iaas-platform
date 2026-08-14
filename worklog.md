@@ -486,3 +486,23 @@ Stage Summary:
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit cad11ef)
 - EXECUTION/CAPACITY LAYER IS NOW FROZEN. Ready for VPP-2.
+
+---
+Task ID: targeted-settlement-reconciliation-tests
+Agent: orchestrator
+Task: Final corrections — targeted settlement processing + end-to-end reconciliation tests.
+
+Work Log:
+1. TARGETED SETTLEMENT: new processSettlementForReward(tenantId, rewardId) processes a single specific settlement. Reconciliation no longer processes the entire tenant outbox.
+2. END-TO-END RECONCILIATION TESTS (3 new, all pass):
+   - successful delivery + usage + settlement → COMPLETED (full chain verified: commitment consumed, usage exists, reward exists, settlement completed)
+   - completed assignment always has reward + ledger + settlement (global invariant)
+   - reconcileAssignment on non-reconciliation assignment returns current status
+3. Reconciliation now uses processSettlementForReward instead of processSettlementOutbox.
+
+Stage Summary:
+- Settlement processing is now targeted (not tenant-wide during reconciliation).
+- End-to-end reconciliation is tested.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit 081bb56)
+- EXECUTION/CAPACITY/ECONOMIC LAYER IS NOW FROZEN. Ready for VPP-2.
