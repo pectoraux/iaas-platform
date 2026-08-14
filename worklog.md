@@ -566,3 +566,21 @@ Stage Summary:
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit 5f8a210)
 - EXECUTION/CAPACITY/ECONOMIC/SETTLEMENT/RECONCILIATION LAYER IS NOW FROZEN. Ready for VPP-2.
+
+---
+Task ID: transaction-aware-accounts
+Agent: orchestrator
+Task: Fix transaction-aware account helpers + settlement atomicity test.
+
+Work Log:
+1. ensureOperatorAccount/ensurePlatformAccount/ensureBuyerFundsAccount now accept optional tx parameter.
+2. Settlement completion transaction passes tx to account helpers — fully atomic.
+3. Atomicity test: verifies 2 balanced ledger entries, posting exists, settlement completed, reward settled. No partial state.
+4. Lease-heartbeat documented as production follow-up.
+
+Stage Summary:
+- Settlement completion is now genuinely atomic (all operations use tx).
+- No orphan accounts or partial ledger entries possible on rollback.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit 1461210)
+- EXECUTION/CAPACITY/ECONOMIC/SETTLEMENT/RECONCILIATION LAYER IS NOW FROZEN. Ready for VPP-2.
