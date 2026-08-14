@@ -64,7 +64,9 @@ model Tenant {
   vppDispatches  VppDispatch[]
   vppAssignments VppDispatchAssignment[]
   vppBaselines   VppBaseline[]
-  capacityAllocations CapacityAllocation[]
+  capacityResources CapacityResource[]
+  capacityReservations CapacityReservation[]
+  capacityCommitments CapacityCommitment[]
 
   @@index([slug])
 }
@@ -100,7 +102,7 @@ model NetworkDefinition {
   versions  NetworkVersion[]
   assetAssignments AssetNetworkAssignment[]
   vppPrograms    VppBuyerProgram[]
-  capacityAllocations CapacityAllocation[]
+  capacityResources CapacityResource[]
 
   @@unique([tenantId, slug])
   @@index([tenantId])
@@ -179,7 +181,7 @@ model Asset {
   contributions Contribution[]
   vppReservations VppCapacityReservation[]
   vppAssignments VppDispatchAssignment[]
-  capacityAllocations CapacityAllocation[]
+  capacityResources CapacityResource[]
 
   @@index([tenantId])
   @@index([operatorId])
@@ -413,52 +415,112 @@ model Contribution {
 }
 
 // -----------------------------------------------------------------------------
-// 8b. Capacity Allocation — PLATFORM-LEVEL primitive (extracted from VPP).
+// 8b. Capacity — PLATFORM-LEVEL primitive (redesigned).
 //
-// The VPP exposed that capacity allocation is needed across ALL verticals:
-//   VPP:        10 kW → Event A: 6 kW → Event B: 4 kW → 0 available
-//   Storage:    100 TB → Project A: 70 TB → 30 TB available
-//   Compute:    16 GPU-hours → Project A: 6 → Project B: 5 → 5 available
-//   Wireless:   1 Gbps → Network A: 400 Mbps → Network B: 300 Mbps → 300 available
+// Capacity is a RESOURCE. Reservations, commitments, and consumption are
+// TRANSACTIONS against that resource. This is a 4-layer model:
 //
-// This model tracks time-window-aware capacity allocations for an asset's
-// capability. It prevents double-selling: the sum of active allocations for
-// overlapping time windows cannot exceed the asset's verified capacity.
+//   CapacityResource (verified physical capacity for asset+capability)
+//       ↓
+//   CapacityReservation (operator commits capacity to a program for a window)
+//       ↓
+//   CapacityCommitment (a dispatch commits some of the reserved capacity)
+//       ↓
+//   Consumption (actual usage, recorded on completion)
+//
+// Key invariants:
+//   - Sum of active reservations ≤ resource.physicalCapacity
+//   - Sum of active commitments ≤ reservation.reservedAmount
+//   - Consumption recorded per commitment
+//
+// This works for ALL verticals:
+//   VPP:        10 kW → 8 kW reserved → 6 kW committed → 5.7 kW consumed
+//   Storage:    100 TB → 80 TB reserved → 50 TB committed → 40 TB consumed
+//   Compute:    16 GPU → 12 GPU reserved → 6 GPU committed → 6 GPU consumed
+//   Wireless:   1 Gbps → 800 Mbps reserved → 500 Mbps committed → 350 Mbps consumed
 // -----------------------------------------------------------------------------
 
-model CapacityAllocation {
+/// A capacity resource: the verified physical capacity of an asset for a
+/// specific capability in a network. Created when the asset is assigned to
+/// the network. This is the stable lock target for all capacity operations.
+model CapacityResource {
   id              String   @id @default(cuid())
   tenantId        String
   assetId         String
   networkId       String
   capabilityType  String
-  // The verified physical capacity of this asset for this capability.
-  // ALWAYS derived from AssetNetworkAssignment.verifiedCapacityKw — never from caller.
+  // The verified physical capacity (from AssetNetworkAssignment.verifiedCapacityKw).
   physicalCapacity String  // decimal as string
-  // The amount allocated to this specific reservation/dispatch.
-  allocatedAmount String  // decimal as string
-  // Time window for this allocation (prevents overlap).
+  unit            String   @default("kW")
+  status          String   @default("active") // active | inactive
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  asset       Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  network     NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
+  reservations CapacityReservation[]
+
+  @@unique([assetId, networkId, capabilityType])
+  @@index([tenantId])
+  @@index([assetId, capabilityType])
+}
+
+/// A capacity reservation: an operator commits capacity to a program for a
+/// time window. Multiple non-overlapping reservations can share a resource.
+/// Overlapping reservations cannot exceed physicalCapacity.
+model CapacityReservation {
+  id              String   @id @default(cuid())
+  tenantId        String
+  resourceId      String
+  // The amount reserved from the resource.
+  reservedAmount  String   // decimal as string
+  // Time window.
   startTime       DateTime
   endTime         DateTime
-  // What this allocation is for.
-  sourceType      String   // vpp_reservation | vpp_dispatch | storage_reservation | ...
-  sourceId        String?
-  // Task 4: full capacity lifecycle.
-  //   allocated → reserved → committed → consumed → released
-  //   allocated: capacity held by a reservation
-  //   committed: capacity committed to a specific dispatch
-  //   consumed:  capacity actually used (dispatch completed)
-  //   released:  capacity released back to the pool (dispatch cancelled/expired)
-  lifecycleState  String   @default("allocated") // allocated | committed | consumed | released
-  status          String   @default("active") // active | released | expired (legacy, kept for compat)
+  // Remaining capacity available for commitments (reserved - committed).
+  remainingAmount String   // decimal as string — decremented by commitments
+  status          String   @default("active") // active | released | expired
+  // What this reservation is for.
+  sourceType      String   // vpp_program | storage_contract | ...
+  sourceId        String?  // e.g. VppCapacityReservation.id
   createdAt       DateTime @default(now())
 
-  tenant  Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  asset   Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
-  network NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
+  tenant       Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  resource     CapacityResource  @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  commitments  CapacityCommitment[]
 
   @@index([tenantId])
-  @@index([assetId, capabilityType, startTime, endTime])
+  @@index([resourceId])
+  @@index([sourceType, sourceId])
+}
+
+/// A capacity commitment: a dispatch commits some of a reservation's capacity.
+/// Multiple commitments can share a reservation (e.g. 6 kW + 4 kW = 10 kW).
+/// Commitments cannot exceed the reservation's remaining amount.
+model CapacityCommitment {
+  id              String   @id @default(cuid())
+  tenantId        String
+  reservationId   String
+  // The amount committed for this specific job/dispatch.
+  committedAmount String   // decimal as string
+  // Time window for this commitment.
+  startTime       DateTime
+  endTime         DateTime
+  // Actual consumption (recorded on completion).
+  consumedAmount  String?  // decimal as string — null until completed
+  status          String   @default("active") // active | consumed | released | cancelled
+  // What this commitment is for.
+  sourceType      String   // vpp_dispatch | storage_job | compute_job | ...
+  sourceId        String?  // e.g. VppDispatch.id
+  createdAt       DateTime @default(now())
+  completedAt     DateTime?
+
+  tenant      Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reservation CapacityReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([reservationId])
   @@index([sourceType, sourceId])
 }
 

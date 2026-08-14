@@ -375,16 +375,18 @@ describe('VPP invariant: concurrent capacity allocation', () => {
     const failedReason = (failed[0] as PromiseRejectedResult).reason
     expect(failedReason.message).toMatch(/Insufficient capacity|exceeds verified physical capacity/)
 
-    // Verify total allocated capacity does not exceed 10 kW.
-    const allocations = await db.capacityAllocation.findMany({
-      where: { assetId: freshAsset.id, capabilityType: 'energy_discharge', lifecycleState: { not: 'released' } },
+    // Verify total reserved capacity does not exceed 10 kW.
+    const reservations = await db.capacityReservation.findMany({
+      where: { tenantId, status: 'active' },
+      include: { resource: true },
     })
-    const totalAllocated = allocations.reduce(
-      (sum, a) => sum.plus(new Prisma.Decimal(a.allocatedAmount)),
+    const freshReservations = reservations.filter((r) => r.resource.assetId === freshAsset.id)
+    const totalReserved = freshReservations.reduce(
+      (sum, r) => sum.plus(new Prisma.Decimal(r.reservedAmount)),
       new Prisma.Decimal(0),
     )
-    expect(totalAllocated.toString()).toBe('7')
-    expect(totalAllocated.lte(10)).toBe(true)
+    expect(totalReserved.toString()).toBe('7')
+    expect(totalReserved.lte(10)).toBe(true)
   })
 })
 
@@ -410,5 +412,80 @@ describe('VPP invariant: no untrusted capacity', () => {
         startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
       }),
     ).rejects.toThrow(/exceeds verified physical capacity/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Test A: concurrent dispatches against same reservation (the critical race)
+// ---------------------------------------------------------------------------
+
+describe('VPP invariant: concurrent dispatch consumption', () => {
+  it('Test A: two concurrent 10 kW dispatches against one 10 kW reservation → exactly 1 succeeds', async () => {
+    const { program } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const now = new Date()
+    const start = now.toISOString()
+    const end = new Date(now.getTime() + 3600000).toISOString()
+
+    const results = await Promise.allSettled([
+      createDispatch(tenantId, {
+        programId: program.id, requestedKw: '10', requestedKwh: '10',
+        startTime: start, endTime: end,
+      }),
+      createDispatch(tenantId, {
+        programId: program.id, requestedKw: '10', requestedKwh: '10',
+        startTime: start, endTime: end,
+      }),
+    ])
+
+    const succeeded = results.filter((r) => r.status === 'fulfilled')
+    const failed = results.filter((r) => r.status === 'rejected')
+    expect(succeeded.length).toBe(1)
+    expect(failed.length).toBe(1)
+  })
+
+  it('Test B: 6 kW + 4 kW dispatches against 10 kW reservation → both succeed', async () => {
+    const { program } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const now = new Date()
+    const start = now.toISOString()
+    const end = new Date(now.getTime() + 3600000).toISOString()
+
+    const result1 = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '6', requestedKwh: '6',
+      startTime: start, endTime: end,
+    })
+    expect(result1.dispatch.status).toBe('assigned')
+
+    const result2 = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '4', requestedKwh: '4',
+      startTime: start, endTime: end,
+    })
+    expect(result2.dispatch.status).toBe('assigned')
+  })
+
+  it('Test C: 6 kW + 4 kW + 1 kW against 10 kW → third fails', async () => {
+    const { program } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const now = new Date()
+    const start = now.toISOString()
+    const end = new Date(now.getTime() + 3600000).toISOString()
+
+    await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '6', requestedKwh: '6',
+      startTime: start, endTime: end,
+    })
+    await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '4', requestedKwh: '4',
+      startTime: start, endTime: end,
+    })
+
+    // Third dispatch of 1 kW should fail (0 kW remaining).
+    await expect(
+      createDispatch(tenantId, {
+        programId: program.id, requestedKw: '1', requestedKwh: '1',
+        startTime: start, endTime: end,
+      }),
+    ).rejects.toThrow(/Insufficient remaining capacity/)
   })
 })

@@ -31,7 +31,13 @@ import { calculateReward } from './reward.service'
 import { postRewardToLedger } from './ledger.service'
 import { createSettlement } from './settlement.service'
 import { signMessage, deriveSigningKey } from '@/lib/domain/crypto'
-import { allocateCapacity, releaseCapacityBySource, transitionAllocationState, consumeCapacity } from './capacity.service'
+import {
+  createCapacityReservation as allocateReservation,
+  createCapacityCommitment,
+  recordConsumption,
+  releaseCommitment,
+  findReservationBySource,
+} from './capacity.service'
 import { SimulatedDERAdapter, type DERAdapter } from './der-adapter.service'
 
 const derAdapter: DERAdapter = new SimulatedDERAdapter()
@@ -136,12 +142,12 @@ export async function createCapacityReservation(tenantId: string, input: CreateR
     )
   }
 
-  // Task 3: ATOMIC reservation + capacity allocation in ONE transaction.
-  // This prevents orphaned allocations (review issue #3).
-  // The reservation is created first, then the allocation with sourceId = reservation.id.
+  // ATOMIC: VPP reservation + capacity reservation in ONE transaction.
+  // The VPP reservation is created first, then the platform capacity
+  // reservation with sourceId = vppReservation.id.
   const result = await db.$transaction(async (tx) => {
-    // Create the reservation first (inside the transaction).
-    const reservation = await tx.vppCapacityReservation.create({
+    // Create the VPP reservation first (inside the transaction).
+    const vppReservation = await tx.vppCapacityReservation.create({
       data: {
         tenantId,
         programId: input.programId,
@@ -155,9 +161,9 @@ export async function createCapacityReservation(tenantId: string, input: CreateR
       },
     })
 
-    // Allocate capacity (inside the same transaction, with sourceId = reservation.id).
-    // Task 2: physicalCapacity is resolved from the assignment inside allocateCapacity.
-    const allocation = await allocateCapacity({
+    // Create the platform capacity reservation (inside the same transaction).
+    // Physical capacity is resolved from the verified assignment.
+    const capacityReservation = await allocateReservation({
       tenantId,
       assetId: input.assetId,
       networkId: program.networkId,
@@ -166,27 +172,27 @@ export async function createCapacityReservation(tenantId: string, input: CreateR
       startTime: new Date(input.startTime),
       endTime: new Date(input.endTime),
       sourceType: 'vpp_reservation',
-      sourceId: reservation.id, // task 3: sourceId known at allocation time
-    }, tx) // pass the transaction client
+      sourceId: vppReservation.id,
+    }, tx)
 
-    return { reservation, allocation }
-  })
+    return { vppReservation, capacityReservation }
+  }, { timeout: 30000 })
 
-  const { reservation, allocation } = result
+  const { vppReservation, capacityReservation } = result
 
   await appendAudit({
     tenantId, actorId,
     eventType: 'vpp.reservation_created',
     resourceType: 'vpp_capacity_reservation',
-    resourceId: reservation.id,
+    resourceId: vppReservation.id,
     metadata: {
       programId: input.programId, assetId: input.assetId, capabilityType: input.capabilityType,
       reservedKw: input.reservedKw,
-      allocationId: allocation.allocationId,
+      capacityReservationId: capacityReservation.reservationId,
     },
   })
 
-  return { reservation, allocation }
+  return { reservation: vppReservation, capacityReservation }
 }
 
 // ---------------------------------------------------------------------------
@@ -265,10 +271,10 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
       },
     })
 
-    // Assign assets proportionally.
-    // Task 4: the dispatch does NOT create separate capacity allocations —
-    // the reservation already holds the capacity. The dispatch consumes
-    // capacity from the reservation's allocation (lifecycle: committed → consumed).
+    // Assign assets proportionally + create capacity commitments (atomic).
+    // Task 4: each assignment creates a CapacityCommitment against the
+    // reservation's platform CapacityReservation. This decrements the
+    // reservation's remaining capacity, preventing over-commitment.
     for (const reservation of reservations) {
       const ratio = new Prisma.Decimal(reservation.reservedKw).div(totalReservedKw)
       const assignedKw = requestedKw.times(ratio)
@@ -285,24 +291,26 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
           assignedKwh: assignedKwh.toFixed(8),
         },
       })
+
+      // Find the platform capacity reservation for this VPP reservation.
+      const capacityReservation = await findReservationBySource(tenantId, 'vpp_reservation', reservation.id)
+      if (capacityReservation) {
+        // Create a capacity commitment (atomic, inside the dispatch transaction).
+        // This locks the reservation FOR UPDATE and decrements remaining.
+        await createCapacityCommitment({
+          tenantId,
+          reservationId: capacityReservation.id,
+          committedAmount: assignedKw.toFixed(8),
+          startTime,
+          endTime,
+          sourceType: 'vpp_dispatch',
+          sourceId: created.id,
+        }, tx)
+      }
     }
 
     return created
-  })
-
-  // Task 4: transition reservation allocations to "committed" state.
-  // This marks the capacity as committed to a dispatch (not just reserved).
-  const committedReservations = await db.vppCapacityReservation.findMany({
-    where: { programId: input.programId, status: 'active', effectiveFrom: { lt: endTime }, effectiveTo: { gt: startTime } },
-  })
-  for (const res of committedReservations) {
-    const allocation = await db.capacityAllocation.findFirst({
-      where: { sourceType: 'vpp_reservation', sourceId: res.id, lifecycleState: 'allocated' },
-    })
-    if (allocation) {
-      await transitionAllocationState(tenantId, allocation.id, 'committed')
-    }
-  }
+  }, { timeout: 30000 })
 
   await appendAudit({
     tenantId, actorId,
@@ -500,8 +508,9 @@ export async function executeDispatchAssignment(
   })
   if (pendingAssignments === 0) {
     await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
-    // Task 4: mark the reservation's capacity allocation as consumed.
-    await consumeCapacity(tenantId, 'vpp_reservation', assignment.dispatchId)
+    // Record consumption for the dispatch's capacity commitment.
+    // Uses the dispatch ID as sourceId (matches createCapacityCommitment).
+    await recordConsumption(tenantId, 'vpp_dispatch', assignment.dispatchId, assignment.actualKwh ?? assignment.assignedKwh)
   }
 
   await appendAudit({

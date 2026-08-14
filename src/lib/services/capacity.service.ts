@@ -1,110 +1,140 @@
 // =============================================================================
-// Capacity Allocation Service — PLATFORM-LEVEL primitive.
+// Capacity Service — PLATFORM-LEVEL primitive (redesigned 4-layer model).
 //
-// Extracted from the VPP because capacity allocation is needed across ALL
-// verticals:
-//   VPP:        10 kW → Event A: 6 kW → Event B: 4 kW → 0 available
-//   Storage:    100 TB → Project A: 70 TB → 30 TB available
-//   Compute:    16 GPU-hours → Project A: 6 → Project B: 5 → 5 available
-//   Wireless:   1 Gbps → Network A: 400 Mbps → Network B: 300 Mbps → 300 available
+// Capacity is a RESOURCE. Reservations, commitments, and consumption are
+// TRANSACTIONS against that resource.
 //
-// FIXES from review:
-//   1. CONCURRENCY: locks AssetNetworkAssignment row FOR UPDATE (stable lock
-//      target that ALWAYS exists, even with 0 allocations). Two concurrent
-//      first allocations cannot both pass.
-//   2. NO UNTRUSTED CAPACITY: physicalCapacity is resolved from
-//      AssetNetworkAssignment.verifiedCapacityKw — NEVER from the caller.
-//   3. ATOMIC: the caller can pass a transaction client (tx) so reservation
-//      creation + allocation happen in ONE transaction.
-//   4. LIFECYCLE: allocations transition through
-//      allocated → committed → consumed → released.
+//   CapacityResource (verified physical capacity)
+//       ↓
+//   CapacityReservation (operator commits capacity for a window)
+//       ↓
+//   CapacityCommitment (a dispatch/job commits some of the reserved capacity)
+//       ↓
+//   Consumption (actual usage, recorded on completion)
+//
+// Invariants:
+//   - Sum of active reservations ≤ resource.physicalCapacity (concurrency-safe)
+//   - Sum of active commitments ≤ reservation.reservedAmount (concurrency-safe)
+//   - Consumption recorded per commitment
+//
+// Works for ALL verticals:
+//   VPP:        10 kW → 8 kW reserved → 6 kW committed → 5.7 kW consumed
+//   Storage:    100 TB → 80 TB reserved → 50 TB committed → 40 TB consumed
+//   Compute:    16 GPU → 12 GPU reserved → 6 GPU committed → 6 GPU consumed
+//   Wireless:   1 Gbps → 800 Mbps reserved → 500 Mbps committed → 350 Mbps consumed
 // =============================================================================
 
 import { db, type ExtendedTransactionClient } from '@/lib/db'
 import { Prisma } from '@prisma/client'
 import { NotFoundError, ValidationError } from '@/lib/domain/errors'
 
-export interface AllocateCapacityInput {
-  tenantId: string
-  assetId: string
-  networkId: string
-  capabilityType: string
-  // Task 2: NO physicalCapacity from caller — resolved from verified assignment.
-  requestedAmount: string
-  startTime: Date
-  endTime: Date
-  sourceType: string       // vpp_reservation | vpp_dispatch | ...
-  sourceId?: string
-}
-
-export interface AllocateCapacityResult {
-  allocationId: string
-  physicalCapacity: string
-  allocatedAmount: string
-  availableCapacity: string
-  duplicate: boolean
-}
+// ---------------------------------------------------------------------------
+// CapacityResource — the verified physical capacity (stable lock target)
+// ---------------------------------------------------------------------------
 
 /**
- * Resolve the verified physical capacity for an asset+capability.
- * Task 2: physical capacity comes from AssetNetworkAssignment.verifiedCapacityKw,
- * NEVER from the caller.
+ * Get-or-create the CapacityResource for an asset+capability.
+ * The resource is created from AssetNetworkAssignment.verifiedCapacityKw.
+ * This is the STABLE LOCK TARGET for all capacity operations.
  */
-export async function resolveVerifiedCapacity(
+export async function ensureCapacityResource(
   tenantId: string,
   assetId: string,
   networkId: string,
   capabilityType: string,
-): Promise<string> {
-  const assignment = await db.assetNetworkAssignment.findFirst({
+  tx?: ExtendedTransactionClient,
+): Promise<{ id: string; physicalCapacity: string }> {
+  const client = tx ?? db
+
+  // Resolve verified capacity from the assignment.
+  const assignment = await client.assetNetworkAssignment.findFirst({
     where: { tenantId, assetId, networkId, capabilityType, status: 'active' },
   })
   if (!assignment) {
-    throw new NotFoundError(
-      'asset_network_assignment',
-      `${assetId}/${capabilityType}`,
-    )
+    throw new NotFoundError('asset_network_assignment', `${assetId}/${capabilityType}`)
   }
   if (!assignment.verifiedCapacityKw) {
     throw new ValidationError(
-      `Asset ${assetId} has no verified capacity for capability ${capabilityType}. ` +
-      `Set verifiedCapacityKw on the network assignment first.`,
+      `Asset ${assetId} has no verified capacity for capability ${capabilityType}.`,
     )
   }
-  return assignment.verifiedCapacityKw
+
+  // Get-or-create the resource.
+  const existing = await client.capacityResource.findUnique({
+    where: { assetId_networkId_capabilityType: { assetId, networkId, capabilityType } },
+  })
+  if (existing) {
+    // Update physical capacity if it changed.
+    if (existing.physicalCapacity !== assignment.verifiedCapacityKw) {
+      return client.capacityResource.update({
+        where: { id: existing.id },
+        data: { physicalCapacity: assignment.verifiedCapacityKw },
+      })
+    }
+    return existing
+  }
+
+  return client.capacityResource.create({
+    data: {
+      tenantId,
+      assetId,
+      networkId,
+      capabilityType,
+      physicalCapacity: assignment.verifiedCapacityKw,
+      unit: 'kW',
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// CapacityReservation — commit capacity for a time window
+// ---------------------------------------------------------------------------
+
+export interface CreateReservationInput {
+  tenantId: string
+  assetId: string
+  networkId: string
+  capabilityType: string
+  requestedAmount: string
+  startTime: Date
+  endTime: Date
+  sourceType: string
+  sourceId?: string
+}
+
+export interface CreateReservationResult {
+  reservationId: string
+  resourceId: string
+  reservedAmount: string
+  remainingAmount: string
+  physicalCapacity: string
+  duplicate: boolean
 }
 
 /**
- * Allocate capacity for an asset's capability in a time window.
+ * Create a capacity reservation.
  *
- * Task 1 CONCURRENCY FIX: locks the AssetNetworkAssignment row FOR UPDATE.
- * This row ALWAYS exists (it's a prerequisite for allocation), so even the
- * FIRST allocation for a resource is serialized. Two concurrent allocations
- * cannot both read zero existing allocations and both pass.
+ * CONCURRENCY-SAFE: locks the CapacityResource row FOR UPDATE (stable lock
+ * target that always exists). Two concurrent reservations cannot both exceed
+ * physical capacity.
  *
- * Task 2: physicalCapacity is resolved from the verified assignment — the
- * caller does NOT supply it.
- *
- * Task 3: pass a `tx` to include this in a larger transaction (e.g. reservation
- * creation + allocation in one atomic operation).
- *
- * Invariant: SUM(active allocations overlapping [startTime, endTime]) <= verifiedCapacity
+ * Invariant: SUM(active reservations overlapping [start, end]) ≤ physicalCapacity
  */
-export async function allocateCapacity(
-  input: AllocateCapacityInput,
+export async function createCapacityReservation(
+  input: CreateReservationInput,
   tx?: ExtendedTransactionClient,
-): Promise<AllocateCapacityResult> {
+): Promise<CreateReservationResult> {
   const client = tx ?? db
   const requested = new Prisma.Decimal(input.requestedAmount)
   if (requested.lte(0)) {
     throw new ValidationError(`Requested amount must be positive, got ${input.requestedAmount}`)
   }
 
-  // Task 2: resolve verified capacity from the assignment (never from caller).
-  const physicalCapacityStr = await resolveVerifiedCapacity(
-    input.tenantId, input.assetId, input.networkId, input.capabilityType,
+  // Ensure the resource exists (and resolve verified capacity).
+  const resource = await ensureCapacityResource(
+    input.tenantId, input.assetId, input.networkId, input.capabilityType, client,
   )
-  const physical = new Prisma.Decimal(physicalCapacityStr)
+  const physical = new Prisma.Decimal(resource.physicalCapacity)
 
   if (requested.greaterThan(physical)) {
     throw new ValidationError(
@@ -112,196 +142,309 @@ export async function allocateCapacity(
     )
   }
 
-  // Task 1: lock the AssetNetworkAssignment row FOR UPDATE.
-  // This is the STABLE LOCK TARGET — it always exists for any valid
-  // asset+capability combination. Even if there are zero existing allocations,
-  // this lock serializes concurrent allocations for the same resource.
+  // Lock the resource FOR UPDATE (stable lock target — always exists).
   await client.$queryRaw`
-    SELECT * FROM "AssetNetworkAssignment"
+    SELECT * FROM "CapacityResource"
     WHERE "assetId" = ${input.assetId}
       AND "networkId" = ${input.networkId}
       AND "capabilityType" = ${input.capabilityType}
-      AND status = 'active'
     FOR UPDATE
   `
 
-  // Idempotency: check for existing allocation with same source.
+  // Idempotency: check for existing reservation with same source.
   if (input.sourceId) {
-    const existing = await client.capacityAllocation.findFirst({
-      where: {
-        tenantId: input.tenantId,
-        sourceType: input.sourceType,
-        sourceId: input.sourceId,
-        lifecycleState: { not: 'released' },
-      },
+    const existing = await client.capacityReservation.findFirst({
+      where: { tenantId: input.tenantId, sourceType: input.sourceType, sourceId: input.sourceId, status: 'active' },
     })
     if (existing) {
       return {
-        allocationId: existing.id,
-        physicalCapacity: existing.physicalCapacity,
-        allocatedAmount: existing.allocatedAmount,
-        availableCapacity: physical.minus(existing.allocatedAmount).toString(),
+        reservationId: existing.id,
+        resourceId: existing.resourceId,
+        reservedAmount: existing.reservedAmount,
+        remainingAmount: existing.remainingAmount,
+        physicalCapacity: resource.physicalCapacity,
         duplicate: true,
       }
     }
   }
 
-  // Compute currently allocated (overlapping, not released).
-  const overlapping = await client.capacityAllocation.findMany({
+  // Compute overlapping reserved amount.
+  const overlapping = await client.capacityReservation.findMany({
     where: {
       tenantId: input.tenantId,
-      assetId: input.assetId,
-      capabilityType: input.capabilityType,
-      lifecycleState: { not: 'released' },
+      resourceId: resource.id,
+      status: 'active',
       startTime: { lt: input.endTime },
       endTime: { gt: input.startTime },
     },
   })
-  const alreadyAllocated = overlapping.reduce(
-    (sum, a) => sum.plus(new Prisma.Decimal(a.allocatedAmount)),
+  const alreadyReserved = overlapping.reduce(
+    (sum, r) => sum.plus(new Prisma.Decimal(r.reservedAmount)),
     new Prisma.Decimal(0),
   )
-  const available = physical.minus(alreadyAllocated)
+  const available = physical.minus(alreadyReserved)
 
   if (requested.greaterThan(available)) {
     throw new ValidationError(
-      `Insufficient capacity: requested ${requested.toString()}, available ${available.toString()} (physical ${physical.toString()}, already allocated ${alreadyAllocated.toString()})`,
+      `Insufficient capacity: requested ${requested.toString()}, available ${available.toString()} (physical ${physical.toString()}, already reserved ${alreadyReserved.toString()})`,
     )
   }
 
-  // Create the allocation.
-  const allocation = await client.capacityAllocation.create({
+  // Create the reservation.
+  const reservation = await client.capacityReservation.create({
     data: {
       tenantId: input.tenantId,
-      assetId: input.assetId,
-      networkId: input.networkId,
-      capabilityType: input.capabilityType,
-      physicalCapacity: physicalCapacityStr,
-      allocatedAmount: input.requestedAmount,
+      resourceId: resource.id,
+      reservedAmount: input.requestedAmount,
+      remainingAmount: input.requestedAmount, // starts fully available
       startTime: input.startTime,
       endTime: input.endTime,
       sourceType: input.sourceType,
       sourceId: input.sourceId ?? null,
-      lifecycleState: 'allocated',
-      status: 'active',
     },
   })
 
   return {
-    allocationId: allocation.id,
-    physicalCapacity: allocation.physicalCapacity,
-    allocatedAmount: allocation.allocatedAmount,
-    availableCapacity: available.minus(requested).toString(),
+    reservationId: reservation.id,
+    resourceId: resource.id,
+    reservedAmount: reservation.reservedAmount,
+    remainingAmount: reservation.remainingAmount,
+    physicalCapacity: resource.physicalCapacity,
     duplicate: false,
   }
 }
 
+// ---------------------------------------------------------------------------
+// CapacityCommitment — a dispatch commits some of a reservation's capacity
+// ---------------------------------------------------------------------------
+
+export interface CreateCommitmentInput {
+  tenantId: string
+  reservationId: string
+  committedAmount: string
+  startTime: Date
+  endTime: Date
+  sourceType: string // vpp_dispatch | storage_job | ...
+  sourceId: string   // e.g. VppDispatch.id
+}
+
+export interface CreateCommitmentResult {
+  commitmentId: string
+  committedAmount: string
+  remainingAfter: string
+  duplicate: boolean
+}
+
 /**
- * Task 4: transition an allocation's lifecycle state.
- * allocated → committed → consumed → released
+ * Create a capacity commitment against a reservation.
+ *
+ * CONCURRENCY-SAFE: locks the CapacityReservation row FOR UPDATE.
+ * Multiple commitments can share a reservation (6 kW + 4 kW = 10 kW),
+ * but their sum cannot exceed the reservation's remaining amount.
+ *
+ * Invariant: SUM(active commitments) ≤ reservation.reservedAmount
  */
-export async function transitionAllocationState(
-  tenantId: string,
-  allocationId: string,
-  newState: 'committed' | 'consumed' | 'released',
-): Promise<void> {
-  await db.capacityAllocation.update({
-    where: { id: allocationId, tenantId },
+export async function createCapacityCommitment(
+  input: CreateCommitmentInput,
+  tx?: ExtendedTransactionClient,
+): Promise<CreateCommitmentResult> {
+  const client = tx ?? db
+  const committed = new Prisma.Decimal(input.committedAmount)
+  if (committed.lte(0)) {
+    throw new ValidationError(`Committed amount must be positive, got ${input.committedAmount}`)
+  }
+
+  // Lock the reservation FOR UPDATE.
+  await client.$queryRaw`
+    SELECT * FROM "CapacityReservation"
+    WHERE id = ${input.reservationId}
+    FOR UPDATE
+  `
+
+  const reservation = await client.capacityReservation.findUnique({
+    where: { id: input.reservationId },
+  })
+  if (!reservation) {
+    throw new NotFoundError('capacity_reservation', input.reservationId)
+  }
+  if (reservation.status !== 'active') {
+    throw new ValidationError(`Reservation ${input.reservationId} is ${reservation.status}`)
+  }
+
+  // Idempotency: check for existing commitment with same source.
+  const existing = await client.capacityCommitment.findFirst({
+    where: { tenantId: input.tenantId, sourceType: input.sourceType, sourceId: input.sourceId },
+  })
+  if (existing) {
+    return {
+      commitmentId: existing.id,
+      committedAmount: existing.committedAmount,
+      remainingAfter: new Prisma.Decimal(reservation.remainingAmount).toString(),
+      duplicate: true,
+    }
+  }
+
+  const remaining = new Prisma.Decimal(reservation.remainingAmount)
+  if (committed.greaterThan(remaining)) {
+    throw new ValidationError(
+      `Insufficient remaining capacity: requested ${committed.toString()}, remaining ${remaining.toString()}`,
+    )
+  }
+
+  // Create the commitment + decrement the reservation's remaining.
+  const newRemaining = remaining.minus(committed)
+  const commitment = await client.capacityCommitment.create({
     data: {
-      lifecycleState: newState,
-      ...(newState === 'released' ? { status: 'released' } : {}),
+      tenantId: input.tenantId,
+      reservationId: input.reservationId,
+      committedAmount: input.committedAmount,
+      startTime: input.startTime,
+      endTime: input.endTime,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+    },
+  })
+
+  await client.capacityReservation.update({
+    where: { id: input.reservationId },
+    data: { remainingAmount: newRemaining.toString() },
+  })
+
+  return {
+    commitmentId: commitment.id,
+    committedAmount: commitment.committedAmount,
+    remainingAfter: newRemaining.toString(),
+    duplicate: false,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Consumption — record actual usage on completion
+// ---------------------------------------------------------------------------
+
+/**
+ * Record consumption for a commitment (dispatch completed).
+ * This records the actual amount consumed, NOT the committed amount.
+ */
+export async function recordConsumption(
+  tenantId: string,
+  sourceType: string,
+  sourceId: string,
+  consumedAmount: string,
+): Promise<void> {
+  const commitment = await db.capacityCommitment.findFirst({
+    where: { tenantId, sourceType, sourceId },
+  })
+  if (!commitment) {
+    throw new NotFoundError('capacity_commitment', `${sourceType}/${sourceId}`)
+  }
+
+  await db.capacityCommitment.update({
+    where: { id: commitment.id },
+    data: {
+      consumedAmount,
+      status: 'consumed',
+      completedAt: new Date(),
     },
   })
 }
 
 /**
- * Task 4: commit capacity for a dispatch (transition from allocated to committed).
- * This is called when a dispatch is created against a reservation.
+ * Release a commitment (dispatch cancelled).
+ * Returns the committed amount to the reservation's remaining.
  */
-export async function commitCapacityForDispatch(opts: {
-  tenantId: string
-  assetId: string
-  networkId: string
-  capabilityType: string
-  requestedAmount: string
-  startTime: Date
-  endTime: Date
-  dispatchId: string
-}): Promise<AllocateCapacityResult> {
-  // Create a new allocation for the dispatch (committed state).
-  const result = await allocateCapacity({
-    tenantId: opts.tenantId,
-    assetId: opts.assetId,
-    networkId: opts.networkId,
-    capabilityType: opts.capabilityType,
-    requestedAmount: opts.requestedAmount,
-    startTime: opts.startTime,
-    endTime: opts.endTime,
-    sourceType: 'vpp_dispatch',
-    sourceId: opts.dispatchId,
+export async function releaseCommitment(
+  tenantId: string,
+  sourceType: string,
+  sourceId: string,
+): Promise<void> {
+  const commitment = await db.capacityCommitment.findFirst({
+    where: { tenantId, sourceType, sourceId },
   })
+  if (!commitment) return
+  if (commitment.status === 'released' || commitment.status === 'cancelled') return
 
-  if (!result.duplicate) {
-    await transitionAllocationState(opts.tenantId, result.allocationId, 'committed')
-  }
+  await db.$transaction(async (tx) => {
+    // Lock the reservation.
+    await tx.$queryRaw`SELECT * FROM "CapacityReservation" WHERE id = ${commitment.reservationId} FOR UPDATE`
 
-  return result
-}
+    const reservation = await tx.capacityReservation.findUnique({ where: { id: commitment.reservationId } })
+    if (!reservation) return
 
-/**
- * Task 4: mark capacity as consumed (dispatch completed).
- */
-export async function consumeCapacity(tenantId: string, sourceType: string, sourceId: string): Promise<void> {
-  const allocations = await db.capacityAllocation.findMany({
-    where: { tenantId, sourceType, sourceId, lifecycleState: { not: 'released' } },
-  })
-  for (const a of allocations) {
-    await transitionAllocationState(tenantId, a.id, 'consumed')
-  }
-}
+    // Return the committed amount to remaining.
+    const newRemaining = new Prisma.Decimal(reservation.remainingAmount).plus(commitment.committedAmount)
+    await tx.capacityReservation.update({
+      where: { id: reservation.id },
+      data: { remainingAmount: newRemaining.toString() },
+    })
 
-/**
- * Release all allocations for a given source (e.g. when a dispatch is cancelled).
- */
-export async function releaseCapacityBySource(tenantId: string, sourceType: string, sourceId: string): Promise<void> {
-  await db.capacityAllocation.updateMany({
-    where: { tenantId, sourceType, sourceId, lifecycleState: { not: 'released' } },
-    data: { lifecycleState: 'released', status: 'released' },
+    await tx.capacityCommitment.update({
+      where: { id: commitment.id },
+      data: { status: 'cancelled' },
+    })
   })
 }
 
+// ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
+
 /**
- * Get the available capacity for an asset+capability in a time window.
- * Uses the verified physical capacity from the assignment.
+ * Get available capacity for an asset+capability in a time window.
+ * Resolves the correct networkId from the assignment (fixes empty networkId bug).
  */
 export async function getAvailableCapacity(
   tenantId: string,
   assetId: string,
+  networkId: string,
   capabilityType: string,
   startTime: Date,
   endTime: Date,
-): Promise<{ physical: string; allocated: string; available: string }> {
-  const physicalCapacityStr = await resolveVerifiedCapacity(tenantId, assetId, '', capabilityType).catch(() => null)
-  if (!physicalCapacityStr) {
-    return { physical: '0', allocated: '0', available: '0' }
-  }
-  const physical = new Prisma.Decimal(physicalCapacityStr)
-
-  const allocations = await db.capacityAllocation.findMany({
-    where: { tenantId, assetId, capabilityType, lifecycleState: { not: 'released' } },
+): Promise<{ physical: string; reserved: string; available: string }> {
+  const resource = await db.capacityResource.findUnique({
+    where: { assetId_networkId_capabilityType: { assetId, networkId, capabilityType } },
   })
-  const overlapping = allocations.filter(
-    (a) => a.startTime < endTime && a.endTime > startTime,
+  if (!resource) {
+    return { physical: '0', reserved: '0', available: '0' }
+  }
+  const physical = new Prisma.Decimal(resource.physicalCapacity)
+
+  const reservations = await db.capacityReservation.findMany({
+    where: { tenantId, resourceId: resource.id, status: 'active' },
+  })
+  const overlapping = reservations.filter(
+    (r) => r.startTime < endTime && r.endTime > startTime,
   )
-  const allocated = overlapping.reduce(
-    (sum, a) => sum.plus(new Prisma.Decimal(a.allocatedAmount)),
+  const reserved = overlapping.reduce(
+    (sum, r) => sum.plus(new Prisma.Decimal(r.reservedAmount)),
     new Prisma.Decimal(0),
   )
-  const available = physical.minus(allocated)
+  const available = physical.minus(reserved)
 
   return {
     physical: physical.toString(),
-    allocated: allocated.toString(),
+    reserved: reserved.toString(),
     available: available.toString(),
+  }
+}
+
+/**
+ * Find a reservation by source (e.g. find the VPP reservation's capacity
+// reservation by the VppCapacityReservation ID).
+ */
+export async function findReservationBySource(
+  tenantId: string,
+  sourceType: string,
+  sourceId: string,
+): Promise<{ id: string; resourceId: string; reservedAmount: string; remainingAmount: string } | null> {
+  const reservation = await db.capacityReservation.findFirst({
+    where: { tenantId, sourceType, sourceId, status: 'active' },
+  })
+  if (!reservation) return null
+  return {
+    id: reservation.id,
+    resourceId: reservation.resourceId,
+    reservedAmount: reservation.reservedAmount,
+    remainingAmount: reservation.remainingAmount,
   }
 }
