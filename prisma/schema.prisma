@@ -1000,7 +1000,11 @@ model VppDispatchAssignment {
   capabilityType  String   // energy_discharge | frequency_response
   assignedKw      String   // decimal as string — power assigned to this asset
   assignedKwh     String   // decimal as string — energy assigned to this asset
-  status          String   @default("assigned") // assigned | dispatching | completed | failed
+  status          String   @default("assigned") // assigned | dispatching | completed | failed | reconciliation_required | reconciling
+  // Durable economic stage tracking for resumable recovery.
+  // Each stage is set as the assignment progresses through the economic pipeline.
+  // On failure after usage, reconcileAssignment() resumes from the first missing stage.
+  economicStage   String   @default("none") // none | delivery_verified | usage_recorded | reward_calculated | ledger_posted | settlement_pending | completed
   // After completion: actual vs baseline (computed by the baseline engine).
   actualKwh       String?  // decimal as string — measured energy delivered
   baselineKwh     String?  // decimal as string — estimated energy without dispatch
