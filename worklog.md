@@ -313,3 +313,23 @@ Stage Summary:
 - Capacity allocation is a platform primitive (not VPP-specific).
 - Production verified: login + E2E work on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit 2fdb74e)
+
+---
+Task ID: capacity-allocation-correctness
+Agent: orchestrator
+Task: Fix 5 capacity allocation issues from review.
+
+Work Log:
+1. CONCURRENCY: locks AssetNetworkAssignment FOR UPDATE (stable lock target that always exists). Two concurrent 7 kW allocations against 10 kW → exactly 1 succeeds, total allocated = 7 kW.
+2. NO UNTRUSTED CAPACITY: removed physicalCapacityKw from caller input. Capacity resolved from AssetNetworkAssignment.verifiedCapacityKw. 50 kW reservation against 10 kW verified → rejected.
+3. ATOMIC: reservation + allocation in ONE db.$transaction. sourceId populated during insert. No orphaned allocations.
+4. LIFECYCLE: CapacityAllocation.lifecycleState (allocated→committed→consumed→released). Dispatch transitions to committed; completion transitions to consumed.
+5. REAL TESTS: concurrent first allocations (7+7 vs 10), spoofed capacity rejection, exact 6:4 multi-asset allocation.
+
+Stage Summary:
+- All 5 capacity allocation fixes implemented and tested.
+- The critical concurrency bug (first-allocation race) is fixed via stable lock target.
+- Physical capacity is never trusted from callers — always from verified assignment.
+- Capacity lifecycle is modeled: allocated → committed → consumed → released.
+- Production verified: login + E2E work on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit a986313)
