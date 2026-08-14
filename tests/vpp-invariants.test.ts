@@ -748,4 +748,52 @@ describe('VPP invariant: concurrent execution + state machine', () => {
     })
     expect(usage).toBeTruthy()
   })
+
+  it('pre-usage failure (wrong secret) → FAILED + released + no usage', async () => {
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const { assignments } = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '5', requestedKwh: '10',
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+    })
+
+    await expect(
+      executeDispatchAssignment(tenantId, assignments[0].id, 'wrong-secret'),
+    ).rejects.toThrow()
+
+    const assignment = await db.vppDispatchAssignment.findUnique({ where: { id: assignments[0].id } })
+    expect(assignment?.status).toBe('failed')
+
+    const commitment = await db.capacityCommitment.findUnique({
+      where: { id: assignments[0].capacityCommitmentId! },
+    })
+    expect(commitment?.status).toBe('released')
+
+    // No usage should exist (failure was before usage recording).
+    const usage = await db.capacityUsage.findUnique({
+      where: { commitmentId: assignments[0].capacityCommitmentId! },
+    })
+    expect(usage).toBeNull()
+  })
+
+  it('no state can exist where commitment is released after usage was recorded', async () => {
+    // Query ALL assignments that have usage records.
+    // None of their commitments should be 'released'.
+    const assignmentsWithCommitments = await db.vppDispatchAssignment.findMany({
+      where: { capacityCommitmentId: { not: null } },
+    })
+
+    for (const a of assignmentsWithCommitments) {
+      const usage = await db.capacityUsage.findUnique({
+        where: { commitmentId: a.capacityCommitmentId! },
+      })
+      if (usage) {
+        // Usage exists → commitment must NOT be released.
+        const commitment = await db.capacityCommitment.findUnique({
+          where: { id: a.capacityCommitmentId! },
+        })
+        expect(commitment?.status).not.toBe('released')
+      }
+    }
+  })
 })

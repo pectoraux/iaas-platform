@@ -391,20 +391,40 @@ export async function executeDispatchAssignment(
     throw new ConflictError(`Assignment ${assignmentId} is not in 'assigned' state (current: ${assignment.status}). Concurrent execution rejected.`)
   }
 
-  // Fix 3: CENTRALIZED failure handler — wraps the ENTIRE post-claim path.
-  // Any exception after the 'dispatching' claim releases the commitment.
-  // This includes DER adapter failures, verification failures, ledger failures,
-  // settlement failures, and usage recording failures.
+  // State machine:
+  //   ASSIGNED → DISPATCHING → DELIVERY_VERIFIED → USAGE_RECORDED → SETTLEMENT_PENDING → COMPLETED
+  //   Pre-usage failure: → FAILED → commitment RELEASED (no money moved)
+  //   Post-usage failure: → RECONCILIATION_REQUIRED → commitment stays CONSUMED (liability exists)
   const releaseAssignmentCapacity = async () => {
     if (assignment.capacityCommitmentId) {
       await releaseCommitment(tenantId, 'vpp_dispatch_assignment', `assignment-${assignment.dispatchId}-${assignment.assetId}`)
     }
   }
 
+  // Pre-usage failure: release capacity (no irreversible action has occurred).
   const failAssignment = async () => {
     await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
     await releaseAssignmentCapacity()
   }
+
+  // Post-usage failure: capacity is CONSUMED, money may have moved.
+  // Do NOT release. Enter reconciliation state for retry.
+  const markReconciliationRequired = async (reason: string) => {
+    await db.vppDispatchAssignment.update({
+      where: { id: assignmentId },
+      data: { status: 'reconciliation_required' },
+    })
+    await appendAudit({
+      tenantId, actorId,
+      eventType: 'vpp.reconciliation_required',
+      resourceType: 'vpp_dispatch_assignment',
+      resourceId: assignmentId,
+      metadata: { reason, commitmentId: assignment.capacityCommitmentId },
+    })
+  }
+
+  // Track whether usage has been recorded (determines failure handling).
+  let usageRecorded = false
 
   try {
     const device = assignment.asset.devices.find((d) => d.credential && d.credential.status === 'active')
@@ -500,15 +520,8 @@ export async function executeDispatchAssignment(
     )
 
     // --- RECORD USAGE BEFORE ANY IRREVERSIBLE FINANCIAL SETTLEMENT ---
-    // State machine: DELIVERY_VERIFIED → USAGE_RECORDED → ECONOMICALLY_SETTLED → COMPLETED
-    //
-    // Usage is recorded (commitment consumed) BEFORE reward/ledger/settlement.
-    // This ensures:
-    //   - If usage recording fails → assignment fails → commitment released.
-    //     No money has moved yet. Safe to release.
-    //   - If settlement fails after usage → commitment is already consumed.
-    //     Capacity is NOT released. Financial reconciliation is needed.
-    //   - A successful settlement ALWAYS has a consumed commitment + usage.
+    // State: DELIVERY_VERIFIED → USAGE_RECORDED
+    // After this point, capacity is CONSUMED. Failures cannot release it.
     if (assignment.capacityCommitmentId) {
       await recordUsage({
         tenantId,
@@ -521,8 +534,11 @@ export async function executeDispatchAssignment(
         sourceId: `assignment-${assignment.dispatchId}-${assignment.assetId}`,
       })
     }
+    usageRecorded = true // Mark: post-usage failures must NOT release capacity.
 
     // --- Reward + Ledger + Settlement (after usage is recorded) ---
+    // State: USAGE_RECORDED → SETTLEMENT_PENDING → COMPLETED
+    // If anything here fails, the assignment enters RECONCILIATION_REQUIRED.
     const reward = await calculateReward(tenantId, contribution.id, `vpp-contrib-${contribution.id}`)
     await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
     const settlement = await createSettlement(tenantId, reward.id)
@@ -580,11 +596,88 @@ export async function executeDispatchAssignment(
       duplicate: false,
     }
   } catch (err) {
-    // Fix 3: CENTRALIZED failure handler — ANY exception releases the commitment.
-    // This covers: missing device, DER adapter failure, verification failure,
-    // ledger failure, settlement failure, usage recording failure.
-    await failAssignment()
+    // STATE MACHINE FAILURE HANDLING:
+    // Pre-usage failure (usageRecorded = false): → FAILED → release capacity.
+    //   No irreversible action has occurred. Safe to release.
+    // Post-usage failure (usageRecorded = true): → RECONCILIATION_REQUIRED.
+    //   Capacity is CONSUMED. Money may have moved. Do NOT release.
+    //   Financial reconciliation can retry settlement.
+    if (usageRecorded) {
+      await markReconciliationRequired(err instanceof Error ? err.message : 'Post-usage failure')
+    } else {
+      await failAssignment()
+    }
     throw err
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Settlement Retry (RECONCILIATION_REQUIRED → COMPLETED)
+// ---------------------------------------------------------------------------
+
+/**
+ * Retry settlement for an assignment in RECONCILIATION_REQUIRED state.
+ * This re-processes the settlement outbox. If settlement succeeds, the
+ * assignment transitions to COMPLETED.
+ */
+export async function retrySettlement(
+  tenantId: string,
+  assignmentId: string,
+  actorId?: string,
+): Promise<{ assignment_id: string; status: string; message: string }> {
+  const assignment = await db.vppDispatchAssignment.findFirst({
+    where: { id: assignmentId, tenantId },
+    include: { dispatch: true },
+  })
+  if (!assignment) throw new NotFoundError('vpp_dispatch_assignment', assignmentId)
+  if (assignment.status !== 'reconciliation_required') {
+    return {
+      assignment_id: assignmentId,
+      status: assignment.status,
+      message: `Assignment is not in reconciliation_required state (current: ${assignment.status})`,
+    }
+  }
+
+  // Re-process the settlement outbox.
+  await processSettlementOutbox(tenantId)
+
+  // Check if the settlement is now completed.
+  if (assignment.contributionId) {
+    const reward = await db.reward.findFirst({ where: { contributionId: assignment.contributionId } })
+    if (reward) {
+      const settlement = await db.settlement.findUnique({ where: { rewardId: reward.id } })
+      if (settlement?.status === 'completed') {
+        // Settlement succeeded → mark assignment as completed.
+        await db.vppDispatchAssignment.update({
+          where: { id: assignmentId },
+          data: { status: 'completed', completedAt: new Date() },
+        })
+
+        // Update dispatch status if all assignments completed.
+        const pending = await db.vppDispatchAssignment.count({
+          where: { dispatchId: assignment.dispatchId, status: { not: 'completed' } },
+        })
+        if (pending === 0) {
+          await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
+        }
+
+        await appendAudit({
+          tenantId, actorId,
+          eventType: 'vpp.reconciliation_completed',
+          resourceType: 'vpp_dispatch_assignment',
+          resourceId: assignmentId,
+          metadata: { rewardId: reward.id, settlementId: settlement.id },
+        })
+
+        return { assignment_id: assignmentId, status: 'completed', message: 'Settlement retried successfully' }
+      }
+    }
+  }
+
+  return {
+    assignment_id: assignmentId,
+    status: 'reconciliation_required',
+    message: 'Settlement retry attempted but not yet completed. Manual reconciliation may be needed.',
   }
 }
 
