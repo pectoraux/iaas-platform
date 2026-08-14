@@ -416,3 +416,26 @@ Stage Summary:
 - Usage recording is atomic + idempotent.
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit c78f133)
+
+---
+Task ID: execution-state-machine
+Agent: orchestrator
+Task: Fix 4 execution-state issues — concurrent test, usage-before-completion, centralized failure, state invariant.
+
+Work Log:
+1. REAL CONCURRENT EXECUTION TEST: Promise.all of two executeDispatchAssignment on same assignment → exactly 1 succeeds, 1 fails, 1 event, 1 usage. Test passes.
+2. USAGE BEFORE COMPLETION: recordUsage() called BEFORE assignment → completed. Assignment cannot be completed while commitment is active. If recordUsage fails → assignment failed, commitment released.
+3. CENTRALIZED FAILURE HANDLER: entire post-claim path wrapped in try/catch. ANY exception (including DER adapter) → failAssignment() → release. No individual catch blocks.
+4. STATE INVARIANT: no completed assignment can have active commitment. Test queries ALL completed assignments, verifies none have active commitments (15 checked, all pass).
+
+Execution order: assigned → dispatching → [DER + verify + baseline + contribution + reward + ledger + settlement] → recordUsage (consumed) → completed. OR catch → failed → released.
+
+Tests (all pass): concurrent execution (1 of 2 wins), completed→consumed, failed→released, no-completed+active.
+
+Stage Summary:
+- All 4 execution-state issues fixed.
+- The state machine is now: completed ⇒ consumed, failed ⇒ released.
+- No stranded capacity possible.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit da98128)
+- Capacity layer is now frozen. Ready for VPP-2.
