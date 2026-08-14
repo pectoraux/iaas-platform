@@ -343,8 +343,9 @@ export async function processSettlementForReward(tenantId: string, rewardId: str
 
     if (payout.status === 'completed') {
       await db.$transaction(async (tx) => {
-        const payableAccount = await ensureOperatorAccount(settlement.tenantId, settlement.operatorId, settlement.currency, 'liability')
-        const cashAccount = await ensurePlatformAccount(settlement.tenantId, settlement.currency, 'asset')
+        // Pass tx to ensure accounts are created within the transaction.
+        const payableAccount = await ensureOperatorAccount(settlement.tenantId, settlement.operatorId, settlement.currency, 'liability', tx)
+        const cashAccount = await ensurePlatformAccount(settlement.tenantId, settlement.currency, 'asset', tx)
         const debitKey = `${settlement.idempotencyKey}:settlement_debit`
 
         const existingPosting = await tx.ledgerPosting.findUnique({

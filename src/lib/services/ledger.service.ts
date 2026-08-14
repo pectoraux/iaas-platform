@@ -31,8 +31,10 @@ export async function ensureOperatorAccount(
   operatorId: string,
   currency = 'USD',
   accountType: string = 'liability',
+  tx?: ExtendedTransactionClient,
 ) {
-  const existing = await db.ledgerAccount.findUnique({
+  const client = tx ?? db
+  const existing = await client.ledgerAccount.findUnique({
     where: {
       tenantId_ownerId_ownerType_accountType_currency: {
         tenantId, ownerId: operatorId, ownerType: 'operator', accountType, currency,
@@ -40,13 +42,14 @@ export async function ensureOperatorAccount(
     },
   })
   if (existing) return existing
-  return db.ledgerAccount.create({
+  return client.ledgerAccount.create({
     data: { tenantId, ownerId: operatorId, ownerType: 'operator', accountType, currency },
   })
 }
 
-export async function ensurePlatformAccount(tenantId: string, currency = 'USD', accountType: string = 'asset') {
-  const existing = await db.ledgerAccount.findUnique({
+export async function ensurePlatformAccount(tenantId: string, currency = 'USD', accountType: string = 'asset', tx?: ExtendedTransactionClient) {
+  const client = tx ?? db
+  const existing = await client.ledgerAccount.findUnique({
     where: {
       tenantId_ownerId_ownerType_accountType_currency: {
         tenantId, ownerId: 'platform', ownerType: 'platform', accountType, currency,
@@ -54,13 +57,14 @@ export async function ensurePlatformAccount(tenantId: string, currency = 'USD', 
     },
   })
   if (existing) return existing
-  return db.ledgerAccount.create({
+  return client.ledgerAccount.create({
     data: { tenantId, ownerId: 'platform', ownerType: 'platform', accountType, currency },
   })
 }
 
-export async function ensureBuyerFundsAccount(tenantId: string, currency = 'USD') {
-  const existing = await db.ledgerAccount.findUnique({
+export async function ensureBuyerFundsAccount(tenantId: string, currency = 'USD', tx?: ExtendedTransactionClient) {
+  const client = tx ?? db
+  const existing = await client.ledgerAccount.findUnique({
     where: {
       tenantId_ownerId_ownerType_accountType_currency: {
         tenantId, ownerId: 'buyer', ownerType: 'buyer', accountType: 'liability', currency,
@@ -68,7 +72,7 @@ export async function ensureBuyerFundsAccount(tenantId: string, currency = 'USD'
     },
   })
   if (existing) return existing
-  return db.ledgerAccount.create({
+  return client.ledgerAccount.create({
     data: { tenantId, ownerId: 'buyer', ownerType: 'buyer', accountType: 'liability', currency },
   })
 }
@@ -290,7 +294,8 @@ export async function postRewardToLedger(
   const netAmount = new Prisma.Decimal(reward.amount)
   const platformFee = grossAmount.minus(netAmount)
 
-  // Ensure all required accounts exist.
+  // Ensure all required accounts exist (outside transaction — idempotent containers).
+  // The actual financial entries are created inside the transaction with tx.
   const payableAccount = await ensureOperatorAccount(tenantId, reward.operatorId, reward.currency, 'liability')
   const revenueAccount = await ensurePlatformAccount(tenantId, reward.currency, 'revenue')
   const buyerFundsAccount = await ensureBuyerFundsAccount(tenantId, reward.currency)
