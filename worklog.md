@@ -546,3 +546,23 @@ Stage Summary:
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit ee73722)
 - EXECUTION/CAPACITY/ECONOMIC/SETTLEMENT/RECONCILIATION LAYER IS NOW FROZEN. Ready for VPP-2.
+
+---
+Task ID: canonical-settlement-engine
+Agent: orchestrator
+Task: Fix critical blocker — VPP uses canonical processSettlementForReward, not old outbox.
+
+Work Log:
+1. VPP EXECUTION PATH: replaced processSettlementOutbox(tenantId) with processSettlementForReward(tenantId, reward.id). Settlement status is source of truth. Failed settlement → RECONCILIATION_REQUIRED (not COMPLETED).
+2. ONE CANONICAL ENGINE: processSettlementOutbox now delegates to processSettlementForReward. No duplicate settlement logic.
+3. REAL FAILURE TEST: FailingPaymentsAdapter fails during executeDispatchAssignment → assignment naturally enters reconciliation_required (no manual DB mutations). Reconcile → COMPLETED.
+4. ABSOLUTE INVARIANT: every completed assignment has consumed commitment + 1 usage + reward + ledger posting + completed settlement. Test passes on clean DB.
+
+Stage Summary:
+- One canonical settlement engine with lease-safe claiming.
+- Assignment can NEVER be completed while settlement is not completed.
+- Real failure path tested end-to-end with fake provider.
+- Absolute completion invariant enforced.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit 5f8a210)
+- EXECUTION/CAPACITY/ECONOMIC/SETTLEMENT/RECONCILIATION LAYER IS NOW FROZEN. Ready for VPP-2.
