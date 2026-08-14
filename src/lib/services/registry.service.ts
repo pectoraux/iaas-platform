@@ -132,7 +132,7 @@ export interface AssignAssetNetworkInput {
  * Explicitly assign an asset to a network. An asset MUST have an active
  * assignment to ingest events or earn contributions in that network.
  *
- * Task 2: the assignment includes `verifiedCapacityKw` — the authoritative
+ * Task 2: the assignment includes `verifiedQuantity` — the authoritative
  * physical capacity for this asset+capability. This is set at assignment time
  * and used by the capacity allocator. Callers can NEVER override it during
  * allocation.
@@ -145,7 +145,8 @@ export async function assignAssetToNetwork(
   assetId: string,
   networkId: string,
   capabilityType: string,
-  verifiedCapacityKw?: string,
+  verifiedQuantity?: string,
+  verifiedUnit?: string,
   actorId?: string,
 ) {
   // Validate asset + network belong to tenant.
@@ -159,10 +160,10 @@ export async function assignAssetToNetwork(
   if (existing) {
     if (existing.status === 'active') {
       // Update verified capacity if provided.
-      if (verifiedCapacityKw && existing.verifiedCapacityKw !== verifiedCapacityKw) {
+      if (verifiedQuantity && (existing.verifiedQuantity !== verifiedQuantity || existing.verifiedUnit !== verifiedUnit)) {
         return db.assetNetworkAssignment.update({
           where: { id: existing.id },
-          data: { verifiedCapacityKw },
+          data: { verifiedQuantity, verifiedUnit },
         })
       }
       return existing
@@ -170,12 +171,12 @@ export async function assignAssetToNetwork(
     // Reactivate.
     return db.assetNetworkAssignment.update({
       where: { id: existing.id },
-      data: { status: 'active', effectiveTo: null, capabilityType, verifiedCapacityKw: verifiedCapacityKw ?? null },
+      data: { status: 'active', effectiveTo: null, capabilityType, verifiedQuantity: verifiedQuantity ?? null, verifiedUnit: verifiedUnit ?? null },
     })
   }
 
   const assignment = await db.assetNetworkAssignment.create({
-    data: { tenantId, assetId, networkId, capabilityType, status: 'active', verifiedCapacityKw: verifiedCapacityKw ?? null },
+    data: { tenantId, assetId, networkId, capabilityType, status: 'active', verifiedQuantity: verifiedQuantity ?? null, verifiedUnit: verifiedUnit ?? null },
   })
 
   await appendAudit({

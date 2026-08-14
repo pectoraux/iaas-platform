@@ -108,7 +108,7 @@ async function main() {
   }
 
   // Assign asset to the VPP network (task 4: explicit network membership).
-  await assignAssetToNetwork(tenant.id, asset.id, vpp.network.id, 'energy_discharge', '10') // 10 kW verified
+  await assignAssetToNetwork(tenant.id, asset.id, vpp.network.id, 'energy_discharge', '10', 'kW') // 10 kW verified
 
   let device = await db.device.findFirst({ where: { tenantId: tenant.id } })
   if (!device) {

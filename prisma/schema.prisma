@@ -67,6 +67,7 @@ model Tenant {
   capacityResources CapacityResource[]
   capacityReservations CapacityReservation[]
   capacityCommitments CapacityCommitment[]
+  capacityUsages CapacityUsage[]
 
   @@index([slug])
 }
@@ -207,8 +208,14 @@ model AssetNetworkAssignment {
   effectiveTo     DateTime?
   createdAt       DateTime @default(now())
   // Authoritative verified physical capacity for this asset+capability.
-  // Set during assignment; used by the capacity allocator (never from caller).
-  verifiedCapacityKw String? // decimal as string (nullable for capabilities without power)
+  // GENERIC (not energy-specific): verifiedQuantity + unit together represent
+  // the physical limit for ANY capability type:
+  //   energy_discharge → 10 kW
+  //   storage_capacity → 100 TB
+  //   compute_capacity → 16 GPU
+  //   bandwidth → 1 Gbps
+  verifiedQuantity String?  // decimal as string
+  verifiedUnit     String?  // kW | TB | GPU | Gbps | ...
 
   asset   Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
   network NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
@@ -449,9 +456,14 @@ model CapacityResource {
   assetId         String
   networkId       String
   capabilityType  String
-  // The verified physical capacity (from AssetNetworkAssignment.verifiedCapacityKw).
+  // The verified physical capacity (from AssetNetworkAssignment.verifiedQuantity).
+  // GENERIC — not energy-specific. The unit is also from the assignment:
+  //   energy_discharge → kW
+  //   storage_capacity → TB
+  //   compute_capacity → GPU
+  //   bandwidth → Gbps
   physicalCapacity String  // decimal as string
-  unit            String   @default("kW")
+  unit            String   // kW | TB | GPU | Gbps | ... (resolved from assignment, not hardcoded)
   status          String   @default("active") // active | inactive
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -498,18 +510,22 @@ model CapacityReservation {
 /// A capacity commitment: a dispatch commits some of a reservation's capacity.
 /// Multiple commitments can share a reservation (e.g. 6 kW + 4 kW = 10 kW).
 /// Commitments cannot exceed the reservation's remaining amount.
+///
+/// IMPORTANT: committedAmount + unit represent CAPACITY (e.g. kW), NOT usage
+/// (e.g. kWh). Actual usage is recorded separately in CapacityUsage to avoid
+/// dimensional confusion (6 kW committed ≠ 5.7 kWh consumed).
 model CapacityCommitment {
   id              String   @id @default(cuid())
   tenantId        String
   reservationId   String
-  // The amount committed for this specific job/dispatch.
+  // The capacity committed for this specific job/dispatch (e.g. 6 kW).
   committedAmount String   // decimal as string
+  unit            String   // kW | TB | GPU | Gbps | ... (must match resource unit)
   // Time window for this commitment.
   startTime       DateTime
   endTime         DateTime
-  // Actual consumption (recorded on completion).
-  consumedAmount  String?  // decimal as string — null until completed
-  status          String   @default("active") // active | consumed | released | cancelled
+  // Terminal state: active → consumed | released | expired
+  status          String   @default("active") // active | consumed | released | expired
   // What this commitment is for.
   sourceType      String   // vpp_dispatch | storage_job | compute_job | ...
   sourceId        String?  // e.g. VppDispatch.id
@@ -518,9 +534,47 @@ model CapacityCommitment {
 
   tenant      Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   reservation CapacityReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  usages      CapacityUsage[]
 
   @@index([tenantId])
   @@index([reservationId])
+  @@index([sourceType, sourceId])
+}
+
+/// A capacity usage record — ACTUAL usage of a committed resource.
+/// SEPARATE from the commitment because capacity (kW) and usage (kWh) are
+/// different physical dimensions.
+///
+/// Examples:
+///   VPP commitment: 6 kW for 30 min → usage: 2.85 kWh energy delivered
+///   Storage commitment: 50 TB for 1 month → usage: 45 TB stored
+///   Compute commitment: 6 GPU for 1 hour → usage: 6 GPU-hours consumed
+///
+/// The generic Contribution system uses these usage records (via attestations)
+/// to derive the economically verified contribution quantity.
+model CapacityUsage {
+  id              String   @id @default(cuid())
+  tenantId        String
+  commitmentId    String
+  // The actual usage quantity + unit (may differ from commitment unit).
+  // e.g. commitment = 6 kW, usage = 2.85 kWh (different dimensions).
+  quantity        String   // decimal as string
+  unit            String   // kWh | TB-hours | GPU-hours | ...
+  // Time window of actual usage.
+  startTime       DateTime
+  endTime         DateTime
+  // What produced this usage.
+  sourceType      String   // vpp_dispatch | storage_job | ...
+  sourceId        String?  // e.g. VppDispatch.id
+  // Link to the attestation that verified this usage (optional).
+  attestationId   String?
+  createdAt       DateTime @default(now())
+
+  tenant      Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  commitment  CapacityCommitment @relation(fields: [commitmentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([commitmentId])
   @@index([sourceType, sourceId])
 }
 

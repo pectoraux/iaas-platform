@@ -34,7 +34,7 @@ import { signMessage, deriveSigningKey } from '@/lib/domain/crypto'
 import {
   createCapacityReservation as allocateReservation,
   createCapacityCommitment,
-  recordConsumption,
+  recordUsage,
   releaseCommitment,
   findReservationBySource,
 } from './capacity.service'
@@ -301,6 +301,7 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
           tenantId,
           reservationId: capacityReservation.id,
           committedAmount: assignedKw.toFixed(8),
+          unit: 'kW', // capacity unit (not kWh — usage is recorded separately)
           startTime,
           endTime,
           sourceType: 'vpp_dispatch',
@@ -441,6 +442,8 @@ export async function executeDispatchAssignment(
 
   if (event?.status !== 'verified' || !event.attestations[0]) {
     await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
+    // Release the capacity commitment so the capacity is not stranded.
+    await releaseCommitment(tenantId, 'vpp_dispatch', assignment.dispatchId)
     throw new Error(`Dispatch telemetry verification failed: ${event?.status}`)
   }
 
@@ -482,8 +485,15 @@ export async function executeDispatchAssignment(
   const reward = await calculateReward(tenantId, contribution.id, `vpp-contrib-${contribution.id}`)
 
   // Task 6: NO AUTO-FUNDING. If buyer funds are insufficient, the reward
-  // posting fails. The assignment stays in 'dispatching' state.
-  const ledger = await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
+  // posting fails. Release the capacity commitment so capacity is not stranded.
+  let ledger
+  try {
+    ledger = await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
+  } catch (err) {
+    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
+    await releaseCommitment(tenantId, 'vpp_dispatch', assignment.dispatchId)
+    throw err
+  }
 
   const settlement = await createSettlement(tenantId, reward.id)
   await processSettlementOutbox(tenantId)
@@ -508,9 +518,17 @@ export async function executeDispatchAssignment(
   })
   if (pendingAssignments === 0) {
     await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
-    // Record consumption for the dispatch's capacity commitment.
-    // Uses the dispatch ID as sourceId (matches createCapacityCommitment).
-    await recordConsumption(tenantId, 'vpp_dispatch', assignment.dispatchId, assignment.actualKwh ?? assignment.assignedKwh)
+    // Record ACTUAL USAGE (kWh — energy delivered, not kW capacity).
+    // This is dimensionally separate from the commitment (kW).
+    await recordUsage({
+      tenantId,
+      sourceType: 'vpp_dispatch',
+      sourceId: assignment.dispatchId,
+      quantity: assignment.actualKwh ?? assignment.assignedKwh,
+      unit: 'kWh', // usage unit (capacity was committed in kW)
+      startTime: assignment.dispatch.startTime,
+      endTime: assignment.dispatch.endTime,
+    })
   }
 
   await appendAudit({

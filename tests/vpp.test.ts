@@ -60,9 +60,9 @@ beforeAll(async () => {
   assetId = asset.id
 
   // Issue 3 proof: assign MULTIPLE capabilities to the same asset in the same network.
-  await assignAssetToNetwork(tenantId, assetId, networkId, 'energy_discharge', '10')
-  await assignAssetToNetwork(tenantId, assetId, networkId, 'frequency_response', '10')
-  await assignAssetToNetwork(tenantId, assetId, networkId, 'energy_capacity', '10')
+  await assignAssetToNetwork(tenantId, assetId, networkId, 'energy_discharge', '10', 'kW')
+  await assignAssetToNetwork(tenantId, assetId, networkId, 'frequency_response', '10', 'kW')
+  await assignAssetToNetwork(tenantId, assetId, networkId, 'energy_capacity', '10', 'kWh')
 
   const provisioned = await createDevice(tenantId, {
     assetId,

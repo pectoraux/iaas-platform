@@ -1,27 +1,27 @@
 // =============================================================================
-// Capacity Service — PLATFORM-LEVEL primitive (redesigned 4-layer model).
+// Capacity Service — PLATFORM-LEVEL primitive (generic, 4-layer model).
 //
-// Capacity is a RESOURCE. Reservations, commitments, and consumption are
+// Capacity is a RESOURCE. Reservations, commitments, and usage are
 // TRANSACTIONS against that resource.
 //
-//   CapacityResource (verified physical capacity)
+//   CapacityResource (verified physical capacity, generic unit)
 //       ↓
 //   CapacityReservation (operator commits capacity for a window)
 //       ↓
 //   CapacityCommitment (a dispatch/job commits some of the reserved capacity)
 //       ↓
-//   Consumption (actual usage, recorded on completion)
+//   CapacityUsage (actual usage — SEPARATE dimension from capacity)
 //
-// Invariants:
-//   - Sum of active reservations ≤ resource.physicalCapacity (concurrency-safe)
-//   - Sum of active commitments ≤ reservation.reservedAmount (concurrency-safe)
-//   - Consumption recorded per commitment
+// GENERIC: works for ALL verticals:
+//   VPP:        10 kW → 8 kW reserved → 6 kW committed → 2.85 kWh used
+//   Storage:    100 TB → 80 TB reserved → 50 TB committed → 45 TB used
+//   Compute:    16 GPU → 12 GPU reserved → 6 GPU committed → 6 GPU-hours used
+//   Wireless:   1 Gbps → 800 Mbps reserved → 500 Mbps committed → 350 Mbps used
 //
-// Works for ALL verticals:
-//   VPP:        10 kW → 8 kW reserved → 6 kW committed → 5.7 kW consumed
-//   Storage:    100 TB → 80 TB reserved → 50 TB committed → 40 TB consumed
-//   Compute:    16 GPU → 12 GPU reserved → 6 GPU committed → 6 GPU consumed
-//   Wireless:   1 Gbps → 800 Mbps reserved → 500 Mbps committed → 350 Mbps consumed
+// KEY INSIGHT: capacity (kW) and usage (kWh) are different dimensions.
+// A commitment represents CAPACITY (kW). Usage represents ACTUAL CONSUMPTION
+// (kWh, TB, GPU-hours). They are stored in separate models to prevent
+// dimensional confusion.
 // =============================================================================
 
 import { db, type ExtendedTransactionClient } from '@/lib/db'
@@ -34,8 +34,8 @@ import { NotFoundError, ValidationError } from '@/lib/domain/errors'
 
 /**
  * Get-or-create the CapacityResource for an asset+capability.
- * The resource is created from AssetNetworkAssignment.verifiedCapacityKw.
- * This is the STABLE LOCK TARGET for all capacity operations.
+ * The resource is created from AssetNetworkAssignment.verifiedQuantity + verifiedUnit.
+ * GENERIC — not energy-specific.
  */
 export async function ensureCapacityResource(
   tenantId: string,
@@ -43,32 +43,30 @@ export async function ensureCapacityResource(
   networkId: string,
   capabilityType: string,
   tx?: ExtendedTransactionClient,
-): Promise<{ id: string; physicalCapacity: string }> {
+): Promise<{ id: string; physicalCapacity: string; unit: string }> {
   const client = tx ?? db
 
-  // Resolve verified capacity from the assignment.
   const assignment = await client.assetNetworkAssignment.findFirst({
     where: { tenantId, assetId, networkId, capabilityType, status: 'active' },
   })
   if (!assignment) {
     throw new NotFoundError('asset_network_assignment', `${assetId}/${capabilityType}`)
   }
-  if (!assignment.verifiedCapacityKw) {
+  if (!assignment.verifiedQuantity || !assignment.verifiedUnit) {
     throw new ValidationError(
-      `Asset ${assetId} has no verified capacity for capability ${capabilityType}.`,
+      `Asset ${assetId} has no verified capacity for capability ${capabilityType}. ` +
+      `Set verifiedQuantity + verifiedUnit on the network assignment first.`,
     )
   }
 
-  // Get-or-create the resource.
   const existing = await client.capacityResource.findUnique({
     where: { assetId_networkId_capabilityType: { assetId, networkId, capabilityType } },
   })
   if (existing) {
-    // Update physical capacity if it changed.
-    if (existing.physicalCapacity !== assignment.verifiedCapacityKw) {
+    if (existing.physicalCapacity !== assignment.verifiedQuantity || existing.unit !== assignment.verifiedUnit) {
       return client.capacityResource.update({
         where: { id: existing.id },
-        data: { physicalCapacity: assignment.verifiedCapacityKw },
+        data: { physicalCapacity: assignment.verifiedQuantity, unit: assignment.verifiedUnit },
       })
     }
     return existing
@@ -80,8 +78,8 @@ export async function ensureCapacityResource(
       assetId,
       networkId,
       capabilityType,
-      physicalCapacity: assignment.verifiedCapacityKw,
-      unit: 'kW',
+      physicalCapacity: assignment.verifiedQuantity,
+      unit: assignment.verifiedUnit,
     },
   })
 }
@@ -108,18 +106,10 @@ export interface CreateReservationResult {
   reservedAmount: string
   remainingAmount: string
   physicalCapacity: string
+  unit: string
   duplicate: boolean
 }
 
-/**
- * Create a capacity reservation.
- *
- * CONCURRENCY-SAFE: locks the CapacityResource row FOR UPDATE (stable lock
- * target that always exists). Two concurrent reservations cannot both exceed
- * physical capacity.
- *
- * Invariant: SUM(active reservations overlapping [start, end]) ≤ physicalCapacity
- */
 export async function createCapacityReservation(
   input: CreateReservationInput,
   tx?: ExtendedTransactionClient,
@@ -130,7 +120,6 @@ export async function createCapacityReservation(
     throw new ValidationError(`Requested amount must be positive, got ${input.requestedAmount}`)
   }
 
-  // Ensure the resource exists (and resolve verified capacity).
   const resource = await ensureCapacityResource(
     input.tenantId, input.assetId, input.networkId, input.capabilityType, client,
   )
@@ -138,11 +127,10 @@ export async function createCapacityReservation(
 
   if (requested.greaterThan(physical)) {
     throw new ValidationError(
-      `Requested ${requested.toString()} exceeds verified physical capacity ${physical.toString()}`,
+      `Requested ${requested.toString()} exceeds verified physical capacity ${physical.toString()} ${resource.unit}`,
     )
   }
 
-  // Lock the resource FOR UPDATE (stable lock target — always exists).
   await client.$queryRaw`
     SELECT * FROM "CapacityResource"
     WHERE "assetId" = ${input.assetId}
@@ -151,7 +139,6 @@ export async function createCapacityReservation(
     FOR UPDATE
   `
 
-  // Idempotency: check for existing reservation with same source.
   if (input.sourceId) {
     const existing = await client.capacityReservation.findFirst({
       where: { tenantId: input.tenantId, sourceType: input.sourceType, sourceId: input.sourceId, status: 'active' },
@@ -163,12 +150,12 @@ export async function createCapacityReservation(
         reservedAmount: existing.reservedAmount,
         remainingAmount: existing.remainingAmount,
         physicalCapacity: resource.physicalCapacity,
+        unit: resource.unit,
         duplicate: true,
       }
     }
   }
 
-  // Compute overlapping reserved amount.
   const overlapping = await client.capacityReservation.findMany({
     where: {
       tenantId: input.tenantId,
@@ -186,17 +173,16 @@ export async function createCapacityReservation(
 
   if (requested.greaterThan(available)) {
     throw new ValidationError(
-      `Insufficient capacity: requested ${requested.toString()}, available ${available.toString()} (physical ${physical.toString()}, already reserved ${alreadyReserved.toString()})`,
+      `Insufficient capacity: requested ${requested.toString()}, available ${available.toString()} ${resource.unit}`,
     )
   }
 
-  // Create the reservation.
   const reservation = await client.capacityReservation.create({
     data: {
       tenantId: input.tenantId,
       resourceId: resource.id,
       reservedAmount: input.requestedAmount,
-      remainingAmount: input.requestedAmount, // starts fully available
+      remainingAmount: input.requestedAmount,
       startTime: input.startTime,
       endTime: input.endTime,
       sourceType: input.sourceType,
@@ -210,40 +196,34 @@ export async function createCapacityReservation(
     reservedAmount: reservation.reservedAmount,
     remainingAmount: reservation.remainingAmount,
     physicalCapacity: resource.physicalCapacity,
+    unit: resource.unit,
     duplicate: false,
   }
 }
 
 // ---------------------------------------------------------------------------
-// CapacityCommitment — a dispatch commits some of a reservation's capacity
+// CapacityCommitment — commit some of a reservation's capacity
 // ---------------------------------------------------------------------------
 
 export interface CreateCommitmentInput {
   tenantId: string
   reservationId: string
   committedAmount: string
+  unit: string // must match resource unit
   startTime: Date
   endTime: Date
-  sourceType: string // vpp_dispatch | storage_job | ...
-  sourceId: string   // e.g. VppDispatch.id
+  sourceType: string
+  sourceId: string
 }
 
 export interface CreateCommitmentResult {
   commitmentId: string
   committedAmount: string
+  unit: string
   remainingAfter: string
   duplicate: boolean
 }
 
-/**
- * Create a capacity commitment against a reservation.
- *
- * CONCURRENCY-SAFE: locks the CapacityReservation row FOR UPDATE.
- * Multiple commitments can share a reservation (6 kW + 4 kW = 10 kW),
- * but their sum cannot exceed the reservation's remaining amount.
- *
- * Invariant: SUM(active commitments) ≤ reservation.reservedAmount
- */
 export async function createCapacityCommitment(
   input: CreateCommitmentInput,
   tx?: ExtendedTransactionClient,
@@ -254,7 +234,6 @@ export async function createCapacityCommitment(
     throw new ValidationError(`Committed amount must be positive, got ${input.committedAmount}`)
   }
 
-  // Lock the reservation FOR UPDATE.
   await client.$queryRaw`
     SELECT * FROM "CapacityReservation"
     WHERE id = ${input.reservationId}
@@ -263,6 +242,7 @@ export async function createCapacityCommitment(
 
   const reservation = await client.capacityReservation.findUnique({
     where: { id: input.reservationId },
+    include: { resource: true },
   })
   if (!reservation) {
     throw new NotFoundError('capacity_reservation', input.reservationId)
@@ -271,7 +251,13 @@ export async function createCapacityCommitment(
     throw new ValidationError(`Reservation ${input.reservationId} is ${reservation.status}`)
   }
 
-  // Idempotency: check for existing commitment with same source.
+  // Unit check: commitment unit must match resource unit.
+  if (input.unit !== reservation.resource.unit) {
+    throw new ValidationError(
+      `Unit mismatch: commitment unit '${input.unit}' != resource unit '${reservation.resource.unit}'`,
+    )
+  }
+
   const existing = await client.capacityCommitment.findFirst({
     where: { tenantId: input.tenantId, sourceType: input.sourceType, sourceId: input.sourceId },
   })
@@ -279,6 +265,7 @@ export async function createCapacityCommitment(
     return {
       commitmentId: existing.id,
       committedAmount: existing.committedAmount,
+      unit: existing.unit,
       remainingAfter: new Prisma.Decimal(reservation.remainingAmount).toString(),
       duplicate: true,
     }
@@ -287,17 +274,17 @@ export async function createCapacityCommitment(
   const remaining = new Prisma.Decimal(reservation.remainingAmount)
   if (committed.greaterThan(remaining)) {
     throw new ValidationError(
-      `Insufficient remaining capacity: requested ${committed.toString()}, remaining ${remaining.toString()}`,
+      `Insufficient remaining capacity: requested ${committed.toString()} ${input.unit}, remaining ${remaining.toString()} ${input.unit}`,
     )
   }
 
-  // Create the commitment + decrement the reservation's remaining.
   const newRemaining = remaining.minus(committed)
   const commitment = await client.capacityCommitment.create({
     data: {
       tenantId: input.tenantId,
       reservationId: input.reservationId,
       committedAmount: input.committedAmount,
+      unit: input.unit,
       startTime: input.startTime,
       endTime: input.endTime,
       sourceType: input.sourceType,
@@ -313,45 +300,78 @@ export async function createCapacityCommitment(
   return {
     commitmentId: commitment.id,
     committedAmount: commitment.committedAmount,
+    unit: commitment.unit,
     remainingAfter: newRemaining.toString(),
     duplicate: false,
   }
 }
 
 // ---------------------------------------------------------------------------
-// Consumption — record actual usage on completion
+// CapacityUsage — actual usage (SEPARATE dimension from capacity)
 // ---------------------------------------------------------------------------
 
-/**
- * Record consumption for a commitment (dispatch completed).
- * This records the actual amount consumed, NOT the committed amount.
- */
-export async function recordConsumption(
-  tenantId: string,
-  sourceType: string,
-  sourceId: string,
-  consumedAmount: string,
-): Promise<void> {
-  const commitment = await db.capacityCommitment.findFirst({
-    where: { tenantId, sourceType, sourceId },
-  })
-  if (!commitment) {
-    throw new NotFoundError('capacity_commitment', `${sourceType}/${sourceId}`)
-  }
-
-  await db.capacityCommitment.update({
-    where: { id: commitment.id },
-    data: {
-      consumedAmount,
-      status: 'consumed',
-      completedAt: new Date(),
-    },
-  })
+export interface RecordUsageInput {
+  tenantId: string
+  sourceType: string // vpp_dispatch | storage_job | ...
+  sourceId: string
+  // Usage quantity + unit (may differ from commitment unit).
+  // e.g. commitment = 6 kW, usage = 2.85 kWh.
+  quantity: string
+  unit: string // kWh | TB | GPU-hours | ...
+  startTime: Date
+  endTime: Date
+  attestationId?: string
 }
 
 /**
- * Release a commitment (dispatch cancelled).
+ * Record actual usage for a commitment.
+ *
+ * This is SEPARATE from the commitment because capacity (kW) and usage (kWh)
+ * are different physical dimensions. The commitment represents promised
+ * capacity; the usage represents actual consumption.
+ *
+ * Also marks the commitment as 'consumed' (terminal state).
+ */
+export async function recordUsage(input: RecordUsageInput): Promise<{ usageId: string }> {
+  const commitment = await db.capacityCommitment.findFirst({
+    where: { tenantId: input.tenantId, sourceType: input.sourceType, sourceId: input.sourceId },
+  })
+  if (!commitment) {
+    throw new NotFoundError('capacity_commitment', `${input.sourceType}/${input.sourceId}`)
+  }
+
+  // Create the usage record.
+  const usage = await db.capacityUsage.create({
+    data: {
+      tenantId: input.tenantId,
+      commitmentId: commitment.id,
+      quantity: input.quantity,
+      unit: input.unit,
+      startTime: input.startTime,
+      endTime: input.endTime,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      attestationId: input.attestationId ?? null,
+    },
+  })
+
+  // Mark the commitment as consumed (terminal state).
+  await db.capacityCommitment.update({
+    where: { id: commitment.id },
+    data: { status: 'consumed', completedAt: new Date() },
+  })
+
+  return { usageId: usage.id }
+}
+
+// ---------------------------------------------------------------------------
+// Release — return committed capacity to the reservation
+// ---------------------------------------------------------------------------
+
+/**
+ * Release a commitment (dispatch cancelled/failed).
  * Returns the committed amount to the reservation's remaining.
+ * This prevents stranded capacity on failed dispatches.
  */
 export async function releaseCommitment(
   tenantId: string,
@@ -362,16 +382,14 @@ export async function releaseCommitment(
     where: { tenantId, sourceType, sourceId },
   })
   if (!commitment) return
-  if (commitment.status === 'released' || commitment.status === 'cancelled') return
+  if (commitment.status === 'released' || commitment.status === 'consumed') return
 
   await db.$transaction(async (tx) => {
-    // Lock the reservation.
     await tx.$queryRaw`SELECT * FROM "CapacityReservation" WHERE id = ${commitment.reservationId} FOR UPDATE`
 
     const reservation = await tx.capacityReservation.findUnique({ where: { id: commitment.reservationId } })
     if (!reservation) return
 
-    // Return the committed amount to remaining.
     const newRemaining = new Prisma.Decimal(reservation.remainingAmount).plus(commitment.committedAmount)
     await tx.capacityReservation.update({
       where: { id: reservation.id },
@@ -380,7 +398,7 @@ export async function releaseCommitment(
 
     await tx.capacityCommitment.update({
       where: { id: commitment.id },
-      data: { status: 'cancelled' },
+      data: { status: 'released' },
     })
   })
 }
@@ -389,10 +407,6 @@ export async function releaseCommitment(
 // Queries
 // ---------------------------------------------------------------------------
 
-/**
- * Get available capacity for an asset+capability in a time window.
- * Resolves the correct networkId from the assignment (fixes empty networkId bug).
- */
 export async function getAvailableCapacity(
   tenantId: string,
   assetId: string,
@@ -400,12 +414,12 @@ export async function getAvailableCapacity(
   capabilityType: string,
   startTime: Date,
   endTime: Date,
-): Promise<{ physical: string; reserved: string; available: string }> {
+): Promise<{ physical: string; reserved: string; available: string; unit: string }> {
   const resource = await db.capacityResource.findUnique({
     where: { assetId_networkId_capabilityType: { assetId, networkId, capabilityType } },
   })
   if (!resource) {
-    return { physical: '0', reserved: '0', available: '0' }
+    return { physical: '0', reserved: '0', available: '0', unit: '' }
   }
   const physical = new Prisma.Decimal(resource.physicalCapacity)
 
@@ -425,13 +439,10 @@ export async function getAvailableCapacity(
     physical: physical.toString(),
     reserved: reserved.toString(),
     available: available.toString(),
+    unit: resource.unit,
   }
 }
 
-/**
- * Find a reservation by source (e.g. find the VPP reservation's capacity
-// reservation by the VppCapacityReservation ID).
- */
 export async function findReservationBySource(
   tenantId: string,
   sourceType: string,

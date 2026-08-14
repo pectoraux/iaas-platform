@@ -23,6 +23,7 @@ import { instantiateTemplate } from '../src/lib/services/network.service'
 import { createOperator, createAsset, createDevice, assignAssetToNetwork } from '../src/lib/services/registry.service'
 import { signMessage, deriveSigningKey } from '../src/lib/domain/crypto'
 import { recordBuyerFunding } from '../src/lib/services/ledger.service'
+import { findReservationBySource } from '../src/lib/services/capacity.service'
 import {
   createBuyerProgram,
   createCapacityReservation,
@@ -57,7 +58,7 @@ beforeAll(async () => {
   const asset = await createAsset(tenantId, { operatorId, assetType: 'battery', name: 'Inv Battery' })
   assetId = asset.id
 
-  await assignAssetToNetwork(tenantId, assetId, networkId, 'energy_discharge', '10') // 10 kW verified
+  await assignAssetToNetwork(tenantId, assetId, networkId, 'energy_discharge', '10', 'kW') // 10 kW verified
 
   const provisioned = await createDevice(tenantId, { assetId, deviceType: 'battery_controller' })
   deviceId = provisioned.device.id
@@ -285,7 +286,7 @@ describe('VPP invariant: multi-asset aggregation', () => {
   it('should distribute dispatch across multiple assets proportionally', async () => {
     // Create a second asset.
     const asset2 = await createAsset(tenantId, { operatorId, assetType: 'battery', name: 'Multi Asset 2' })
-    await assignAssetToNetwork(tenantId, asset2.id, networkId, 'energy_discharge', '10')
+    await assignAssetToNetwork(tenantId, asset2.id, networkId, 'energy_discharge', '10', 'kW')
     const provisioned2 = await createDevice(tenantId, { assetId: asset2.id, deviceType: 'battery_controller' })
 
     const now = new Date()
@@ -341,7 +342,7 @@ describe('VPP invariant: concurrent capacity allocation', () => {
   it('should not allow two concurrent 7 kW allocations against 10 kW capacity', async () => {
     // Create a fresh asset with 10 kW verified capacity.
     const freshAsset = await createAsset(tenantId, { operatorId, assetType: 'battery', name: `Conc-${Date.now()}` })
-    await assignAssetToNetwork(tenantId, freshAsset.id, networkId, 'energy_discharge', '10')
+    await assignAssetToNetwork(tenantId, freshAsset.id, networkId, 'energy_discharge', '10', 'kW')
 
     const program = await createBuyerProgram(tenantId, {
       networkId, name: `ConcProg-${Date.now()}`,
@@ -487,5 +488,111 @@ describe('VPP invariant: concurrent dispatch consumption', () => {
         startTime: start, endTime: end,
       }),
     ).rejects.toThrow(/Insufficient remaining capacity/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Lifecycle tests: consumed, released, non-energy, unit mismatch
+// ---------------------------------------------------------------------------
+
+describe('VPP invariant: capacity lifecycle', () => {
+  it('should record usage (kWh) separate from commitment (kW) on successful dispatch', async () => {
+    const { program } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const { assignments } = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '5', requestedKwh: '10',
+      startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
+    })
+
+    const result = await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret)
+
+    // Verify the commitment is consumed.
+    const commitment = await db.capacityCommitment.findFirst({
+      where: { sourceType: 'vpp_dispatch', sourceId: assignments[0].dispatchId },
+    })
+    expect(commitment?.status).toBe('consumed')
+    expect(commitment?.unit).toBe('kW') // capacity unit
+
+    // Verify the usage is recorded with kWh (not kW).
+    const usage = await db.capacityUsage.findFirst({
+      where: { sourceType: 'vpp_dispatch', sourceId: assignments[0].dispatchId },
+    })
+    expect(usage).toBeTruthy()
+    expect(usage?.unit).toBe('kWh') // usage unit (different dimension!)
+    expect(usage?.quantity).toBeTruthy()
+  })
+
+  it('should release commitment when dispatch verification fails', async () => {
+    const { program } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const { assignments } = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '5', requestedKwh: '10',
+      startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString(),
+    })
+
+    // Execute with WRONG provisioning secret → verification should fail.
+    await expect(
+      executeDispatchAssignment(tenantId, assignments[0].id, 'wrong-secret'),
+    ).rejects.toThrow()
+
+    // The commitment should be released (not consumed).
+    const commitment = await db.capacityCommitment.findFirst({
+      where: { sourceType: 'vpp_dispatch', sourceId: assignments[0].dispatchId },
+    })
+    expect(commitment?.status).toBe('released')
+
+    // The reservation's remaining should be restored.
+    const vppReservation = await db.vppCapacityReservation.findFirst({
+      where: { programId: program.id },
+    })
+    const capacityReservation = await findReservationBySource(tenantId, 'vpp_reservation', vppReservation!.id)
+    expect(capacityReservation).toBeTruthy()
+    // Remaining should be back to 10 (full reservation).
+    expect(new Prisma.Decimal(capacityReservation!.remainingAmount).gte(10)).toBe(true)
+  })
+
+  it('should support non-energy capacity resources (generic primitive)', async () => {
+    // Create a storage-like capability on the asset.
+    await assignAssetToNetwork(tenantId, assetId, networkId, 'storage_capacity', '100', 'TB')
+
+    const { createCapacityReservation: allocate } = await import('../src/lib/services/capacity.service')
+
+    // Reserve 70 TB of storage.
+    const result = await allocate({
+      tenantId, assetId, networkId, capabilityType: 'storage_capacity',
+      requestedAmount: '70', startTime: new Date(), endTime: new Date(Date.now() + 86400000),
+      sourceType: 'test_storage', sourceId: `storage-${Date.now()}`,
+    })
+
+    expect(result.unit).toBe('TB')
+    expect(result.reservedAmount).toBe('70')
+    expect(result.physicalCapacity).toBe('100')
+
+    // Try to reserve 50 TB more (only 30 left) — should fail.
+    await expect(
+      allocate({
+        tenantId, assetId, networkId, capabilityType: 'storage_capacity',
+        requestedAmount: '50', startTime: new Date(), endTime: new Date(Date.now() + 86400000),
+        sourceType: 'test_storage2', sourceId: `storage2-${Date.now()}`,
+      }),
+    ).rejects.toThrow(/Insufficient capacity/)
+  })
+
+  it('should reject commitment with mismatched unit', async () => {
+    const { createCapacityCommitment } = await import('../src/lib/services/capacity.service')
+    const { program } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const vppReservation = await db.vppCapacityReservation.findFirst({ where: { programId: program.id } })
+    const capacityReservation = await findReservationBySource(tenantId, 'vpp_reservation', vppReservation!.id)
+
+    // Try to create a commitment with 'kWh' unit when resource is 'kW'.
+    await expect(
+      createCapacityCommitment({
+        tenantId, reservationId: capacityReservation!.id,
+        committedAmount: '5', unit: 'kWh', // WRONG unit — resource is kW
+        startTime: new Date(), endTime: new Date(Date.now() + 3600000),
+        sourceType: 'test_mismatch', sourceId: `mismatch-${Date.now()}`,
+      }),
+    ).rejects.toThrow(/Unit mismatch/)
   })
 })
