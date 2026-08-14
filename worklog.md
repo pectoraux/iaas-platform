@@ -527,3 +527,22 @@ Stage Summary:
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit 06a3bc0)
 - EXECUTION/CAPACITY/ECONOMIC/RECONCILIATION LAYER IS NOW FROZEN. Ready for VPP-2.
+
+---
+Task ID: settlement-lease
+Agent: orchestrator
+Task: Fix settlement lease + real failure-path test with fake provider.
+
+Work Log:
+1. SETTLEMENT LEASES: processSettlementForReward uses claimedAt + leaseExpiresAt. Only created/failed/retrying claimable. Expired leases reclaimable (crash recovery). Live leases NOT claimable (prevents double-payout).
+2. FAKE PAYMENT PROVIDER: FailingPaymentsAdapter fails N times then succeeds. setPaymentsService swaps via Proxy pattern.
+3. REAL FAILURE-PATH TEST: swaps in FailingPaymentsAdapter, provider fails during settlement, verifies commitment consumed + usage exists + reward exists, restores provider, reconciles → completed.
+4. EXPIRED LEASE TEST: simulates crashed worker, reconcileAssignment reclaims and processes.
+
+Stage Summary:
+- Settlement leases prevent both double-payouts AND permanent underpayments.
+- Real failure-path tested with fake provider (no manual DB mutations).
+- Expired lease recovery tested.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit ee73722)
+- EXECUTION/CAPACITY/ECONOMIC/SETTLEMENT/RECONCILIATION LAYER IS NOW FROZEN. Ready for VPP-2.
