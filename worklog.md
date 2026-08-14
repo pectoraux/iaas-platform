@@ -584,3 +584,26 @@ Stage Summary:
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit 1461210)
 - EXECUTION/CAPACITY/ECONOMIC/SETTLEMENT/RECONCILIATION LAYER IS NOW FROZEN. Ready for VPP-2.
+
+---
+Task ID: VPP-2-baseline-engine
+Agent: orchestrator
+Task: Implement VPP-2 baseline and performance verification engine.
+
+Work Log:
+- Created DERHistorySimulator: generates synthetic battery load profiles with known ground truth (true counterfactual, actual with dispatch, true incremental performance).
+- Created BaselineEngine with 3 strategies:
+  1. SameTimeHistoricalBaseline: averages all historical days at same time window
+  2. SimilarDayAverageBaseline: averages only same weekday/weekend category
+  3. RegressionBaseline: OLS on temperature + day-of-week
+- Created evaluation harness: measures bias, MAE, overpayment, underpayment, false positive/negative, economic consequences.
+- Wired SimilarDayAverageBaseline into VPP execution path (replaces placeholder baseline=0).
+- 10 tests pass: simulator validity, strategy differentiation, evaluation accuracy, economic consequence quantification.
+
+Stage Summary:
+- VPP-2 baseline engine is implemented and tested.
+- The VPP now uses a real counterfactual prediction instead of zero.
+- Performance is measured as actual - baseline (not just actual).
+- Economic consequences of baseline error are quantified.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit d72c2ad)
