@@ -605,3 +605,114 @@ describe('VPP invariant: capacity lifecycle', () => {
     ).rejects.toThrow(/Unit mismatch/)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Concurrent execution + state invariant tests
+// ---------------------------------------------------------------------------
+
+describe('VPP invariant: concurrent execution + state machine', () => {
+  it('should allow only one concurrent execution of the same assignment', async () => {
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const { assignments } = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '5', requestedKwh: '10',
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+    })
+
+    // Two CONCURRENT executions of the SAME assignment.
+    const results = await Promise.allSettled([
+      executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret),
+      executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret),
+    ])
+
+    const succeeded = results.filter((r) => r.status === 'fulfilled')
+    const failed = results.filter((r) => r.status === 'rejected')
+    expect(succeeded.length).toBe(1)
+    expect(failed.length).toBe(1)
+
+    // Verify exactly ONE event, attestation, contribution, reward, usage.
+    const events = await db.event.findMany({
+      where: { assetId: assignments[0].assetId, externalEventId: { contains: `vpp-dispatch-${assignments[0].id}` } },
+    })
+    expect(events.length).toBe(1)
+
+    const usages = await db.capacityUsage.findMany({
+      where: { commitmentId: assignments[0].capacityCommitmentId! },
+    })
+    expect(usages.length).toBe(1)
+  })
+
+  it('completed assignment must have consumed commitment + usage', async () => {
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const { assignments } = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '5', requestedKwh: '10',
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+    })
+
+    await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret)
+
+    // The assignment must be completed.
+    const assignment = await db.vppDispatchAssignment.findUnique({ where: { id: assignments[0].id } })
+    expect(assignment?.status).toBe('completed')
+
+    // The commitment must be consumed.
+    const commitment = await db.capacityCommitment.findUnique({
+      where: { id: assignments[0].capacityCommitmentId! },
+    })
+    expect(commitment?.status).toBe('consumed')
+
+    // The usage must exist.
+    const usage = await db.capacityUsage.findUnique({
+      where: { commitmentId: assignments[0].capacityCommitmentId! },
+    })
+    expect(usage).toBeTruthy()
+  })
+
+  it('failed assignment must have released commitment', async () => {
+    const { program, startTime, endTime } = await setupProgramAndReservation({ reservedKw: '10' })
+
+    const { assignments } = await createDispatch(tenantId, {
+      programId: program.id, requestedKw: '5', requestedKwh: '10',
+      startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+    })
+
+    // Execute with wrong secret → should fail.
+    await expect(
+      executeDispatchAssignment(tenantId, assignments[0].id, 'wrong-secret'),
+    ).rejects.toThrow()
+
+    // The assignment must be failed.
+    const assignment = await db.vppDispatchAssignment.findUnique({ where: { id: assignments[0].id } })
+    expect(assignment?.status).toBe('failed')
+
+    // The commitment must be released.
+    const commitment = await db.capacityCommitment.findUnique({
+      where: { id: assignments[0].capacityCommitmentId! },
+    })
+    expect(commitment?.status).toBe('released')
+
+    // No usage should exist.
+    const usage = await db.capacityUsage.findUnique({
+      where: { commitmentId: assignments[0].capacityCommitmentId! },
+    })
+    expect(usage).toBeNull()
+  })
+
+  it('no completed assignment can have an active commitment', async () => {
+    // Query ALL completed assignments and verify none have active commitments.
+    const completedAssignments = await db.vppDispatchAssignment.findMany({
+      where: { status: 'completed', capacityCommitmentId: { not: null } },
+      include: { baseline: true },
+    })
+
+    for (const a of completedAssignments) {
+      const commitment = await db.capacityCommitment.findUnique({
+        where: { id: a.capacityCommitmentId! },
+      })
+      // A completed assignment's commitment must NOT be 'active'.
+      // It must be 'consumed' (success) or 'released' (edge case).
+      expect(commitment?.status).not.toBe('active')
+    }
+  })
+})

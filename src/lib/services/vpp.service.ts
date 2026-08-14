@@ -383,9 +383,6 @@ export async function executeDispatchAssignment(
   }
 
   // Fix 2: atomic status transition — ONLY 'assigned' can transition to 'dispatching'.
-  // A 'dispatching' assignment means another caller is already executing; we
-  // must NOT allow a second caller to enter. (Previous bug: status IN ['assigned', 'dispatching']
-  // allowed two concurrent callers to both proceed.)
   const updated = await db.vppDispatchAssignment.updateMany({
     where: { id: assignmentId, status: 'assigned' },
     data: { status: 'dispatching' },
@@ -394,193 +391,193 @@ export async function executeDispatchAssignment(
     throw new ConflictError(`Assignment ${assignmentId} is not in 'assigned' state (current: ${assignment.status}). Concurrent execution rejected.`)
   }
 
-  // Helper: release the assignment's commitment on any failure (fix 3).
+  // Fix 3: CENTRALIZED failure handler — wraps the ENTIRE post-claim path.
+  // Any exception after the 'dispatching' claim releases the commitment.
+  // This includes DER adapter failures, verification failures, ledger failures,
+  // settlement failures, and usage recording failures.
   const releaseAssignmentCapacity = async () => {
     if (assignment.capacityCommitmentId) {
       await releaseCommitment(tenantId, 'vpp_dispatch_assignment', `assignment-${assignment.dispatchId}-${assignment.assetId}`)
     }
   }
 
-  const device = assignment.asset.devices.find((d) => d.credential && d.credential.status === 'active')
-  if (!device) {
+  const failAssignment = async () => {
     await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
-    await releaseAssignmentCapacity() // fix 3: release on missing device
-    throw new ValidationError(`Asset ${assignment.assetId} has no active device with credential`)
+    await releaseAssignmentCapacity()
   }
 
-  // --- Task 2: use DER adapter interface ---
-  const durationSeconds = Math.floor(
-    (assignment.dispatch.endTime.getTime() - assignment.dispatch.startTime.getTime()) / 1000,
-  )
-  const dischargeResult = await derAdapter.executeDischarge({
-    assignedKw: assignment.assignedKw,
-    assignedKwh: assignment.assignedKwh,
-    capabilityType: assignment.capabilityType,
-    durationSeconds,
-  })
-
-  // Sign + submit telemetry as a generic Event.
-  const eventId = `vpp-dispatch-${assignmentId}-${Date.now()}`
-  const timestamp = new Date().toISOString()
-  const sequence = Math.floor(Date.now() / 1000) // compute ONCE (fix: was computed twice with await between)
-  const message = buildCanonicalMessage({
-    device_id: device.id,
-    event_id: eventId,
-    timestamp,
-    event_type: 'telemetry',
-    sequence,
-    payload: dischargeResult.telemetry.payload,
-  })
-  const signingKey = deriveSigningKey(provisioningSecret)
-  const signature = signMessage(message, signingKey)
-
-  const network = assignment.dispatch.program.network
-  const networkVersion = await db.networkVersion.findFirst({
-    where: { networkId: network.id, publishedAt: { not: null } },
-    orderBy: { version: 'desc' },
-  })
-
-  const ingestResult = await ingestEvent(tenantId, {
-    device_id: device.id,
-    event_id: eventId,
-    timestamp,
-    event_type: 'telemetry',
-    sequence, // reuse the same value (fix: was Math.floor(Date.now()/1000) again)
-    payload: dischargeResult.telemetry.payload,
-    signature,
-    network_version_id: networkVersion?.id,
-    capability_type: assignment.capabilityType,
-  })
-
-  await processEventOutbox(tenantId)
-
-  const event = await db.event.findUnique({
-    where: { id: ingestResult.event_id },
-    include: { attestations: true },
-  })
-
-  if (event?.status !== 'verified' || !event.attestations[0]) {
-    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
-    await releaseAssignmentCapacity() // fix 3: release on verification failure
-    throw new Error(`Dispatch telemetry verification failed: ${event?.status}`)
-  }
-
-  const attestation = event.attestations[0]
-
-  // --- Baseline calculation (simplified: zero baseline for discharge) ---
-  const actualKwh = new Prisma.Decimal(dischargeResult.actualKwh)
-  const baselineKwh = new Prisma.Decimal(0) // simulation: battery would not have discharged
-  const performanceKwh = actualKwh.minus(baselineKwh)
-
-  const baseline = await db.vppBaseline.create({
-    data: {
-      tenantId,
-      assignmentId,
-      method: 'zero', // simulation fixture (reviewer acknowledged this is acceptable)
-      baselineKw: '0',
-      baselineKwh: baselineKwh.toString(),
-      actualKw: dischargeResult.actualKw,
-      actualKwh: actualKwh.toString(),
-      performanceKwh: performanceKwh.toString(),
-      metadataJson: JSON.stringify({ attestationId: attestation.id }),
-    },
-  })
-
-  // --- Task 1: DERIVED CONTRIBUTION ---
-  // The contribution quantity is the VPP-computed performance_kwh,
-  // NOT the attestation's first field (power_kw).
-  const contribution = await createContribution(
-    tenantId,
-    {
-      attestationIds: [attestation.id],
-      derivedQuantity: performanceKwh.toString(), // task 1: use verified performance
-      derivedUnit: 'kWh',
-    },
-    `vpp-baseline-${baseline.id}`,
-  )
-
-  // --- Generic Reward + Ledger + Settlement ---
-  const reward = await calculateReward(tenantId, contribution.id, `vpp-contrib-${contribution.id}`)
-
-  // Task 6: NO AUTO-FUNDING. If buyer funds are insufficient, the reward
-  // posting fails. Release the capacity commitment so capacity is not stranded.
-  let ledger
   try {
-    ledger = await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
-  } catch (err) {
-    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
-    await releaseAssignmentCapacity() // fix 3: release on funding failure
-    throw err
-  }
+    const device = assignment.asset.devices.find((d) => d.credential && d.credential.status === 'active')
+    if (!device) {
+      throw new ValidationError(`Asset ${assignment.assetId} has no active device with credential`)
+    }
 
-  const settlement = await createSettlement(tenantId, reward.id)
-  await processSettlementOutbox(tenantId)
-
-  // Update the assignment with results.
-  await db.vppDispatchAssignment.update({
-    where: { id: assignmentId },
-    data: {
-      status: 'completed',
-      actualKwh: actualKwh.toString(),
-      baselineKwh: baselineKwh.toString(),
-      performanceKwh: performanceKwh.toString(),
-      eventId: event.id,
-      contributionId: contribution.id,
-      completedAt: new Date(),
-    },
-  })
-
-  // Fix 1: record usage for THIS assignment's commitment (not the dispatch).
-  // Each assignment has its own commitmentId — no multi-asset ambiguity.
-  if (assignment.capacityCommitmentId) {
-    await recordUsage({
-      tenantId,
-      commitmentId: assignment.capacityCommitmentId,
-      quantity: actualKwh.toString(), // THIS assignment's actual kWh
-      unit: 'kWh',
-      startTime: assignment.dispatch.startTime,
-      endTime: assignment.dispatch.endTime,
-      sourceType: 'vpp_dispatch_assignment',
-      sourceId: `assignment-${assignment.dispatchId}-${assignment.assetId}`,
+    // --- DER adapter (can throw on network/hardware errors) ---
+    const durationSeconds = Math.floor(
+      (assignment.dispatch.endTime.getTime() - assignment.dispatch.startTime.getTime()) / 1000,
+    )
+    const dischargeResult = await derAdapter.executeDischarge({
+      assignedKw: assignment.assignedKw,
+      assignedKwh: assignment.assignedKwh,
+      capabilityType: assignment.capabilityType,
+      durationSeconds,
     })
-  }
 
-  // Update dispatch status if all assignments completed.
-  const pendingAssignments = await db.vppDispatchAssignment.count({
-    where: { dispatchId: assignment.dispatchId, status: { not: 'completed' } },
-  })
-  if (pendingAssignments === 0) {
-    await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
-  }
+    // Sign + submit telemetry as a generic Event.
+    const eventId = `vpp-dispatch-${assignmentId}-${Date.now()}`
+    const timestamp = new Date().toISOString()
+    const sequence = Math.floor(Date.now() / 1000)
+    const message = buildCanonicalMessage({
+      device_id: device.id,
+      event_id: eventId,
+      timestamp,
+      event_type: 'telemetry',
+      sequence,
+      payload: dischargeResult.telemetry.payload,
+    })
+    const signingKey = deriveSigningKey(provisioningSecret)
+    const signature = signMessage(message, signingKey)
 
-  await appendAudit({
-    tenantId, actorId,
-    eventType: 'vpp.dispatch_completed',
-    resourceType: 'vpp_dispatch_assignment',
-    resourceId: assignmentId,
-    metadata: {
-      actualKwh: actualKwh.toString(),
-      performanceKwh: performanceKwh.toString(),
-      eventId: event.id,
-      contributionId: contribution.id,
-      rewardId: reward.id,
-      contributionQuantity: contribution.quantity,
-    },
-  })
+    const network = assignment.dispatch.program.network
+    const networkVersion = await db.networkVersion.findFirst({
+      where: { networkId: network.id, publishedAt: { not: null } },
+      orderBy: { version: 'desc' },
+    })
 
-  return {
-    assignment_id: assignmentId,
-    event_id: event.id,
-    attestation_id: attestation.id,
-    baseline_id: baseline.id,
-    contribution_id: contribution.id,
-    reward_id: reward.id,
-    settlement_id: settlement.id,
-    performance_kwh: performanceKwh.toString(),
-    actual_kwh: actualKwh.toString(),
-    baseline_kwh: baselineKwh.toString(),
-    contribution_quantity: contribution.quantity,
-    duplicate: false,
+    const ingestResult = await ingestEvent(tenantId, {
+      device_id: device.id,
+      event_id: eventId,
+      timestamp,
+      event_type: 'telemetry',
+      sequence,
+      payload: dischargeResult.telemetry.payload,
+      signature,
+      network_version_id: networkVersion?.id,
+      capability_type: assignment.capabilityType,
+    })
+
+    await processEventOutbox(tenantId)
+
+    const event = await db.event.findUnique({
+      where: { id: ingestResult.event_id },
+      include: { attestations: true },
+    })
+
+    if (event?.status !== 'verified' || !event.attestations[0]) {
+      throw new Error(`Dispatch telemetry verification failed: ${event?.status}`)
+    }
+
+    const attestation = event.attestations[0]
+
+    // --- Baseline calculation ---
+    const actualKwh = new Prisma.Decimal(dischargeResult.actualKwh)
+    const baselineKwh = new Prisma.Decimal(0)
+    const performanceKwh = actualKwh.minus(baselineKwh)
+
+    const baseline = await db.vppBaseline.create({
+      data: {
+        tenantId,
+        assignmentId,
+        method: 'zero',
+        baselineKw: '0',
+        baselineKwh: baselineKwh.toString(),
+        actualKw: dischargeResult.actualKw,
+        actualKwh: actualKwh.toString(),
+        performanceKwh: performanceKwh.toString(),
+        metadataJson: JSON.stringify({ attestationId: attestation.id }),
+      },
+    })
+
+    // --- Derived contribution ---
+    const contribution = await createContribution(
+      tenantId,
+      {
+        attestationIds: [attestation.id],
+        derivedQuantity: performanceKwh.toString(),
+        derivedUnit: 'kWh',
+      },
+      `vpp-baseline-${baseline.id}`,
+    )
+
+    // --- Reward + Ledger + Settlement ---
+    const reward = await calculateReward(tenantId, contribution.id, `vpp-contrib-${contribution.id}`)
+    await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
+    const settlement = await createSettlement(tenantId, reward.id)
+    await processSettlementOutbox(tenantId)
+
+    // Fix 2: RECORD USAGE BEFORE marking assignment completed.
+    // The assignment CANNOT become 'completed' until its capacity commitment
+    // has been consumed. This prevents the state: completed + active commitment.
+    if (assignment.capacityCommitmentId) {
+      await recordUsage({
+        tenantId,
+        commitmentId: assignment.capacityCommitmentId,
+        quantity: actualKwh.toString(),
+        unit: 'kWh',
+        startTime: assignment.dispatch.startTime,
+        endTime: assignment.dispatch.endTime,
+        sourceType: 'vpp_dispatch_assignment',
+        sourceId: `assignment-${assignment.dispatchId}-${assignment.assetId}`,
+      })
+    }
+
+    // Now safe to mark assignment as completed (commitment is consumed).
+    await db.vppDispatchAssignment.update({
+      where: { id: assignmentId },
+      data: {
+        status: 'completed',
+        actualKwh: actualKwh.toString(),
+        baselineKwh: baselineKwh.toString(),
+        performanceKwh: performanceKwh.toString(),
+        eventId: event.id,
+        contributionId: contribution.id,
+        completedAt: new Date(),
+      },
+    })
+
+    // Update dispatch status if all assignments completed.
+    const pendingAssignments = await db.vppDispatchAssignment.count({
+      where: { dispatchId: assignment.dispatchId, status: { not: 'completed' } },
+    })
+    if (pendingAssignments === 0) {
+      await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
+    }
+
+    await appendAudit({
+      tenantId, actorId,
+      eventType: 'vpp.dispatch_completed',
+      resourceType: 'vpp_dispatch_assignment',
+      resourceId: assignmentId,
+      metadata: {
+        actualKwh: actualKwh.toString(),
+        performanceKwh: performanceKwh.toString(),
+        eventId: event.id,
+        contributionId: contribution.id,
+        rewardId: reward.id,
+        contributionQuantity: contribution.quantity,
+      },
+    })
+
+    return {
+      assignment_id: assignmentId,
+      event_id: event.id,
+      attestation_id: attestation.id,
+      baseline_id: baseline.id,
+      contribution_id: contribution.id,
+      reward_id: reward.id,
+      settlement_id: settlement.id,
+      performance_kwh: performanceKwh.toString(),
+      actual_kwh: actualKwh.toString(),
+      baseline_kwh: baselineKwh.toString(),
+      contribution_quantity: contribution.quantity,
+      duplicate: false,
+    }
+  } catch (err) {
+    // Fix 3: CENTRALIZED failure handler — ANY exception releases the commitment.
+    // This covers: missing device, DER adapter failure, verification failure,
+    // ledger failure, settlement failure, usage recording failure.
+    await failAssignment()
+    throw err
   }
 }
 
