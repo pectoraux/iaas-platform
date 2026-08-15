@@ -1541,3 +1541,28 @@ Stage Summary:
 - The complete lifecycle is: delivery_complete → buyer_settlement_pending → completed (after buyer settlement charged).
 - Buyer charges use Prisma.Decimal throughout, returned as strings at the API boundary.
 - Historical settlements use the pricing policy snapshot — the charge formula cannot silently change for historical dispatches.
+
+---
+Task ID: VPP-3B-final-hardening
+Agent: orchestrator
+Task: Fix settlement failure semantics, ledger atomicity verification, pricing policy versioning, and reconciliation.
+
+Work Log:
+1. SETTLEMENT FAILURE SEMANTICS: Added 'reconciliation_required' to BuyerSettlementStatus. The failure path in processBuyerSettlement now distinguishes:
+   - Pre-posting failure (ledgerPostingId=null): → pending (safe to retry, no money moved) + retry event
+   - Post-posting failure (ledgerPostingId set): → reconciliation_required (unknown financial state, money may have moved, must NOT retry blindly)
+   This prevents using 'failed' for unknown financial state.
+2. LEDGER ATOMICITY VERIFICATION: processBuyerSettlement checks for existing ledger posting by idempotency key BEFORE posting. If found, marks as charged without re-posting. Added reconcileBuyerSettlement() that inspects durable ledger state:
+   - Balanced posting exists → charged (money moved correctly, status wasn't updated)
+   - No posting → pending (safe to retry)
+   - Unbalanced posting → failed (CRITICAL — should never happen, postBalancedPosting validates)
+3. PRICING POLICY VERSIONING: Added pricingPolicyJson to VppBuyerSettlement. Contains versioned snapshot: { version, pricePerKwh, toleranceThresholdPct, measurementMethod, fulfillmentBasis, chargeFormula }. Future pricing models (capacity payment, energy payment, penalty rate, carbon attributes) extend this JSON without changing the schema. Historical settlements use the original pricing snapshot.
+4. RECONCILIATION + REPAIR SWEEP: Added reconcileBuyerSettlement() for reconciliation_required → charged|failed|pending. Added recoverStuckBuyerSettlements() that handles both reconciliation_required and expired-charging settlements. This is the safety net — the primary retry path is the outbox event.
+5. SCHEMA: Added reconciliation_required status, pricingPolicyJson, reconciledAt to VppBuyerSettlement.
+6. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (only pre-existing bun:test + vpp.service.ts). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- Buyer settlement now has correct failure semantics: reconciliation_required for post-posting crashes, pending for pre-posting failures, failed only for permanent business failures.
+- Ledger atomicity is verifiable: the reconciliation process inspects durable ledger state by idempotency key and resolves the settlement based on what actually persisted.
+- Pricing policy is versioned: historical settlements use the original pricing snapshot, future models extend the JSON without schema changes.
+- VPP-3B is ready to freeze. The architecture has: state separation, atomic processing, claim/lease/fencing, reconciliation_required for unknown financial state, pricing policy versioning, and a repair sweep.
