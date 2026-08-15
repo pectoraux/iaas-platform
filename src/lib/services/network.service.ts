@@ -96,6 +96,19 @@ export async function createNetworkVersion(
  * Publish a version — IMMUTABLE afterwards. Also materialises Capability rows
  * and a RewardRule attached to the version, so downstream services can resolve
  * policy by version id.
+ *
+ * VPP-2C publication-readiness gate:
+ *   Publication is the immutable-version boundary — once publishedAt is set,
+ *   the version becomes an immutable policy artifact. Therefore the
+ *   publication-readiness invariant must be enforced HERE, inside the same
+ *   transaction that flips publishedAt, so a version can never become
+ *   published without satisfying it.
+ *
+ *   Current vertical rules (extensible):
+ *     energy_vpp: baselinePolicyJson must exist, status === 'accepted',
+ *                 and selectedStrategy must be non-empty.
+ *     (other verticals: no gate yet — add proof/coverage/workload gates here
+ *      when those verticals land.)
  */
 export async function publishNetworkVersion(
   tenantId: string,
@@ -109,6 +122,12 @@ export async function publishNetworkVersion(
   if (version.publishedAt) throw new ImmutableResourceError('Network version already published (immutable)')
 
   const config: VersionConfiguration = JSON.parse(version.configurationJson)
+
+  // Publication-readiness gate — validated BEFORE the transaction, but the
+  // transaction below is what makes the version immutable. Because the gate
+  // throws before any write, a rejected publication leaves no partial state.
+  // (The version row itself is untouched; publishedAt stays null.)
+  assertPublicationReadiness(network.vertical, version)
 
   // Atomic publish + capability/rule materialisation.
   await db.$transaction(async (tx) => {
@@ -165,6 +184,63 @@ export async function publishNetworkVersion(
   })
 
   return db.networkVersion.findUnique({ where: { id: versionId } })
+}
+
+/**
+ * Publication-readiness policy — the extensible per-vertical gate that
+ * determines whether a NetworkVersion may transition from mutable draft to
+ * immutable published.
+ *
+ * This is the defense-in-depth layer the reviewer identified as missing:
+ *   - Template builder (instantiateTemplate)        ✅
+ *   - Program creation (createBuyerProgram)          ✅
+ *   - Version publication (publishNetworkVersion)    ✅ ← THIS
+ *   - Runtime execution (executeDispatchAssignment)  ✅
+ *
+ * Publication is the most important layer because after publication the
+ * version becomes an immutable policy artifact — every downstream economic
+ * calculation resolves against it.
+ *
+ * To add a new vertical's gate, extend this function with a case for that
+ * vertical. For example:
+ *   case 'storage': assert proof policy accepted
+ *   case 'wireless': assert coverage verification accepted
+ *   case 'compute': assert workload verification accepted
+ *
+ * Throws ValidationError when the version is not publication-ready.
+ */
+function assertPublicationReadiness(
+  vertical: string,
+  version: { id: string; version: number; baselinePolicyJson: string | null },
+): void {
+  switch (vertical) {
+    case 'energy_vpp': {
+      // An energy_vpp NetworkVersion MUST have an accepted baseline policy
+      // before it becomes immutable. Without it, no dispatch can compute a
+      // valid baseline, and no program can be safely bound.
+      if (!version.baselinePolicyJson) {
+        throw new ValidationError(
+          `Cannot publish energy_vpp version v${version.version} (${version.id}): ` +
+            `no baseline policy has been persisted. Run runAndPersistBaselineEvaluation ` +
+            `before publishing so the version carries an accepted baseline strategy.`,
+        )
+      }
+      const policy = JSON.parse(version.baselinePolicyJson)
+      if (policy.status !== 'accepted' || !policy.selectedStrategy) {
+        throw new ValidationError(
+          `Cannot publish energy_vpp version v${version.version} (${version.id}): ` +
+            `baseline policy status is '${policy.status}' (selectedStrategy: ` +
+            `${policy.selectedStrategy ?? 'null'}). A published version requires ` +
+            `status='accepted' with a non-empty selectedStrategy.`,
+        )
+      }
+      break
+    }
+    default:
+      // No publication-readiness gate for this vertical yet. When storage /
+      // wireless / compute land, add their gates here.
+      break
+  }
 }
 
 /** Resolve the configuration for a published version. */
