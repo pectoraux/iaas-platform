@@ -1415,3 +1415,22 @@ Stage Summary:
 - Fencing tokens prevent stale workers/evaluators from overwriting newer results — the critical distributed-systems safety property that leases alone don't provide.
 - Both commitment evaluation and DomainEvent processing use fencing: every worker-owned write checks the claim token.
 - VPP-2D-4 now has lease expiration + stale-writer protection = genuinely concurrency-safe distributed worker.
+
+---
+Task ID: VPP-2D-4-fencing-tests-cleanup
+Agent: orchestrator
+Task: Add stale-worker fencing tests + clear lease/claim fields on terminal event states.
+
+Work Log:
+1. LEASE/CLAIM CLEANUP: When an event reaches processed or dead_letter, the worker now clears claimedAt, leaseExpiresAt, and processingClaimId to null. This makes the terminal state model cleaner — no stale lease metadata on finished events.
+2. STALE-WORKER FENCING TESTS: Added 4 tests in a new describe block:
+   - Commitment fencing: stale evaluator (claim X) cannot overwrite newer evaluator (claim Y) result — verifies the fencing token mismatch produces 0 affected rows.
+   - Event fencing: stale worker (claim X) cannot mark event processed/dead_letter after another worker (claim Y) reclaimed — same fencing token mismatch.
+   - Fencing token uniqueness: 1000 randomUUID() calls produce 1000 unique tokens (prerequisite for fencing effectiveness).
+   - Fencing logic: stale evaluator outcome ('already_evaluating') does NOT allow dispatch completion, while valid evaluator outcome ('final') does.
+3. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (only pre-existing bun:test). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The fencing implementation is now backed by tests that prove the stale-worker rejection logic.
+- Terminal event states (processed, dead_letter) have clean lease metadata (no stale claimedAt/leaseExpiresAt/processingClaimId).
+- VPP-2D-4 worker/fencing layer is now frozen.
