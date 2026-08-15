@@ -1079,3 +1079,20 @@ Stage Summary:
 - The gap metric is honestly labeled as a 10%-grid approximation, not an exact continuous optimum. The grid step is explicitly reported.
 - Two new tests prove: (1) the objective correctly prefers lower-cost feasible portfolios, (2) the continuous solution can differ from the 10% grid.
 - VPP-2D-2C is complete. Ready for VPP-2D-3: integrate the optimizer into buyer program creation — DER candidate pool → optimizer → partial capacity reservations via the generic capacity layer, with concurrent reservation testing.
+
+---
+Task ID: VPP-2D-2C-honest-gap-metric
+Agent: orchestrator
+Task: Fix two remaining optimizer issues — (1) stale objective documentation, (2) scalar gap metric doesn't measure the lexicographic objective.
+
+Work Log:
+1. REMOVED STALE OBJECTIVE DOCUMENTATION: The JSDoc above optimizePortfolio() still said "maximize safe-capacity surplus" and referenced "optimalityGap" — contradicting the corrected objective (minimize lockup, not maximize surplus). Updated to the authoritative definition: feasibility → opportunity cost → direct cost → lockup → diversification. Also fixed stale "searches the SAME solution space" comment (changed to "10%-GRID APPROXIMATION") and two remaining "optimalityGap" references → "gridOptimalityGap". The file now has ONE consistent objective definition.
+2. REPLACED SCALAR GAP WITH LEXICOGRAPHIC COMPARISON: The old measureOptimalityGap() computed gap = max(0, (optimal.committedKw - heuristic.committedKw) / optimal.committedKw). This only compared safe capacity — a heuristic with lower lockup but higher opportunity cost would report gap=0% even though it's strictly worse under the declared objective (opp cost > lockup). Replaced with: matchesGridObjective (boolean from compareResultsLexicographic) + per-dimension deltas (safeCapacityDeltaKw, opportunityCostDelta, directCostDelta, lockupDeltaKw, diversificationDelta). The deltas show exactly how the heuristic differs from the grid reference on each objective level.
+3. REGRESSION TEST: Added the exact scenario the reviewer described — heuristic picks A+C (high opp cost=10004), grid reference picks B+C (low opp cost=106). Heuristic commits LESS (104.7 < 106, lockupDeltaKw=-1.33) but has MUCH HIGHER opp cost (delta=+9898). Under the old scalar metric this would report gap=0%. Under the new lexicographic metric, matchesGridObjective=false — correctly identifying the grid reference as better because opportunity cost (objective #2) has higher priority than lockup (objective #4).
+4. RUNTIME VERIFICATION: heuristic oppCost=10004 vs optimal oppCost=106, matchesGridObjective=false ✓. The per-dimension deltas expose the real difference: opportunityCostDelta=+9898 (heuristic worse), lockupDeltaKw=-1.33 (heuristic better on lockup, but lower priority).
+5. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (only pre-existing bun:test). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The optimizer now has ONE authoritative objective definition (no stale comments).
+- The gap metric is honest: it uses the full lexicographic comparator, not just safe capacity. matchesGridObjective correctly identifies when the heuristic is suboptimal on a higher-priority dimension (opportunity cost) even if it's better on a lower-priority one (lockup).
+- VPP-2D-2 is now FROZEN. Ready for VPP-2D-3: integrate the optimizer into buyer program creation — DER candidate pool → optimizer → partial capacity reservations via the generic capacity layer, with concurrent reservation testing.
