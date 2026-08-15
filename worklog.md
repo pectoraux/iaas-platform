@@ -1282,3 +1282,23 @@ Stage Summary:
 - The key conceptual correction: buyer fulfillment is separated from operator contribution. The service records both measures and lets the fulfillmentBasis policy decide which one represents the buyer obligation. per_asset_clipped (default) matches operator contribution; aggregate_counterfactual allows overperformance to offset underperformance at the portfolio level.
 - The measurement method is explicit: average_power (default) vs energy vs interval_power (future). The architecture can now express the distinction between "500 kW average over 2 hours" and "1000 kWh total energy."
 - The reservation+commitment are atomic: they commit or roll back together. No orphaned economic state.
+
+---
+Task ID: VPP-2D-4-lifecycle-measurement-fix
+Agent: orchestrator
+Task: Fix three remaining VPP-2D-4 issues — (1) terminal-state finalization blocker, (2) energy measurement dimensions, (3) obligation contract explicitness.
+
+Work Log:
+1. CANONICAL TERMINAL-DISPATCH FINALIZATION (the blocker): Created maybeFinalizeDispatch(dispatchId) that treats completed|failed|reconciliation_required as terminal. If all assignments are terminal, it marks the dispatch completed and evaluates the portfolio commitment. This replaces the old `pendingAssignments === count where status != 'completed'` pattern which incorrectly excluded failed/reconciliation_required assignments and prevented portfolio finalization when any assignment failed. The helper is called after: successful completion, pre-usage failure (→ failed), post-usage failure (→ reconciliation_required), and successful reconciliation.
+2. PERFORMANCE TERMINAL vs FINANCIAL FINALITY: A reconciliation_required assignment is terminal for buyer-performance evaluation (its actuals/baseline are known), but the financial reconciliation may still be in progress. The portfolio commitment evaluates the buyer obligation independently; the assignment-level financial recovery continues separately via reconcileAssignment(). This distinction is now encoded in the TERMINAL_ASSIGNMENT_STATUSES constant + the maybeFinalizeDispatch JSDoc.
+3. ENERGY MEASUREMENT DIMENSIONS FIXED: For measurementMethod=energy, fulfillment = buyerDeliveredKwh / requestedKwh (NOT buyerDeliveredKwh / committedKw — that was dimensionally wrong, comparing kWh against kW). For average_power, fulfillment = buyerDeliveredKw / committedKw (unchanged). The deliveredKw is still computed for energy method (display-only = deliveredKwh / durationHours), but the fulfillment percentage uses the correct energy denominator.
+4. INTERVAL_POWER EXPLICITLY REJECTED: measurementMethod=interval_power now throws ValidationError("not yet supported") rather than silently being treated as average_power. This prevents a future obligation type from being silently mis-evaluated.
+5. OBLIGATION CONTRACT MADE EXPLICIT: average_power → committedKw is primary, requestedKwh = committedKw × duration. energy → requestedKwh is primary, committedKw is display-only. The pure computePortfolioFulfillment function now accepts an optional requestedKwh parameter for the energy method.
+6. TESTS: Updated energy tests to verify fulfillment = deliveredKwh / requestedKwh (NOT / committedKw). Added tests: energy 1000/1000=100%, energy 200/1000=20% (failed), energy deliveredKw is display-only, interval_power rejected, average_power 1000kWh/2h=500kW/500kW=100%.
+7. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (16 before = 16 after — all pre-existing). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The terminal-state blocker is fixed: a dispatch with completed+failed+reconciliation_required assignments now correctly finalizes and evaluates the portfolio commitment. The old code would have left it pending forever.
+- Energy measurement is dimensionally correct: kWh compared against kWh, not kW. The obligation contract is explicit per measurement method.
+- interval_power is explicitly unsupported rather than silently mis-evaluated.
+- VPP-2D-4 is now genuinely integrated: the portfolio commitment is wired into the lifecycle with correct terminal-state semantics, the measurement dimensions are consistent, and the obligation contract is explicit.
