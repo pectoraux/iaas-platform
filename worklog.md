@@ -1215,3 +1215,37 @@ Stage Summary:
   - P2034/P2024/P1001/P1002 → retryable_conflict (genuine transient failures)
   - Everything else → re-thrown (input errors, config errors, system failures)
 - NEXT (VPP-2D-4): economic integration — connect the reserved portfolio to the actual buyer obligation: dispatch → actual DER response → aggregate portfolio performance → commitment fulfillment → portfolio-level settlement.
+
+---
+Task ID: VPP-2D-4-portfolio-commitment
+Agent: orchestrator
+Task: Connect the reserved portfolio to the actual buyer obligation — portfolio commitment + fulfillment evaluation (committed vs delivered, shortfall policy, aggregate reconciliation).
+
+Work Log:
+1. RESEARCH: Studied the generic economic pipeline (Contribution → Reward → Ledger → Settlement) and VPP dispatch execution. Key finding: the per-assignment pipeline already works correctly. VPP-2D-4 should NOT duplicate it with PortfolioLedger/PortfolioReward. Instead, add a portfolio commitment layer that aggregates individual results into a buyer-facing obligation fulfillment record.
+2. SCHEMA: Added VppPortfolioCommitment model to prisma/schema.prisma. 1:1 with VppDispatch. Fields: requestedKw, committedKw, confidenceLevel, algorithm, optimalityGuarantee, toleranceThresholdPct (default 90%), deliveredKw/Kwh, totalActual/BaselineKwh, fulfillmentPct, status (pending|fulfilled|partial|failed), assignmentCount, completedAssignments. Added portfolioCommitment? relation to VppDispatch and vppPortfolioCommitments to Tenant.
+3. IMPLEMENTED portfolio-commitment.service.ts:
+   - createPortfolioCommitment(): creates the buyer-facing obligation record when the optimizer reserves capacity. Idempotent (1:1 with dispatch). Records what was promised (requestedKw, committedKw) + the fulfillment policy (tolerance threshold).
+   - evaluatePortfolioCommitment(): aggregates individual assignment results (actualKwh, baselineKwh, performanceKwh) into portfolio-level metrics. Computes deliveredKw = deliveredKwh / durationHours, fulfillmentPct = deliveredKw / committedKw * 100, status = fulfilled|partial|failed.
+   - computePortfolioFulfillment(): pure function for the core aggregation math (testable without DB).
+   - getPortfolioCommitment(): query by dispatch ID.
+4. ARCHITECTURAL RULE ENFORCED: The portfolio layer is ABOVE the generic economic kernel. No PortfolioLedger, PortfolioReward, or PortfolioSettlement. Individual assignment Contributions → Rewards → Ledger → Settlements remain the source of truth for operator payments. This model is the BUYER-FACING commitment fulfillment record.
+5. PER-ASSET CLIPPING: The key aggregation rule — performanceKwh_i = max(0, actualKwh_i - baselineKwh_i) is computed per-asset by the baseline engine. The portfolio sums the CLIPPED values: deliveredKwh = Σ performanceKwh_i. An asset that underperforms its baseline contributes 0, not a negative offset. This is mathematically different from max(0, Σactual - Σbaseline) — tested explicitly.
+6. FULFILLMENT POLICY: status = fulfilled (fulfillmentPct ≥ toleranceThresholdPct) | partial (0 < fulfillmentPct < tolerance) | failed (0 delivered). Default tolerance: 90%. Configurable per commitment (some buyers require 100%, others accept 80%).
+7. TESTS (tests/portfolio-commitment.test.ts): 25+ cases across 9 describe blocks:
+   - Basic fulfillment (delivered ≥ committed × tolerance → fulfilled, at-threshold → fulfilled)
+   - Partial fulfillment (below tolerance but > 0)
+   - Failed (zero delivered, empty portfolio)
+   - Overdelivery (delivered > committed → fulfilled at 100%+)
+   - PER-ASSET CLIPPING (underperforming asset contributes 0, not negative; Σ performance ≠ max(0, Σ actual - Σ baseline))
+   - Tolerance band (default 90%, strict 100%, lenient 50%, applies to committedKw not requestedKw)
+   - kW/kWh conversion (deliveredKw = deliveredKwh / durationHours, longer duration → lower kW, zero duration handled)
+   - Aggregate reconciliation (Σ actual, Σ baseline, Σ performance)
+   - Edge cases (committedKw=0, all-zero performance, mixed completed/underperforming)
+8. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (only pre-existing bun:test). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- VPP-2D-4 delivers the portfolio commitment layer — the buyer-facing obligation fulfillment record. It connects the reserved portfolio (what the platform promised) to the actual delivered performance (what the DERs produced), with a configurable shortfall policy.
+- The per-asset clipping rule is the key mathematical property: an asset that underperforms its baseline contributes 0 to the portfolio, not a negative offset. This prevents one bad asset from reducing the contributions of good assets.
+- The architectural rule is preserved: no new economic objects. The generic kernel (Contribution → Reward → Ledger → Settlement) remains the source of truth for operator payments. The portfolio commitment is a buyer-facing assessment layer above it.
+- The same primitive is reusable for storage, compute, and wireless — any vertical that needs to assess aggregate obligation fulfillment against individual verified performance.
