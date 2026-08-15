@@ -1302,3 +1302,20 @@ Stage Summary:
 - Energy measurement is dimensionally correct: kWh compared against kWh, not kW. The obligation contract is explicit per measurement method.
 - interval_power is explicitly unsupported rather than silently mis-evaluated.
 - VPP-2D-4 is now genuinely integrated: the portfolio commitment is wired into the lifecycle with correct terminal-state semantics, the measurement dimensions are consistent, and the obligation contract is explicit.
+
+---
+Task ID: VPP-2D-4-lifecycle-error-concurrency
+Agent: orchestrator
+Task: Fix three remaining lifecycle issues — (1) stop swallowing evaluation errors, (2) separate delivery completion from economic finality, (3) concurrency-safe portfolio evaluation.
+
+Work Log:
+1. STOPPED SWALLOWING EVALUATION ERRORS: maybeFinalizeDispatch now only catches NotFoundError (legacy dispatch with no portfolio commitment). All other errors (DB failure, serialization conflict, invalid data, unsupported measurement, application bugs) PROPAGATE to the caller. The dispatch stays in delivery_complete/reconciliation_required until evaluation succeeds — it is NOT marked completed before the portfolio evaluation succeeds.
+2. SEPARATED DELIVERY COMPLETION FROM ECONOMIC FINALITY: Added new dispatch states: 'delivery_complete' (all assignments performance-terminal, portfolio can be evaluated) and 'reconciliation_required' (delivery complete but financial recovery remains). The dispatch only reaches 'completed' after: (a) portfolio evaluation succeeds AND (b) no reconciliation_required assignments remain. This prevents downstream consumers from interpreting dispatch.completed as "entire transaction done" when financial reconciliation is still pending.
+3. CONCURRENCY-SAFE PORTFOLIO EVALUATION: Added atomic 'pending → evaluating' claim on VppPortfolioCommitment via updateMany CAS. Only one evaluator may proceed. If the commitment is already in a final state (fulfilled|partial|failed), re-evaluation is idempotent — returns the existing result without re-computing or emitting a duplicate audit. If evaluation fails, the claim reverts 'evaluating → pending' so the next caller can retry, and the error propagates.
+4. SCHEMA: Added 'evaluating' to the VppPortfolioCommitment status lifecycle (pending → evaluating → final). Added 'delivery_complete' and 'reconciliation_required' to VppDispatch status.
+5. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (15 before = 15 after — all pre-existing in vpp.service.ts). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The portfolio evaluation is now error-safe (only NotFoundError ignored), state-separated (delivery_complete ≠ completed), and concurrency-safe (atomic pending→evaluating claim, idempotent re-evaluation, no duplicate audits).
+- The dispatch lifecycle is: created → assigned → dispatching → delivery_complete → completed (or → reconciliation_required → completed after financial recovery).
+- VPP-2D-4 is now genuinely integrated with correct lifecycle semantics, error handling, and concurrency safety.
