@@ -1057,3 +1057,25 @@ Stage Summary:
 - The optimizer is now correct: every risk computation uses an effective profile consistent with the actual allocation (no inflation), the objective is truly lexicographic (safe capacity primary, costs as tie-breakers), and the optimality gap is a valid comparison against the same partial-allocation solution space.
 - The discretized exhaustive reference (11^N, N≤6) proves the greedy heuristic finds the optimal solution (gap=0% in tested cases), and the partial-allocation optimum commits less physical capacity than the whole-subset optimum — confirming partial allocation is a meaningful improvement.
 - The engine remains GENERIC (no VPP types, no DB access) and ready for VPP-2D-3 integration.
+
+---
+Task ID: VPP-2D-2C-objective-alignment
+Agent: orchestrator
+Task: Align the documented objective with the implementation, rename the gap metric honestly, add the two reviewer-requested tests.
+
+Work Log:
+1. OBJECTIVE REALIGNMENT: Changed the documented lexicographic objective from "maximize safe-capacity surplus" (which the implementation didn't do) to "minimize opportunity cost → direct cost → lockup → maximize diversification" (which it does do). The binary-search partial allocation and pruning now have a clear contract: minimize physical lockup once feasibility is met. A buyer requesting 500 kW does NOT want the platform to commit 700 kW.
+2. GAP METRIC HONESTY: Renamed optimalityGap → gridOptimalityGap in the OptimizationResult interface. Added allocationGridStep field (0.10). Updated JSDoc to explicitly state this is a GRID APPROXIMATION gap, NOT an exact continuous-optimum gap. measureOptimalityGap now returns { gap, gridStep } and its JSDoc says "A gridOptimalityGap of 0% means 'matches the best 10%-grid solution,' not 'globally optimal.'"
+3. LEXICOGRAPHIC COMPARATOR UPDATE: compareResultsLexicographic now follows the corrected objective: feasibility → safe capacity (only if not both served) → opportunity cost → direct cost → lockup → diversification. Safe-capacity surplus is NOT maximized once both portfolios are feasible.
+4. OBJECTIVE TEST: Added test proving a lower-cost feasible portfolio (oppCost=160) beats a higher-surplus portfolio (oppCost=16000). When both pools are combined, the optimizer selects all cheap assets — confirming opportunity cost minimization, not surplus maximization.
+5. GRID APPROXIMATION TEST: Added test proving the continuous solution (58.07 kW) differs from the 10% grid optimum (60 kW). The heuristic allocates a non-grid amount; the grid optimum is always at a 10% increment. gridStep=0.10 is explicitly reported.
+6. RUNTIME VERIFICATION:
+   - Objective: cheap pool oppCost=160 vs expensive oppCost=16000, combined picks all cheap ✓
+   - Grid: heuristic=58.07 kW (non-grid), optimal=60 kW (grid point), gridStep=0.10 ✓
+7. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (only pre-existing bun:test). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The optimizer's documented objective now matches its implementation: minimize opportunity cost, direct cost, and physical lockup once feasibility is met (NOT maximize safe-capacity surplus).
+- The gap metric is honestly labeled as a 10%-grid approximation, not an exact continuous optimum. The grid step is explicitly reported.
+- Two new tests prove: (1) the objective correctly prefers lower-cost feasible portfolios, (2) the continuous solution can differ from the 10% grid.
+- VPP-2D-2C is complete. Ready for VPP-2D-3: integrate the optimizer into buyer program creation — DER candidate pool → optimizer → partial capacity reservations via the generic capacity layer, with concurrent reservation testing.
