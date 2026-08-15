@@ -31,6 +31,7 @@ export const AuditEvents = {
   PortfolioReservationCreated: 'portfolio.reservation_created',
   PortfolioCommitmentCreated: 'vpp.portfolio_commitment_created',
   PortfolioCommitmentEvaluated: 'vpp.portfolio_commitment_evaluated',
+  BuyerSettlementCharged: 'vpp.buyer_settlement_charged',
 } as const
 
 export type AuditEventType = (typeof AuditEvents)[keyof typeof AuditEvents]

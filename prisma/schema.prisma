@@ -65,6 +65,7 @@ model Tenant {
   vppAssignments VppDispatchAssignment[]
   vppBaselines   VppBaseline[]
   vppPortfolioCommitments VppPortfolioCommitment[]
+  vppBuyerSettlements VppBuyerSettlement[]
   capacityResources CapacityResource[]
   capacityReservations CapacityReservation[]
   capacityCommitments CapacityCommitment[]
@@ -1021,6 +1022,7 @@ model VppDispatch {
   program     VppBuyerProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
   assignments VppDispatchAssignment[]
   portfolioCommitment VppPortfolioCommitment?
+  buyerSettlement     VppBuyerSettlement?
 
   @@index([tenantId])
   @@index([programId])
@@ -1243,3 +1245,50 @@ model VppPortfolioCommitment {
   @@index([status])
 }
 
+// -----------------------------------------------------------------------------
+// VPP-3: Buyer Settlement — the buyer-facing commercial charge for a
+// completed portfolio commitment. Computes the buyer's payment based on
+// delivered energy × price, with shortfall penalty and overdelivery cap.
+//
+// ARCHITECTURAL RULE: This is a direct ledger posting (buyer_funds debit +
+// buyer_revenue credit), NOT a Contribution→Reward chain. Operator payments
+// remain on the existing generic pipeline.
+// -----------------------------------------------------------------------------
+
+/// Buyer settlement for a VPP dispatch. 1:1 with VppDispatch.
+/// Created after the portfolio commitment reaches a final state.
+model VppBuyerSettlement {
+  id              String   @id @default(cuid())
+  tenantId        String
+  dispatchId      String   @unique // 1:1 with VppDispatch
+  commitmentId    String   // FK to VppPortfolioCommitment
+
+  // Charge breakdown (computed from portfolio fulfillment + contract terms).
+  buyerDeliveredKwh String   // decimal as string
+  pricePerKwh     String   // decimal as string — from VppBuyerProgram
+  deliveredCharge String   // decimal as string — buyerDeliveredKwh × pricePerKwh
+  capacityCeiling String   // decimal as string — committedKw × duration × pricePerKwh
+  cappedCharge    String   // decimal as string — min(deliveredCharge, capacityCeiling)
+  fulfillmentPct  String   // decimal as string
+  toleranceThresholdPct String
+  metTolerance    Boolean
+  buyerCharge     String   // decimal as string — final charge after adjustments
+  shortfall       String   // decimal as string — capacityCeiling - buyerCharge
+  currency        String   @default("USD")
+
+  // Settlement state.
+  status          String   @default("pending") // pending | charging | charged | failed
+  ledgerPostingId String?  // FK to LedgerPosting
+  buyerFundsBalanceAfter String? // decimal as string
+  chargedAt       DateTime?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  dispatch  VppDispatch @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([dispatchId])
+  @@index([status])
+}
