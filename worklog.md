@@ -646,3 +646,22 @@ Stage Summary:
 - Hard scenarios actually test what they claim.
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit b5b850c)
+
+---
+Task ID: VPP-2C-policy-contract
+Agent: orchestrator
+Task: Fix persisted strategy policy + BaselineContext split + no negative rewards.
+
+Work Log:
+1. PERSISTED POLICY: BaselinePolicy (selectedStrategy, criteria, metrics, status). getStrategy(name) resolves from registry. VPP resolves by name (seam for NetworkVersion config). selectBaselineStrategy with real acceptance criteria.
+2. BASELINECONTEXT SPLIT: production input contains only observable context (dispatchStartIndex, dispatchDate, dayOfWeek, isWeekend, temperatureC?). NO ground truth. Ground truth fetched separately for metadata only.
+3. REAL CRITERIA: maxMae, maxAbsBias, maxP95Error, maxFPR, maxFNR, maxOverpayPct, maxUnderpayPct. All must pass. Lowest MAE among eligible selected. NO_ACCEPTABLE_STRATEGY when none qualify.
+4. NO NEGATIVE REWARDS: verifiedPerformanceKwh = max(0, actual - baseline). rawPerformanceKwh preserved for analytics. Contribution uses verifiedPerformanceKwh.
+5. INTEGRATION TEST: evaluation → selected → resolvable → VPP resolves. No acceptable → NO_ACCEPTABLE. Negative clipped. BaselineContext has no ground truth.
+
+Stage Summary:
+- Strategy selection is evidence-driven and persisted.
+- Production baseline never receives ground truth.
+- No negative performance payments.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit 7c74e65)
