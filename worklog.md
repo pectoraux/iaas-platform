@@ -627,3 +627,22 @@ Stage Summary:
 - 100-scenario statistical evaluation provides meaningful criteria.
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit b0079a2)
+
+---
+Task ID: VPP-2B-provider-strategy
+Agent: orchestrator
+Task: Fix provider contract + remove zero fallback + strategy selection + hard scenarios.
+
+Work Log:
+1. PROVIDER HONORS CONTRACT: per-asset seed (deriveSeed), explicit dispatch date, training data < dispatchStartTime, different assets → different histories, deterministic, null on insufficient data.
+2. NO ZERO FALLBACK: BASELINE_UNAVAILABLE throws, assignment enters RECONCILIATION_REQUIRED, no silent baseline=0.
+3. STRATEGY SELECTION: 100 varied scenarios (9 hours × 4 durations × 4 powers), per-strategy MAE/bias/RMSE/P95/FP/FN, best selected by MAE with FP<20% and FN<20% criteria.
+4. REAL HARD TESTS: weekday vs weekend (actual Monday/Saturday), sparse (3 days), 3AM/7PM, zero-dispatch, negative performance, regression fallback, ground truth integrity.
+
+Stage Summary:
+- Provider honors assetId + dispatchStartTime semantics.
+- No zero-baseline fallback in production economics.
+- Strategy selection is evidence-based (100 scenarios, explicit criteria).
+- Hard scenarios actually test what they claim.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit b5b850c)
