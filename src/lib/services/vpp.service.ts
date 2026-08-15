@@ -1014,6 +1014,19 @@ async function maybeFinalizeDispatch(
       where: { id: dispatchId, status: 'delivery_complete' },
       data: { status: 'completed' },
     })
+
+    // VPP-3: automatically create the buyer settlement when the portfolio
+    // commitment reaches a final state. The actual ledger charge is
+    // performed by processBuyerSettlement (which uses claim/lease/fencing).
+    // The buyer settlement worker picks up pending settlements.
+    try {
+      const { createBuyerSettlement } = await import('./buyer-settlement.service')
+      await createBuyerSettlement(tenantId, dispatchId, actorId)
+    } catch {
+      // If buyer settlement creation fails (e.g., commitment not final —
+      // shouldn't happen here, but defensive), the dispatch is still
+      // completed. The buyer settlement can be created manually later.
+    }
   }
   // If reconciliationCount > 0, the dispatch stays 'reconciliation_required'
   // until all financial recoveries complete (via reconcileAssignment, which

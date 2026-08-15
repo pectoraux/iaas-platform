@@ -1257,6 +1257,7 @@ model VppPortfolioCommitment {
 
 /// Buyer settlement for a VPP dispatch. 1:1 with VppDispatch.
 /// Created after the portfolio commitment reaches a final state.
+/// Uses claim/lease/fencing for crash-safe processing.
 model VppBuyerSettlement {
   id              String   @id @default(cuid())
   tenantId        String
@@ -1267,7 +1268,7 @@ model VppBuyerSettlement {
   buyerDeliveredKwh String   // decimal as string
   pricePerKwh     String   // decimal as string — from VppBuyerProgram
   deliveredCharge String   // decimal as string — buyerDeliveredKwh × pricePerKwh
-  capacityCeiling String   // decimal as string — committedKw × duration × pricePerKwh
+  capacityCeiling String   // decimal as string — ceiling based on measurementMethod
   cappedCharge    String   // decimal as string — min(deliveredCharge, capacityCeiling)
   fulfillmentPct  String   // decimal as string
   toleranceThresholdPct String
@@ -1276,10 +1277,18 @@ model VppBuyerSettlement {
   shortfall       String   // decimal as string — capacityCeiling - buyerCharge
   currency        String   @default("USD")
 
-  // Settlement state.
+  // Measurement method from the commitment (average_power | energy).
+  measurementMethod String @default("average_power")
+
+  // Settlement state with claim/lease/fencing (same pattern as portfolio evaluation).
+  // pending → charging → charged | failed
   status          String   @default("pending") // pending | charging | charged | failed
+  claimId         String?  // fencing token — unique per processing attempt
+  claimedAt       DateTime?
+  leaseExpiresAt  DateTime?
   ledgerPostingId String?  // FK to LedgerPosting
   buyerFundsBalanceAfter String? // decimal as string
+  failureReason   String?
   chargedAt       DateTime?
 
   createdAt       DateTime @default(now())
