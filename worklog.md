@@ -949,3 +949,41 @@ Stage Summary:
 - The Jacobi algorithm correctly handles both positive-definite and positive-semidefinite (singular) matrices, which is essential for correlation matrices (perfectly correlated assets produce singular matrices).
 - VPP-2D-1 is now FROZEN. The portfolio risk engine is dimensionally correct (kW), honest about distributional assumptions (normal_approximation label), and rigorously validates correlation matrices (eigenvalue-based PSD check).
 - NEXT (VPP-2D-2): portfolio optimizer — "which subset of N available DERs should we commit to this buyer request while minimizing risk, cost, operator burden, and opportunity cost?" That is the DePIN allocation problem.
+
+---
+Task ID: VPP-2D-2-portfolio-optimizer
+Agent: orchestrator
+Task: Build the portfolio optimizer — the DePIN allocation engine that selects WHICH subset of N available assets to commit to a buyer request, minimizing risk, cost, and opportunity cost.
+
+Work Log:
+1. RESEARCH: Studied the generic capacity layer (CapacityResource, CapacityReservation, CapacityCommitment, CapacityUsage) and how VppCapacityReservation links via sourceType/sourceId. Confirmed the optimizer must be GENERIC (not VPP-specific) — it operates on abstract candidate assets and respects available-capacity windows from the generic layer.
+2. DESIGN: The optimizer is a pure computation engine (no DB access). It takes CandidateAsset[] + OptimizationTarget and returns OptimizationResult with selected assets + portfolio risk statistics. The VPP layer (or any future vertical) constructs candidates and calls the optimizer.
+3. ALGORITHM: Greedy with correlation-aware scoring + pruning pass.
+   - Phase 1 (greedy): Score each candidate by expected kW + cluster novelty bonus (diversification) - cost penalty - opportunity cost penalty. Iteratively add the best candidate, recompute safe capacity via computeSafeCapacity(), stop when target met.
+   - Phase 2 (pruning): Remove redundant assets whose removal still leaves the portfolio above target (reduces opportunity cost — fewer assets tied up).
+   - O(N²) in candidates — fast enough for 1000+ DERs.
+4. GENERIC DESIGN: No VPP imports. CandidateAsset carries assetId, clusterId, availableCapacityKw, uncertainty (DerUncertaintyProfile), optional costPerKw + opportunityCostPerKw. buildCandidate() helper bridges the generic capacity layer's getAvailableCapacity + uncertainty profile.
+5. RUNTIME VERIFICATION (4 scenarios):
+   - Basic: 10 assets, request 200 kW → selects 5, commits 200 kW ✓
+   - Insufficient: 2 assets of 50 kW, request 500 kW → commits 38.2 kW, shortfall 461.8 ✓
+   - Diversification: 10 one-cluster vs 10 multi-cluster (REALISTIC ρ) → one-cluster commits 302 kW, multi-cluster commits 385 kW (diversified is better) ✓
+   - Opportunity cost: expensive (oppCost=10) vs cheap (oppCost=1) → all 5 selected are cheap ✓
+6. TESTS (tests/portfolio-optimizer.test.ts): 25+ cases across 9 describe blocks:
+   - Basic selection (meets target, confidence level reflected)
+   - Insufficient capacity (shortfall, empty pool)
+   - Correlation diversification (multi-cluster > single-cluster, selects from multiple clusters)
+   - Availability effect (lower p → need more assets or commit less)
+   - Opportunity cost (prefers low-oppCost, prefers low-cost)
+   - Pruning (removes redundant assets)
+   - Edge cases (zero request, zero-capacity candidates, negative request rejected, invalid confidence rejected)
+   - 100-candidate sanity (selects feasible diversified portfolio)
+   - buildCandidate helper (caps expectedKw at availableKw, preserves cost)
+   - Result structure (per-asset committedKw/expectedKw, totals, clusterCount)
+7. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors in portfolio-optimizer.service.ts (only pre-existing bun:test test-file error). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- VPP-2D-2 delivers the portfolio optimizer — the DePIN allocation engine. The platform is no longer just a risk calculator; it actively SELECTS which physical assets to commit to each buyer obligation, minimizing risk (via the risk engine's safe-capacity output), cost, and opportunity cost.
+- The optimizer is GENERIC (not VPP-specific): it operates on abstract CandidateAsset inputs and can serve any vertical (storage, wireless, compute) that constructs candidates with uncertainty profiles.
+- Correlation-aware diversification is built into the scoring: assets in new clusters get a novelty bonus, so the optimizer naturally spreads selections across clusters to reduce common-mode failure risk.
+- The pruning pass reduces opportunity cost by removing redundant assets after greedy selection.
+- NEXT (VPP-2D-3): integrate the optimizer into buyer program creation — when a buyer requests X kW, query available capacity from the generic layer, build candidates from DERs + their baseline evaluations, run the optimizer, persist the selected portfolio as reservations, and enforce the commitment at dispatch time.
