@@ -1135,3 +1135,26 @@ Stage Summary:
 - The concurrent acceptance test proves two buyers racing for the same 100 kW pool results in exactly one winner and one clean failure — no orphan reservations, no negative remaining capacity.
 - The result carries honest labels: algorithm='greedy_lexicographic_marginal_safe_capacity', optimalityGuarantee='heuristic'. The buyer-facing contract does not depend on global optimality.
 - NEXT: the VPP layer can now call optimizeAndReserve() when a buyer program is created or a dispatch is planned, passing the DER candidate pool + target. The generic capacity layer remains the source of truth for what can actually be reserved.
+
+---
+Task ID: VPP-2D-3-error-classification
+Agent: orchestrator
+Task: Fix the error-handling issue — distinguish expected capacity conflicts from system failures. The old code caught every error and converted it to `reserved=false, failureReason=err.message`, making DB outages look like capacity conflicts.
+
+Work Log:
+1. TYPED RESERVATION STATUS: Added ReservationStatus type: 'reserved' | 'insufficient_capacity' | 'retryable_conflict' | 'system_error'. The OptimizeAndReserveResult now carries a `status` field that callers MUST check to distinguish expected capacity conflicts from system failures.
+2. ERROR CLASSIFICATION: Implemented classifyReservationError() with three categories:
+   - ValidationError, NotFoundError → 'insufficient_capacity' (expected market behavior — caller can retry with fresh pool)
+   - Retryable Prisma errors (P2034, P2031, P2024, P2033, P1001, P1002) + transaction timeout/deadlock/serialization → 'retryable_conflict' (caller should retry with backoff)
+   - Everything else → RE-THROWN (not converted to a buyer-facing result). This prevents DB outages from masquerading as "insufficient capacity."
+3. EXPORTED classifyReservationError: Made the function exported so it can be directly unit-tested.
+4. TESTS — 10 new cases across 2 describe blocks:
+   - Integration: concurrent capacity loss → status=insufficient_capacity (not system_error); simulated missing asset → insufficient_capacity; successful reservation → status=reserved
+   - Direct unit tests for classifyReservationError: ValidationError → insufficient_capacity; Prisma P2034 → retryable_conflict; Prisma P2024 → retryable_conflict; generic "transaction timeout" → retryable_conflict; UNEXPECTED generic Error → RE-THROWN; UNEXPECTED Prisma error (unknown code) → RE-THROWN; non-Error value → RE-THROWN
+5. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (only pre-existing bun:test). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The reservation service now correctly distinguishes expected capacity conflicts (insufficient_capacity, retryable_conflict) from unexpected system failures (re-thrown). A DB outage will never be presented to a buyer as "insufficient capacity; retry with a fresh pool."
+- The three mandatory safety properties remain intact: never over-reserve, optimizer is not the concurrency authority, all-or-nothing.
+- VPP-2D-3 is now FROZEN. The architecture has a clean boundary: optimizer proposes, capacity decides.
+- NEXT (VPP-2D-4): economic integration — connect the reserved portfolio to the actual buyer obligation: dispatch event → actual DER response → aggregate portfolio performance → buyer commitment fulfilled? → portfolio-level settlement.
