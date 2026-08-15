@@ -68,6 +68,7 @@ model Tenant {
   capacityReservations CapacityReservation[]
   capacityCommitments CapacityCommitment[]
   capacityUsages CapacityUsage[]
+  baselineEvaluations BaselineEvaluation[]
 
   @@index([slug])
 }
@@ -115,6 +116,10 @@ model NetworkVersion {
   networkId         String
   version           Int
   configurationJson String    // full versioned config: asset_types, capabilities, verification_policy, reward_policy
+  // Persisted, versioned baseline policy. Immutable after publication.
+  // Contains: selectedStrategy, evaluationId, evaluatedAt, criteria, metrics, status.
+  // NULL if no baseline evaluation has been run for this version.
+  baselinePolicyJson String?
   publishedAt       DateTime?
   createdAt         DateTime  @default(now())
 
@@ -123,6 +128,7 @@ model NetworkVersion {
   rewardRules    RewardRule[]
   events         Event[]
   contributions  Contribution[]
+  baselineEvaluations BaselineEvaluation[]
 
   @@unique([networkId, version])
   @@index([networkId])
@@ -1056,5 +1062,31 @@ model VppBaseline {
   assignment VppDispatchAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
+}
+
+/// Durable baseline evaluation record. Created when a strategy evaluation
+/// is run. Referenced by NetworkVersion.baselinePolicyJson.
+/// Reproducible: contains simulator version, dataset hash, engine version.
+model BaselineEvaluation {
+  id                  String   @id @default(cuid())
+  tenantId            String
+  networkVersionId    String?
+  evaluationId        String   @unique
+  simulatorVersion    String   @default("1.0.0")
+  engineVersion       String   @default("1.0.0")
+  scenarioDatasetHash String
+  numScenarios        Int
+  criteriaJson        String
+  metricsJson         String
+  selectedStrategy    String
+  status              String   // accepted | no_acceptable_strategy
+  evaluatedAt         DateTime @default(now())
+  createdAt           DateTime @default(now())
+
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  networkVersion  NetworkVersion? @relation(fields: [networkVersionId], references: [id])
+
+  @@index([tenantId])
+  @@index([networkVersionId])
 }
 

@@ -529,11 +529,34 @@ export async function executeDispatchAssignment(
       isWeekend: dayOfWeek === 0 || dayOfWeek === 6,
     }
 
-    // Resolve the baseline strategy from the network's configuration.
-    // In production, this would be read from NetworkVersion.baselinePolicy.
-    // For the MVP, we use 'weekday_weekend_average' as the default selected strategy.
-    // This is the seam where a persisted BaselinePolicy would be loaded.
-    const strategyName = 'weekday_weekend_average' // TODO: read from NetworkVersion config
+    // Resolve the baseline strategy from the PERSISTED NetworkVersion policy.
+    // The baselinePolicyJson is immutable once the version is published.
+    const networkDef = await db.networkDefinition.findUnique({
+      where: { id: assignment.dispatch.program.networkId },
+    })
+    if (!networkDef || !networkDef.currentVersionId) {
+      throw new Error('BASELINE_UNAVAILABLE: network or current version not found')
+    }
+    const versionForPolicy = await db.networkVersion.findUnique({
+      where: { id: networkDef.currentVersionId },
+    })
+    if (!versionForPolicy) {
+      throw new Error('BASELINE_UNAVAILABLE: network version not found')
+    }
+
+    let strategyName: string
+    if (versionForPolicy.baselinePolicyJson) {
+      const policy = JSON.parse(versionForPolicy.baselinePolicyJson)
+      if (policy.status !== 'accepted' || !policy.selectedStrategy) {
+        throw new Error(`BASELINE_UNAVAILABLE: baseline policy status is '${policy.status}'`)
+      }
+      strategyName = policy.selectedStrategy
+    } else {
+      // No policy persisted on this version — use default.
+      // This allows backward compatibility with versions created before VPP-2C.
+      strategyName = 'weekday_weekend_average'
+    }
+
     const baselineStrategy = getStrategy(strategyName)
     if (!baselineStrategy) {
       throw new Error(`BASELINE_UNAVAILABLE: strategy '${strategyName}' not found in registry`)
