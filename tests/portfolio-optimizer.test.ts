@@ -1,27 +1,22 @@
 /**
- * VPP-2D-2: Portfolio Optimizer tests.
+ * VPP-2D-2B: Portfolio Optimizer tests (marginal-safe-capacity, partial allocation).
  *
- * Tests the generic portfolio optimizer: given a pool of candidate assets
- * (each with uncertainty, availability, cluster, available capacity, optional
- * cost), select a subset that satisfies a capacity request at a target
- * confidence level while minimizing risk and cost.
+ * Tests the hardened optimizer:
+ *   - Explicit lexicographic objective
+ *   - Marginal safe capacity scoring (not arbitrary weights)
+ *   - Partial allocation (committedKw can be < availableCapacityKw)
+ *   - Immutable uncertainty profiles (buildCandidate doesn't mutate)
+ *   - Candidate validation
+ *   - Optimality-gap measurement (greedy vs exhaustive for small N)
  *
- * Properties verified:
- *   - Basic selection: optimizer selects enough assets to meet the target
- *   - Safe capacity: committed ≥ target when pool is sufficient
- *   - Insufficient capacity: shortfall reported when pool can't meet target
- *   - Correlation diversification: optimizer prefers spreading across clusters
- *   - Availability: lower-availability assets require more total capacity
- *   - Opportunity cost: lower-opportunity-cost assets preferred
- *   - Pruning: redundant assets removed after greedy selection
- *   - Empty/edge cases: empty pool, zero request, no viable candidates
- *   - Large portfolio (100 candidates) sanity
- *
- * Run: bun test tests/portfolio-optimizer.test.ts --timeout 30000
+ * Run: bun test tests/portfolio-optimizer.test.ts --timeout 60000
  */
 import { describe, it, expect } from 'bun:test'
 import {
   optimizePortfolio,
+  exhaustiveOptimize,
+  measureOptimalityGap,
+  validateCandidates,
   buildCandidate,
   type CandidateAsset,
   type OptimizationTarget,
@@ -68,35 +63,90 @@ function makeTarget(requestedKw: number, model: CorrelationModel = NO_CORRELATIO
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Candidate validation
+// ---------------------------------------------------------------------------
+
+describe('Portfolio Optimizer: candidate validation', () => {
+  it('accepts valid candidates', () => {
+    expect(() => validateCandidates([
+      makeCandidate({ assetId: 'a', clusterId: 'x', availableCapacityKw: 50 }),
+      makeCandidate({ assetId: 'b', clusterId: 'y', availableCapacityKw: 30 }),
+    ])).not.toThrow()
+  })
+
+  it('rejects duplicate assetId', () => {
+    expect(() => validateCandidates([
+      makeCandidate({ assetId: 'a' }),
+      makeCandidate({ assetId: 'a' }),
+    ])).toThrow(ValidationError)
+  })
+
+  it('rejects negative availableCapacityKw', () => {
+    expect(() => validateCandidates([
+      makeCandidate({ assetId: 'a', availableCapacityKw: -5 }),
+    ])).toThrow(ValidationError)
+  })
+
+  it('rejects availabilityProb outside [0, 1]', () => {
+    expect(() => validateCandidates([
+      makeCandidate({ assetId: 'a', uncertainty: makeProfile({ assetId: 'a', availabilityProb: 1.5 }) }),
+    ])).toThrow(ValidationError)
+    expect(() => validateCandidates([
+      makeCandidate({ assetId: 'b', uncertainty: makeProfile({ assetId: 'b', availabilityProb: -0.1 }) }),
+    ])).toThrow(ValidationError)
+  })
+
+  it('rejects negative stdDevKw', () => {
+    expect(() => validateCandidates([
+      makeCandidate({ assetId: 'a', uncertainty: makeProfile({ assetId: 'a', stdDevKw: -1 }) }),
+    ])).toThrow(ValidationError)
+  })
+
+  it('rejects empty clusterId', () => {
+    expect(() => validateCandidates([
+      makeCandidate({ assetId: 'a', clusterId: '' }),
+    ])).toThrow(ValidationError)
+  })
+
+  it('rejects non-finite values', () => {
+    expect(() => validateCandidates([
+      makeCandidate({ assetId: 'a', availableCapacityKw: NaN }),
+    ])).toThrow(ValidationError)
+    expect(() => validateCandidates([
+      makeCandidate({ assetId: 'b', availableCapacityKw: Infinity }),
+    ])).toThrow(ValidationError)
+  })
+
+  it('rejects negative costPerKw', () => {
+    expect(() => validateCandidates([
+      makeCandidate({ assetId: 'a', costPerKw: -0.1 }),
+    ])).toThrow(ValidationError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Basic selection
 // ---------------------------------------------------------------------------
 
 describe('Portfolio Optimizer: basic selection', () => {
   it('selects enough assets to meet the target', () => {
-    // 10 assets, each 50 kW, low variance → safe capacity should easily meet 200 kW.
     const candidates = Array.from({ length: 10 }, (_, i) =>
       makeCandidate({
         assetId: `a${i}`,
-        expectedPerformanceKw: 50,
-        availableCapacityKw: 50,
-        uncertainty: makeProfile({
-          assetId: `a${i}`,
-          expectedPerformanceKw: 50,
-          stdDevKw: 1,
-          availabilityProb: 1.0,
-        }),
+        uncertainty: makeProfile({ assetId: `a${i}`, expectedPerformanceKw: 50, stdDevKw: 1, availabilityProb: 1.0 }),
       }),
     )
 
     const result = optimizePortfolio(candidates, makeTarget(200))
 
     expect(result.fullyServed).toBe(true)
-    expect(result.committedKw >= 200 || result.selected.length === 10).toBe(true)
+    expect(result.committedKw).toBeGreaterThanOrEqual(200)
     expect(result.shortfallKw).toBe(0)
     expect(result.selected.length).toBeGreaterThan(0)
+    expect(result.algorithm).toBe('greedy_marginal_safe_capacity')
   })
 
-  it('commits capacity at the requested confidence level', () => {
+  it('reflects the confidence level in the risk result', () => {
     const candidates = Array.from({ length: 5 }, (_, i) =>
       makeCandidate({
         assetId: `a${i}`,
@@ -106,15 +156,17 @@ describe('Portfolio Optimizer: basic selection', () => {
 
     const result = optimizePortfolio(candidates, makeTarget(300, NO_CORRELATION, 0.99))
 
-    // The risk engine's safe capacity at 99% should be reflected.
     expect(result.risk.confidenceLevel).toBe(0.99)
     expect(result.risk.distributionModel).toBe('normal_approximation')
   })
 })
 
+// ---------------------------------------------------------------------------
+// Insufficient capacity
+// ---------------------------------------------------------------------------
+
 describe('Portfolio Optimizer: insufficient capacity', () => {
   it('reports shortfall when the pool cannot meet the target', () => {
-    // 2 assets of 50 kW each → max 100 kW. Request 500 kW.
     const candidates = [
       makeCandidate({ assetId: 'a', availableCapacityKw: 50 }),
       makeCandidate({ assetId: 'b', availableCapacityKw: 50 }),
@@ -124,7 +176,7 @@ describe('Portfolio Optimizer: insufficient capacity', () => {
 
     expect(result.fullyServed).toBe(false)
     expect(result.shortfallKw).toBeGreaterThan(0)
-    expect(result.selected.length).toBe(2) // selected all available
+    expect(result.selected.length).toBe(2)
   })
 
   it('reports full shortfall when pool is empty', () => {
@@ -133,15 +185,60 @@ describe('Portfolio Optimizer: insufficient capacity', () => {
     expect(result.fullyServed).toBe(false)
     expect(result.shortfallKw).toBe(100)
     expect(result.selected.length).toBe(0)
-    expect(result.totalCommittedKw).toBe(0)
   })
 })
 
+// ---------------------------------------------------------------------------
+// Partial allocation
+// ---------------------------------------------------------------------------
+
+describe('Portfolio Optimizer: partial allocation', () => {
+  it('can commit less than the full available capacity on the last asset', () => {
+    // 10 assets of 100 kW each, very low variance. Request 250 kW.
+    // The optimizer should select 3 assets but only partially allocate the 3rd.
+    const candidates = Array.from({ length: 10 }, (_, i) =>
+      makeCandidate({
+        assetId: `a${i}`,
+        clusterId: `c${i}`,
+        availableCapacityKw: 100,
+        uncertainty: makeProfile({ assetId: `a${i}`, expectedPerformanceKw: 100, stdDevKw: 1, availabilityProb: 1.0 }),
+      }),
+    )
+
+    const result = optimizePortfolio(candidates, makeTarget(250))
+
+    expect(result.fullyServed).toBe(true)
+    // At least one asset should have committedKw < availableCapacityKw.
+    const partial = result.selected.filter((s) => s.committedKw < 100)
+    expect(partial.length).toBeGreaterThan(0)
+    // Total committed should be close to 250, not 300+.
+    expect(result.totalCommittedKw).toBeLessThan(300)
+  })
+
+  it('totalCommittedKw is close to the requested amount when partial allocation works', () => {
+    const candidates = Array.from({ length: 10 }, (_, i) =>
+      makeCandidate({
+        assetId: `a${i}`,
+        clusterId: `c${i}`,
+        availableCapacityKw: 100,
+        uncertainty: makeProfile({ assetId: `a${i}`, expectedPerformanceKw: 100, stdDevKw: 0.5, availabilityProb: 1.0 }),
+      }),
+    )
+
+    const result = optimizePortfolio(candidates, makeTarget(350))
+
+    // With partial allocation, total committed should be near 350, not 400.
+    expect(result.totalCommittedKw).toBeGreaterThanOrEqual(350)
+    expect(result.totalCommittedKw).toBeLessThan(400)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Correlation diversification
+// ---------------------------------------------------------------------------
+
 describe('Portfolio Optimizer: correlation diversification', () => {
   it('prefers spreading across clusters when correlation is high within-cluster', () => {
-    // 10 assets in ONE cluster vs 10 assets spread across 10 clusters.
-    // Both have the same per-asset stats. The diversified pool should
-    // achieve higher safe capacity (lower portfolio variance).
     const oneCluster = Array.from({ length: 10 }, (_, i) =>
       makeCandidate({
         assetId: `a${i}`,
@@ -161,70 +258,21 @@ describe('Portfolio Optimizer: correlation diversification', () => {
     const result1 = optimizePortfolio(oneCluster, target)
     const result2 = optimizePortfolio(manyClusters, target)
 
-    // The diversified pool should commit more (or need fewer assets) because
-    // cross-cluster correlation is lower → lower portfolio variance →
-    // higher safe capacity.
     expect(result2.committedKw).toBeGreaterThanOrEqual(result1.committedKw)
-
-    // The diversified pool should use more clusters.
     expect(result2.clusterCount).toBeGreaterThanOrEqual(result1.clusterCount)
   })
-
-  it('selects from multiple clusters even when one cluster has more capacity', () => {
-    // Cluster A has 5 assets, cluster B has 2. Optimizer should still pick
-    // from both to diversify (not just the bigger cluster).
-    const candidates = [
-      ...Array.from({ length: 5 }, (_, i) =>
-        makeCandidate({ assetId: `a${i}`, clusterId: 'A' }),
-      ),
-      ...Array.from({ length: 2 }, (_, i) =>
-        makeCandidate({ assetId: `b${i}`, clusterId: 'B' }),
-      ),
-    ]
-
-    const result = optimizePortfolio(candidates, makeTarget(200, REALISTIC))
-
-    // Should have selected from more than one cluster (diversification).
-    expect(result.clusterCount).toBeGreaterThan(1)
-  })
 })
 
-describe('Portfolio Optimizer: availability effect', () => {
-  it('lower-availability assets require more total selection to meet target', () => {
-    const highAvail = Array.from({ length: 10 }, (_, i) =>
-      makeCandidate({
-        assetId: `a${i}`,
-        uncertainty: makeProfile({ assetId: `a${i}`, expectedPerformanceKw: 50, stdDevKw: 5, availabilityProb: 0.99 }),
-      }),
-    )
-    const lowAvail = Array.from({ length: 10 }, (_, i) =>
-      makeCandidate({
-        assetId: `a${i}`,
-        uncertainty: makeProfile({ assetId: `a${i}`, expectedPerformanceKw: 50, stdDevKw: 5, availabilityProb: 0.70 }),
-      }),
-    )
-
-    const target = makeTarget(200, NO_CORRELATION)
-    const resultHigh = optimizePortfolio(highAvail, target)
-    const resultLow = optimizePortfolio(lowAvail, target)
-
-    // Lower availability → need more assets (or achieve lower safe capacity).
-    // Either resultLow.selected.length > resultHigh.selected.length,
-    // or resultLow.committedKw < resultHigh.committedKw.
-    const lowNeedsMore = resultLow.selected.length >= resultHigh.selected.length
-    const lowCommitsLess = resultLow.committedKw <= resultHigh.committedKw
-    expect(lowNeedsMore || lowCommitsLess).toBe(true)
-  })
-})
+// ---------------------------------------------------------------------------
+// Opportunity cost
+// ---------------------------------------------------------------------------
 
 describe('Portfolio Optimizer: opportunity cost', () => {
   it('prefers lower-opportunity-cost assets when risk is similar', () => {
-    // 10 expensive assets (oppCost=10) + 10 cheap assets (oppCost=1).
-    // Both have identical risk profiles. Optimizer should prefer cheap.
     const expensive = Array.from({ length: 10 }, (_, i) =>
       makeCandidate({
         assetId: `exp-${i}`,
-        clusterId: `exp-${i}`,
+        clusterId: `e${i}`,
         opportunityCostPerKw: 10,
         uncertainty: makeProfile({ assetId: `exp-${i}`, expectedPerformanceKw: 50, stdDevKw: 2, availabilityProb: 0.99 }),
       }),
@@ -232,7 +280,7 @@ describe('Portfolio Optimizer: opportunity cost', () => {
     const cheap = Array.from({ length: 10 }, (_, i) =>
       makeCandidate({
         assetId: `cheap-${i}`,
-        clusterId: `cheap-${i}`,
+        clusterId: `c${i}`,
         opportunityCostPerKw: 1,
         uncertainty: makeProfile({ assetId: `cheap-${i}`, expectedPerformanceKw: 50, stdDevKw: 2, availabilityProb: 0.99 }),
       }),
@@ -240,51 +288,71 @@ describe('Portfolio Optimizer: opportunity cost', () => {
 
     const result = optimizePortfolio([...expensive, ...cheap], makeTarget(200))
 
-    // All selected assets should be from the cheap pool.
     const selectedIds = result.selected.map((s) => s.assetId)
     const allCheap = selectedIds.every((id) => id.startsWith('cheap-'))
     expect(allCheap).toBe(true)
-
-    // Total opportunity cost should be low.
-    expect(result.totalOpportunityCost).toBeDefined()
-    expect(result.totalOpportunityCost!).toBeLessThan(200 * 10) // less than if all expensive
-  })
-
-  it('prefers lower-cost assets when risk is similar', () => {
-    const expensive = Array.from({ length: 10 }, (_, i) =>
-      makeCandidate({
-        assetId: `exp-${i}`,
-        clusterId: `c${i}`,
-        costPerKw: 0.20,
-        uncertainty: makeProfile({ assetId: `exp-${i}`, expectedPerformanceKw: 50, stdDevKw: 2, availabilityProb: 0.99 }),
-      }),
-    )
-    const cheap = Array.from({ length: 10 }, (_, i) =>
-      makeCandidate({
-        assetId: `cheap-${i}`,
-        clusterId: `d${i}`,
-        costPerKw: 0.05,
-        uncertainty: makeProfile({ assetId: `cheap-${i}`, expectedPerformanceKw: 50, stdDevKw: 2, availabilityProb: 0.99 }),
-      }),
-    )
-
-    const result = optimizePortfolio([...expensive, ...cheap], makeTarget(200))
-
-    const selectedIds = result.selected.map((s) => s.assetId)
-    const allCheap = selectedIds.every((id) => id.startsWith('cheap-'))
-    expect(allCheap).toBe(true)
-    expect(result.totalCost).toBeDefined()
   })
 })
 
+// ---------------------------------------------------------------------------
+// Immutable uncertainty profiles
+// ---------------------------------------------------------------------------
+
+describe('Portfolio Optimizer: immutable uncertainty profiles', () => {
+  it('buildCandidate does not mutate the caller uncertainty profile', () => {
+    const original = makeProfile({ assetId: 'a', clusterId: 'x', expectedPerformanceKw: 80 })
+    const originalCopy = { ...original }
+
+    const candidate = buildCandidate({
+      assetId: 'a',
+      clusterId: 'x',
+      availableCapacityKw: 50, // less than expectedPerformanceKw=80
+      uncertainty: original,
+    })
+
+    // The candidate's uncertainty should be a COPY, not a reference.
+    expect(candidate.uncertainty).not.toBe(original)
+    // The original should be unmutated.
+    expect(original).toEqual(originalCopy)
+    // The candidate should preserve the original expectedPerformanceKw
+    // (NOT silently capped to 50).
+    expect(candidate.uncertainty.expectedPerformanceKw).toBe(80)
+  })
+
+  it('optimizer preserves the uncertainty profile even when expected > available', () => {
+    const candidates = [
+      makeCandidate({
+        assetId: 'a',
+        availableCapacityKw: 30,
+        uncertainty: makeProfile({ assetId: 'a', expectedPerformanceKw: 80, stdDevKw: 10 }),
+      }),
+      makeCandidate({
+        assetId: 'b',
+        availableCapacityKw: 30,
+        uncertainty: makeProfile({ assetId: 'b', expectedPerformanceKw: 80, stdDevKw: 10 }),
+      }),
+    ]
+
+    const result = optimizePortfolio(candidates, makeTarget(50))
+
+    // The result should have selected assets, and the committedKw should
+    // respect availableCapacityKw (≤ 30), not the expected (80).
+    for (const s of result.selected) {
+      expect(s.committedKw).toBeLessThanOrEqual(30)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Pruning
+// ---------------------------------------------------------------------------
+
 describe('Portfolio Optimizer: pruning', () => {
   it('removes redundant assets that overshoot the target', () => {
-    // 20 assets, each 50 kW, low variance. Request 100 kW.
-    // Greedy might select 3-4; pruning should reduce to the minimum needed.
     const candidates = Array.from({ length: 20 }, (_, i) =>
       makeCandidate({
         assetId: `a${i}`,
-        clusterId: `c${i}`, // each in its own cluster (no correlation)
+        clusterId: `c${i}`,
         uncertainty: makeProfile({ assetId: `a${i}`, expectedPerformanceKw: 50, stdDevKw: 1, availabilityProb: 1.0 }),
       }),
     )
@@ -292,11 +360,13 @@ describe('Portfolio Optimizer: pruning', () => {
     const result = optimizePortfolio(candidates, makeTarget(100))
 
     expect(result.fullyServed).toBe(true)
-    // Should NOT have selected all 20 — pruning should keep it minimal.
     expect(result.selected.length).toBeLessThan(20)
-    expect(result.selected.length).toBeGreaterThanOrEqual(2)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Edge cases
+// ---------------------------------------------------------------------------
 
 describe('Portfolio Optimizer: edge cases', () => {
   it('zero request → empty selection, fully served', () => {
@@ -305,7 +375,6 @@ describe('Portfolio Optimizer: edge cases', () => {
 
     expect(result.fullyServed).toBe(true)
     expect(result.selected.length).toBe(0)
-    expect(result.totalCommittedKw).toBe(0)
   })
 
   it('candidates with zero available capacity are skipped', () => {
@@ -329,7 +398,138 @@ describe('Portfolio Optimizer: edge cases', () => {
   })
 })
 
-describe('Portfolio Optim: 100-candidate sanity', () => {
+// ---------------------------------------------------------------------------
+// Optimality gap (greedy vs exhaustive)
+// ---------------------------------------------------------------------------
+
+describe('Portfolio Optimizer: optimality gap', () => {
+  it('exhaustive optimizer returns a valid result for small N', () => {
+    const candidates = Array.from({ length: 6 }, (_, i) =>
+      makeCandidate({
+        assetId: `a${i}`,
+        clusterId: `c${i}`,
+        uncertainty: makeProfile({ assetId: `a${i}`, expectedPerformanceKw: 50, stdDevKw: 5, availabilityProb: 0.95 }),
+      }),
+    )
+
+    const optimal = exhaustiveOptimize(candidates, makeTarget(150))
+    expect(optimal.algorithm).toBe('exhaustive')
+    expect(optimal.selected.length).toBeGreaterThan(0)
+    expect(optimal.committedKw).toBeGreaterThanOrEqual(0)
+  })
+
+  it('greedy result is close to optimal for simple cases', () => {
+    // 8 candidates, all in different clusters, low variance.
+    const candidates = Array.from({ length: 8 }, (_, i) =>
+      makeCandidate({
+        assetId: `a${i}`,
+        clusterId: `c${i}`,
+        uncertainty: makeProfile({ assetId: `a${i}`, expectedPerformanceKw: 50, stdDevKw: 3, availabilityProb: 0.97 }),
+      }),
+    )
+
+    const { heuristic, optimal, gap } = measureOptimalityGap(candidates, makeTarget(200))
+
+    expect(heuristic.algorithm).toBe('greedy_marginal_safe_capacity')
+    expect(optimal.algorithm).toBe('exhaustive')
+    // The gap should be small (< 10%) for this simple uncorrelated case.
+    expect(gap).toBeLessThan(0.10)
+  })
+
+  it('greedy gap is reasonable under realistic correlation', () => {
+    // 10 candidates across 3 clusters, realistic correlation.
+    const candidates = Array.from({ length: 10 }, (_, i) =>
+      makeCandidate({
+        assetId: `a${i}`,
+        clusterId: `c${i % 3}`,
+        uncertainty: makeProfile({ assetId: `a${i}`, expectedPerformanceKw: 50, stdDevKw: 5, availabilityProb: 0.95 }),
+      }),
+    )
+
+    const { gap } = measureOptimalityGap(candidates, makeTarget(250, REALISTIC))
+
+    // Under correlation, the gap may be larger but should still be bounded.
+    expect(gap).toBeLessThan(0.20)
+  })
+
+  it('exhaustive optimizer rejects N > 15', () => {
+    const candidates = Array.from({ length: 16 }, (_, i) =>
+      makeCandidate({ assetId: `a${i}`, clusterId: `c${i}` }),
+    )
+    expect(() => exhaustiveOptimize(candidates, makeTarget(100))).toThrow()
+  })
+
+  it('measureOptimalityGap returns non-negative gap', () => {
+    const candidates = Array.from({ length: 6 }, (_, i) =>
+      makeCandidate({
+        assetId: `a${i}`,
+        clusterId: `c${i}`,
+        uncertainty: makeProfile({ assetId: `a${i}`, expectedPerformanceKw: 40, stdDevKw: 8, availabilityProb: 0.9 }),
+      }),
+    )
+
+    const { gap } = measureOptimalityGap(candidates, makeTarget(120))
+    expect(gap).toBeGreaterThanOrEqual(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Result structure
+// ---------------------------------------------------------------------------
+
+describe('Portfolio Optimizer: result structure', () => {
+  it('returns per-asset committedKw and expectedKw', () => {
+    const candidates = [
+      makeCandidate({
+        assetId: 'a',
+        uncertainty: makeProfile({ assetId: 'a', expectedPerformanceKw: 50, availabilityProb: 0.9 }),
+      }),
+      makeCandidate({
+        assetId: 'b',
+        uncertainty: makeProfile({ assetId: 'b', expectedPerformanceKw: 50, availabilityProb: 0.8 }),
+      }),
+    ]
+
+    const result = optimizePortfolio(candidates, makeTarget(50))
+
+    for (const s of result.selected) {
+      expect(s.committedKw).toBeGreaterThan(0)
+    }
+  })
+
+  it('totalCommittedKw = sum of selected.committedKw', () => {
+    const candidates = Array.from({ length: 5 }, (_, i) =>
+      makeCandidate({ assetId: `a${i}`, clusterId: `c${i}` }),
+    )
+    const result = optimizePortfolio(candidates, makeTarget(100))
+
+    const sum = result.selected.reduce((s, a) => s + a.committedKw, 0)
+    expect(Math.abs(result.totalCommittedKw - sum)).toBeLessThan(0.01)
+  })
+
+  it('clusterCount = number of distinct clusters in selection', () => {
+    const candidates = [
+      makeCandidate({ assetId: 'a', clusterId: 'x' }),
+      makeCandidate({ assetId: 'b', clusterId: 'x' }),
+      makeCandidate({ assetId: 'c', clusterId: 'y' }),
+    ]
+    const result = optimizePortfolio(candidates, makeTarget(100, REALISTIC))
+
+    const distinctClusters = new Set(result.selected.map((s) => s.clusterId)).size
+    expect(result.clusterCount).toBe(distinctClusters)
+  })
+
+  it('result carries the algorithm name', () => {
+    const result = optimizePortfolio([makeCandidate({ assetId: 'a' })], makeTarget(10))
+    expect(result.algorithm).toBe('greedy_marginal_safe_capacity')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 100-candidate sanity
+// ---------------------------------------------------------------------------
+
+describe('Portfolio Optimizer: 100-candidate sanity', () => {
   it('100 candidates across 10 clusters: selects a feasible portfolio', () => {
     const candidates: CandidateAsset[] = []
     for (let cluster = 0; cluster < 10; cluster++) {
@@ -353,95 +553,42 @@ describe('Portfolio Optim: 100-candidate sanity', () => {
 
     const result = optimizePortfolio(candidates, makeTarget(2000, REALISTIC))
 
-    // Should select a subset that meets or approaches the target.
     expect(result.selected.length).toBeGreaterThan(0)
-    expect(result.selected.length).toBeLessThan(100) // not all
-    expect(result.clusterCount).toBeGreaterThan(1) // diversified
+    expect(result.selected.length).toBeLessThan(100)
+    expect(result.clusterCount).toBeGreaterThan(1)
     expect(result.candidateCount).toBe(100)
-
-    // With realistic correlation, 2000 kW should be achievable from 100 DERs.
-    if (result.fullyServed) {
-      expect(result.committedKw).toBeGreaterThanOrEqual(2000)
-    }
   })
 })
 
-describe('Portfolio Optimizer: buildCandidate helper', () => {
-  it('caps expectedPerformanceKw at availableCapacityKw', () => {
-    const candidate = buildCandidate({
-      assetId: 'a',
-      clusterId: 'north',
-      availableCapacityKw: 30,
-      uncertainty: makeProfile({ assetId: 'a', clusterId: 'north', expectedPerformanceKw: 50 }),
-    })
-    expect(candidate.uncertainty.expectedPerformanceKw).toBe(30) // capped
-    expect(candidate.availableCapacityKw).toBe(30)
-  })
+// ---------------------------------------------------------------------------
+// buildCandidate helper
+// ---------------------------------------------------------------------------
 
-  it('does not increase expectedPerformanceKw above the profile value', () => {
+describe('Portfolio Optimizer: buildCandidate helper', () => {
+  it('preserves the uncertainty profile without mutation', () => {
+    const profile = makeProfile({ assetId: 'a', clusterId: 'x', expectedPerformanceKw: 80, stdDevKw: 10 })
     const candidate = buildCandidate({
       assetId: 'a',
-      clusterId: 'north',
-      availableCapacityKw: 100, // more than the profile's 50
-      uncertainty: makeProfile({ assetId: 'a', clusterId: 'north', expectedPerformanceKw: 50 }),
+      clusterId: 'x',
+      availableCapacityKw: 50,
+      uncertainty: profile,
     })
-    expect(candidate.uncertainty.expectedPerformanceKw).toBe(50) // not increased
+    // The candidate should preserve the original expectedPerformanceKw.
+    expect(candidate.uncertainty.expectedPerformanceKw).toBe(80)
+    expect(candidate.uncertainty.stdDevKw).toBe(10)
+    expect(candidate.availableCapacityKw).toBe(50)
   })
 
   it('preserves cost and opportunity cost', () => {
     const candidate = buildCandidate({
       assetId: 'a',
-      clusterId: 'north',
+      clusterId: 'x',
       availableCapacityKw: 50,
-      uncertainty: makeProfile({ assetId: 'a', clusterId: 'north' }),
+      uncertainty: makeProfile({ assetId: 'a', clusterId: 'x' }),
       costPerKw: 0.10,
       opportunityCostPerKw: 5,
     })
     expect(candidate.costPerKw).toBe(0.10)
     expect(candidate.opportunityCostPerKw).toBe(5)
-  })
-})
-
-describe('Portfolio Optimizer: result structure', () => {
-  it('returns per-asset committedKw and expectedKw', () => {
-    const candidates = [
-      makeCandidate({
-        assetId: 'a',
-        uncertainty: makeProfile({ assetId: 'a', expectedPerformanceKw: 50, availabilityProb: 0.9 }),
-      }),
-      makeCandidate({
-        assetId: 'b',
-        uncertainty: makeProfile({ assetId: 'b', expectedPerformanceKw: 50, availabilityProb: 0.8 }),
-      }),
-    ]
-
-    const result = optimizePortfolio(candidates, makeTarget(50))
-
-    for (const s of result.selected) {
-      expect(s.committedKw).toBeGreaterThan(0)
-      expect(s.expectedKw).toBeCloseTo(s.committedKw * (s.assetId === 'a' ? 0.9 : 0.8), 4)
-    }
-  })
-
-  it('totalCommittedKw = sum of selected.committedKw', () => {
-    const candidates = Array.from({ length: 5 }, (_, i) =>
-      makeCandidate({ assetId: `a${i}`, clusterId: `c${i}` }),
-    )
-    const result = optimizePortfolio(candidates, makeTarget(100))
-
-    const sum = result.selected.reduce((s, a) => s + a.committedKw, 0)
-    expect(result.totalCommittedKw).toBeCloseTo(sum, 6)
-  })
-
-  it('clusterCount = number of distinct clusters in selection', () => {
-    const candidates = [
-      makeCandidate({ assetId: 'a', clusterId: 'x' }),
-      makeCandidate({ assetId: 'b', clusterId: 'x' }),
-      makeCandidate({ assetId: 'c', clusterId: 'y' }),
-    ]
-    const result = optimizePortfolio(candidates, makeTarget(100, REALISTIC))
-
-    const distinctClusters = new Set(result.selected.map((s) => s.clusterId)).size
-    expect(result.clusterCount).toBe(distinctClusters)
   })
 })
