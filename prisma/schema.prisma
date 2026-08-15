@@ -980,7 +980,20 @@ model VppDispatch {
   requestedKwh    String   // decimal as string — total energy to deliver
   startTime       DateTime // when discharge should begin
   endTime         DateTime // when discharge should end
-  status          String   @default("created") // created | assigned | dispatching | completed | cancelled | failed
+  // Dispatch status lifecycle (VPP-2D-4 separated delivery from economic finality):
+  //   created → assigned → dispatching → delivery_complete → completed
+  //   dispatching → delivery_complete (all assignments terminal, some failed/reconciliation_required)
+  //   delivery_complete → reconciliation_required (if any assignment is reconciliation_required)
+  //   delivery_complete → completed (all assignments completed, portfolio evaluated)
+  //   reconciliation_required → completed (after all financial reconciliations succeed + portfolio evaluated)
+  //   delivery_complete → completed (all assignments completed or failed, portfolio evaluated)
+  //
+  // "delivery_complete" = all assignments are performance-terminal (completed|failed|reconciliation_required).
+  //   The portfolio commitment can be evaluated at this point.
+  // "reconciliation_required" = delivery complete, but one or more assignments
+  //   have unresolved financial recovery (reconciliation_required).
+  // "completed" = portfolio obligation finalized + all financial recovery done.
+  status          String   @default("created") // created | assigned | dispatching | delivery_complete | reconciliation_required | completed | cancelled | failed
   // Dispatch metadata
   reason          String?  // e.g. "grid_frequency_event", "price_peak", "manual"
   metadataJson    String   @default("{}")
@@ -1177,8 +1190,11 @@ model VppPortfolioCommitment {
 
   // Fulfillment assessment.
   fulfillmentPct  String?  // decimal as string — buyerDeliveredKw / committedKw * 100
-  // Status lifecycle: pending → (all terminal) → final: fulfilled | partial | failed
-  status          String   @default("pending") // pending | fulfilled | partial | failed
+  // Status lifecycle:
+  //   pending → evaluating → (final: fulfilled | partial | failed)
+  //   evaluating → pending (on failure, retryable)
+  //   final states are idempotent (re-evaluation is a no-op)
+  status          String   @default("pending") // pending | evaluating | fulfilled | partial | failed
   evaluatedAt     DateTime?
 
   // Reconciliation metadata.

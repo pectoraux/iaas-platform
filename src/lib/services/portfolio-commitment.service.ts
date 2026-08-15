@@ -287,8 +287,78 @@ export async function evaluatePortfolioCommitment(
     }
   }
 
-  // All assignments are terminal — compute the final aggregate.
-  const aggregate = aggregatePortfolioPerformance(assignments, commitment.fulfillmentBasis as FulfillmentBasis)
+  // CONCURRENCY-SAFE EVALUATION CLAIM (VPP-2D-4):
+  // Two assignments may reach terminal concurrently and both invoke
+  // evaluatePortfolioCommitment(). We use an atomic CAS claim:
+  //   pending → evaluating
+  // Only one evaluator may proceed. If the commitment is already in a
+  // final state (fulfilled|partial|failed), the evaluation is idempotent —
+  // we return the existing result without re-evaluating or emitting a
+  // duplicate audit.
+  const FINAL_STATES = new Set(['fulfilled', 'partial', 'failed'])
+
+  if (FINAL_STATES.has(commitment.status)) {
+    // Already evaluated — return the existing result (idempotent).
+    return {
+      commitmentId: commitment.id,
+      dispatchId,
+      status: commitment.status as CommitmentStatus,
+      committedKw: parseFloat(commitment.committedKw),
+      buyerDeliveredKw: commitment.deliveredKw ? parseFloat(commitment.deliveredKw) : 0,
+      buyerDeliveredKwh: commitment.buyerDeliveredKwh ? parseFloat(commitment.buyerDeliveredKwh) : 0,
+      operatorContributionKwh: commitment.operatorContributionKwh ? parseFloat(commitment.operatorContributionKwh) : 0,
+      rawSignedPortfolioPerformanceKwh: commitment.rawSignedPortfolioPerformanceKwh ? parseFloat(commitment.rawSignedPortfolioPerformanceKwh) : 0,
+      totalActualKwh: commitment.totalActualKwh ? parseFloat(commitment.totalActualKwh) : 0,
+      totalBaselineKwh: commitment.totalBaselineKwh ? parseFloat(commitment.totalBaselineKwh) : 0,
+      fulfillmentPct: commitment.fulfillmentPct ? parseFloat(commitment.fulfillmentPct) : 0,
+      toleranceThresholdPct: parseFloat(commitment.toleranceThresholdPct),
+      measurementMethod: commitment.measurementMethod as MeasurementMethod,
+      fulfillmentBasis: commitment.fulfillmentBasis as FulfillmentBasis,
+      assignmentCount: assignments.length,
+      completedAssignments: assignments.filter((a) => a.status === 'completed').length,
+      failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
+      perAsset: [],
+    }
+  }
+
+  // Atomic claim: pending → evaluating. If another evaluator already
+  // claimed it, this returns count=0 and we skip (they'll produce the
+  // result). On failure, we revert to 'pending' so the next caller can retry.
+  const claimed = await db.vppPortfolioCommitment.updateMany({
+    where: { id: commitment.id, status: 'pending' },
+    data: { status: 'evaluating' },
+  })
+
+  if (claimed.count === 0) {
+    // Another evaluator is processing (or already done). Return the
+    // current state — the caller can retry to get the final result.
+    return {
+      commitmentId: commitment.id,
+      dispatchId,
+      status: commitment.status as CommitmentStatus,
+      committedKw: parseFloat(commitment.committedKw),
+      buyerDeliveredKw: 0,
+      buyerDeliveredKwh: 0,
+      operatorContributionKwh: 0,
+      rawSignedPortfolioPerformanceKwh: 0,
+      totalActualKwh: 0,
+      totalBaselineKwh: 0,
+      fulfillmentPct: 0,
+      toleranceThresholdPct: parseFloat(commitment.toleranceThresholdPct),
+      measurementMethod: commitment.measurementMethod as MeasurementMethod,
+      fulfillmentBasis: commitment.fulfillmentBasis as FulfillmentBasis,
+      assignmentCount: assignments.length,
+      completedAssignments: assignments.filter((a) => a.status === 'completed').length,
+      failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
+      perAsset: [],
+    }
+  }
+
+  // We hold the evaluating claim. Compute the final aggregate.
+  // If any step fails, revert evaluating → pending so the next caller
+  // can retry, then re-throw the error.
+  try {
+    const aggregate = aggregatePortfolioPerformance(assignments, commitment.fulfillmentBasis as FulfillmentBasis)
 
   // Convert to kW based on measurementMethod.
   const durationHours = Math.max(
@@ -414,6 +484,15 @@ export async function evaluatePortfolioCommitment(
     completedAssignments: assignments.filter((a) => a.status === 'completed').length,
     failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
     perAsset: aggregate.perAsset,
+  }
+  } catch (evalErr) {
+    // Evaluation failed — revert evaluating → pending so the next caller
+    // can retry. The error PROPAGATES (it is not swallowed).
+    await db.vppPortfolioCommitment.updateMany({
+      where: { id: commitment.id, status: 'evaluating' },
+      data: { status: 'pending' },
+    }).catch(() => {}) // best-effort revert; the error itself is what matters
+    throw evalErr
   }
 }
 

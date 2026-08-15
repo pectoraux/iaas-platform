@@ -956,26 +956,57 @@ async function maybeFinalizeDispatch(
     return
   }
 
-  // All assignments are terminal — finalize the dispatch.
-  await db.vppDispatch.update({
-    where: { id: dispatchId },
-    data: { status: 'completed' },
+  // All assignments are performance-terminal.
+  // Check if any assignment is reconciliation_required (unresolved financial).
+  const reconciliationCount = await db.vppDispatchAssignment.count({
+    where: { dispatchId, status: 'reconciliation_required' },
+  })
+
+  // Mark the dispatch as delivery_complete (NOT completed yet — the portfolio
+  // evaluation must succeed first, and financial reconciliation must finish
+  // if any assignment is reconciliation_required).
+  const dispatchStatus = reconciliationCount > 0 ? 'reconciliation_required' : 'delivery_complete'
+
+  // Use updateMany for atomic CAS: only update if not already in a
+  // final/delivery_complete state. This prevents redundant updates when
+  // multiple assignments complete concurrently.
+  await db.vppDispatch.updateMany({
+    where: { id: dispatchId, status: { notIn: ['delivery_complete', 'reconciliation_required', 'completed'] } },
+    data: { status: dispatchStatus },
   })
 
   // VPP-2D-4: evaluate the portfolio commitment now that all assignments
-  // are terminal. This is the automatic lifecycle integration — no manual
-  // caller is required. The commitment was created atomically with the
-  // reservations; now it is evaluated when the dispatch completes.
+  // are terminal. The commitment has its own concurrency-safe claim
+  // (pending → evaluating) so concurrent finalization attempts are safe.
   //
-  // If no commitment exists (e.g., dispatch created before VPP-2D-4), this
-  // is a no-op (the function throws NotFoundError which we catch).
+  // ERROR HANDLING (corrected): Only NotFoundError (no commitment exists,
+  // e.g., dispatch created before VPP-2D-4) is silently ignored. All other
+  // errors (DB failure, serialization conflict, invalid data, unsupported
+  // measurement) PROPAGATE to the caller. The dispatch stays in
+  // delivery_complete/reconciliation_required until evaluation succeeds.
   try {
     const { evaluatePortfolioCommitment } = await import('./portfolio-commitment.service')
     await evaluatePortfolioCommitment(tenantId, dispatchId, actorId)
-  } catch {
-    // No portfolio commitment for this dispatch — skip evaluation.
-    // This is expected for dispatches created before VPP-2D-4.
+  } catch (err) {
+    // Only ignore NotFoundError — it means this dispatch predates VPP-2D-4
+    // and has no portfolio commitment. Everything else propagates.
+    if (err instanceof NotFoundError) {
+      return // Legacy dispatch — no commitment to evaluate.
+    }
+    throw err
   }
+
+  // Portfolio evaluation succeeded. If there are no reconciliation_required
+  // assignments, the dispatch is fully completed.
+  if (reconciliationCount === 0) {
+    await db.vppDispatch.updateMany({
+      where: { id: dispatchId, status: 'delivery_complete' },
+      data: { status: 'completed' },
+    })
+  }
+  // If reconciliationCount > 0, the dispatch stays 'reconciliation_required'
+  // until all financial recoveries complete (via reconcileAssignment, which
+  // calls maybeFinalizeDispatch again after each successful reconciliation).
 }
 
 // ---------------------------------------------------------------------------
