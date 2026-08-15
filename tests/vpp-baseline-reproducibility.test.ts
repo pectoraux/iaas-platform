@@ -2,9 +2,15 @@
  * VPP-2C: Historical reproducibility test.
  *
  * Proves that a dispatch created under NetworkVersion V12 uses V12's
- * baseline policy even after V13 is published and becomes current.
+ * baseline policy AND V12's telemetry verification policy even after V13
+ * is published and becomes current.
  *
- * Also proves V13 dispatches use V13's policy.
+ * Also proves V13 dispatches use V13's policy for both.
+ *
+ * This is the "immutable policy boundary" invariant:
+ *   every event AND every economic calculation associated with a dispatch
+ *   must resolve against the SAME immutable NetworkVersion
+ *   (dispatch.program.networkVersionId).
  *
  * Run: bun test tests/vpp-baseline-reproducibility.test.ts --timeout 120000
  */
@@ -95,7 +101,7 @@ beforeAll(async () => {
 })
 
 describe('VPP-2C: Historical reproducibility', () => {
-  it('V12 dispatch uses V12 baseline policy even after V13 is current', async () => {
+  it('V12 dispatch uses V12 baseline policy AND V12 telemetry verification, even after V13 is current', async () => {
     const v12Policy = await getBaselinePolicy(v12Id)
     const v13Policy = await getBaselinePolicy(v13Id)
 
@@ -125,18 +131,42 @@ describe('VPP-2C: Historical reproducibility', () => {
       startTime: start.toISOString(), endTime: end.toISOString(),
     })
 
-    // Execute the V12 dispatch.
+    // Execute the V12 dispatch (V13 is now current — this is the historical case).
     const result = await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret)
+    expect(result.duplicate).toBe(false)
+    const eventId = result.event_id!
 
-    // The baseline must use V12's strategy, NOT V13's.
+    // -------------------------------------------------------------------------
+    // INVARIANT 1: telemetry Event.networkVersionId == V12.
+    // This is the key assertion that was previously missing. Without it, the
+    // test would pass while the system simultaneously did:
+    //   baseline    → V12 policy ✅
+    //   verification → V13 policy ❌
+    // -------------------------------------------------------------------------
+    const event = await db.event.findUnique({ where: { id: eventId } })
+    expect(event).toBeTruthy()
+    expect(event!.networkVersionId).toBe(v12Id)
+    expect(event!.networkVersionId).not.toBe(v13Id)
+
+    // -------------------------------------------------------------------------
+    // INVARIANT 2: baseline uses V12's strategy, NOT V13's.
+    // -------------------------------------------------------------------------
     const baseline = await db.vppBaseline.findFirst({ where: { assignmentId: assignments[0].id } })
     expect(baseline).toBeTruthy()
     const metadata = JSON.parse(baseline!.metadataJson)
     expect(metadata.strategyName).toBe(v12Policy!.selectedStrategy)
     expect(metadata.strategyName).not.toBe(v13Policy!.selectedStrategy)
+
+    // -------------------------------------------------------------------------
+    // INVARIANT 3: no version split — the baseline's recorded networkVersionId
+    // MUST equal the event's networkVersionId. If they diverge, baseline and
+    // verification resolved against different NetworkVersions.
+    // -------------------------------------------------------------------------
+    expect(metadata.networkVersionId).toBe(v12Id)
+    expect(metadata.networkVersionId).toBe(event!.networkVersionId)
   })
 
-  it('V13 dispatch uses V13 baseline policy', async () => {
+  it('V13 dispatch uses V13 baseline policy AND V13 telemetry verification', async () => {
     const v13Policy = await getBaselinePolicy(v13Id)
 
     // Create a program bound to V13.
@@ -163,10 +193,22 @@ describe('VPP-2C: Historical reproducibility', () => {
     })
 
     const result = await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret)
+    expect(result.duplicate).toBe(false)
+    const eventId = result.event_id!
 
+    // INVARIANT 1: telemetry Event.networkVersionId == V13.
+    const event = await db.event.findUnique({ where: { id: eventId } })
+    expect(event).toBeTruthy()
+    expect(event!.networkVersionId).toBe(v13Id)
+
+    // INVARIANT 2: baseline uses V13's strategy.
     const baseline = await db.vppBaseline.findFirst({ where: { assignmentId: assignments[0].id } })
     expect(baseline).toBeTruthy()
     const metadata = JSON.parse(baseline!.metadataJson)
     expect(metadata.strategyName).toBe(v13Policy!.selectedStrategy)
+
+    // INVARIANT 3: no version split.
+    expect(metadata.networkVersionId).toBe(v13Id)
+    expect(metadata.networkVersionId).toBe(event!.networkVersionId)
   })
 })

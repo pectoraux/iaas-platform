@@ -66,9 +66,56 @@ export async function createBuyerProgram(tenantId: string, input: CreateBuyerPro
   const rule = await db.rewardRule.findFirst({ where: { id: input.rewardRuleId, tenantId } })
   if (!rule) throw new NotFoundError('reward_rule', input.rewardRuleId)
 
-  // Bind to the concrete NetworkVersion (defaults to current if not specified).
-  const networkVersionId = input.networkVersionId ?? network.currentVersionId
-  if (!networkVersionId) throw new ValidationError('Network has no published version')
+  // =========================================================================
+  // Authorization/integrity boundary (VPP-2C final correctness fix).
+  // =========================================================================
+  // networkVersionId now controls:
+  //   - telemetry verification policy
+  //   - baseline policy
+  //   - reward configuration
+  //   - contribution policy
+  //
+  // Therefore the supplied version MUST be validated atomically against the
+  // supplied network + tenant, and MUST be published (no draft-program state
+  // exists). This prevents:
+  //   - cross-network version (Network A program bound to Network B version)
+  //   - cross-tenant version (tenant X program bound to tenant Y version)
+  //   - unpublished version for an active program (policy can still mutate)
+  //
+  // The default (no explicit networkVersionId) resolves to network.currentVersionId,
+  // which is always published (set by publishNetworkVersion).
+  // =========================================================================
+  let networkVersionId: string
+  if (input.networkVersionId) {
+    // Explicit version — validate it belongs to this network + tenant and is published.
+    // The compound `network: { id, tenantId }` filter enforces both the
+    // cross-network and cross-tenant constraints in a single round-trip.
+    const version = await db.networkVersion.findFirst({
+      where: {
+        id: input.networkVersionId,
+        network: { id: input.networkId, tenantId },
+      },
+    })
+    if (!version) {
+      throw new ValidationError(
+        `Network version ${input.networkVersionId} does not belong to network ${input.networkId} in this tenant`,
+      )
+    }
+    if (!version.publishedAt) {
+      throw new ValidationError(
+        `Network version ${input.networkVersionId} (v${version.version}) is not published. ` +
+          `A buyer program can only bind to a published, immutable NetworkVersion.`,
+      )
+    }
+    networkVersionId = version.id
+  } else {
+    // Default to the network's current version — which is always published
+    // (publishNetworkVersion sets currentVersionId + publishedAt atomically).
+    if (!network.currentVersionId) {
+      throw new ValidationError('Network has no published version')
+    }
+    networkVersionId = network.currentVersionId
+  }
 
   const program = await db.vppBuyerProgram.create({
     data: {
@@ -464,11 +511,36 @@ export async function executeDispatchAssignment(
     const signingKey = deriveSigningKey(provisioningSecret)
     const signature = signMessage(message, signingKey)
 
-    const network = assignment.dispatch.program.network
-    const networkVersion = await db.networkVersion.findFirst({
-      where: { networkId: network.id, publishedAt: { not: null } },
-      orderBy: { version: 'desc' },
-    })
+    // =========================================================================
+    // IMMUTABLE POLICY BOUNDARY (VPP-2C final correctness fix).
+    // =========================================================================
+    // Every event AND every economic calculation associated with this dispatch
+    // MUST resolve against the SAME immutable NetworkVersion — the one the
+    // buyer program was bound to at creation time
+    // (assignment.dispatch.program.networkVersionId).
+    //
+    // Previously, telemetry ingestion resolved `latest published version for
+    // network.id` at execution time. That produced a version split:
+    //   baseline policy = V12 (program.networkVersionId)
+    //   verification    = V13 (network.currentVersionId)
+    // which is exactly the historical-reproducibility violation we eliminated
+    // for baselines. The same rule now applies to verification, reward rules,
+    // and contribution policy: all reference the program's bound version.
+    //
+    // The programVersion is already eager-loaded on the assignment query
+    // (dispatch.program.networkVersion), so no extra DB round-trip is needed.
+    // =========================================================================
+    const programVersion = assignment.dispatch.program.networkVersion
+    if (!programVersion) {
+      throw new Error('BASELINE_UNAVAILABLE: program has no bound network version')
+    }
+    if (!programVersion.publishedAt) {
+      // A program should never be bound to an unpublished version
+      // (createBuyerProgram enforces this), but defend in depth.
+      throw new Error(
+        `BASELINE_UNAVAILABLE: program's network version ${programVersion.id} (v${programVersion.version}) is not published`,
+      )
+    }
 
     const ingestResult = await ingestEvent(tenantId, {
       device_id: device.id,
@@ -478,7 +550,8 @@ export async function executeDispatchAssignment(
       sequence,
       payload: dischargeResult.telemetry.payload,
       signature,
-      network_version_id: networkVersion?.id,
+      // SAME immutable version used for baseline/reward/contribution below.
+      network_version_id: programVersion.id,
       capability_type: assignment.capabilityType,
     })
 
@@ -536,17 +609,14 @@ export async function executeDispatchAssignment(
     }
 
     // Resolve the baseline strategy from the PERSISTED NetworkVersion policy.
-    // CRITICAL: uses dispatch.program.networkVersionId (the version the program
-    // was created under), NOT network.currentVersionId. This ensures historical
-    // reproducibility: a dispatch created under V12 always uses V12's policy,
-    // even after V13 is published.
-    const programVersionId = assignment.dispatch.program.networkVersionId
-    const versionForPolicy = await db.networkVersion.findUnique({
-      where: { id: programVersionId },
-    })
-    if (!versionForPolicy) {
-      throw new Error('BASELINE_UNAVAILABLE: network version not found')
-    }
+    // CRITICAL: uses the SAME programVersion object we resolved above for
+    // telemetry verification. This guarantees baseline policy, verification
+    // policy, reward rules, and contribution policy all reference the exact
+    // same immutable NetworkVersion — no version split is possible.
+    //
+    // A dispatch created under V12 always uses V12's policy, even after V13
+    // is published and becomes current.
+    const versionForPolicy = programVersion
 
     let strategyName: string
     if (versionForPolicy.baselinePolicyJson) {
@@ -599,6 +669,11 @@ export async function executeDispatchAssignment(
           attestationId: attestation.id,
           baselineMethod: baselinePrediction.method,
           strategyName,
+          // Audit trail: the EXACT NetworkVersion this baseline was computed
+          // against. Must equal event.networkVersionId — if they ever diverge
+          // it indicates a version-split bug.
+          networkVersionId: programVersion.id,
+          networkVersionNumber: programVersion.version,
           predictedCounterfactualKwh: baselinePrediction.predictedCounterfactualKwh,
           rawPerformanceKwh: rawPerformanceKwh.toString(), // signed value for analytics
           verifiedPerformanceKwh: verifiedPerformanceKwh.toString(), // non-negative payable
