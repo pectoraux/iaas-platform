@@ -1587,3 +1587,32 @@ Stage Summary:
   4. Pricing immutability → historical settlements use original pricing (charge reproducible)
 - The VPP commercial loop is complete and verified: buyer obligation → portfolio reservation → dispatch → DER economics → portfolio verification → buyer fulfillment → buyer settlement → ledger posting → completed.
 - NEXT: Protocol Runtime extraction + external buyer API. VPP has proven the runtime primitives.
+
+---
+Task ID: Protocol-Runtime-Phase-0-1
+Agent: orchestrator
+Task: Begin Protocol Runtime extraction — Phase 0 (kernel boundary enforcement) + Phase 1 (universal concurrency primitive).
+
+Work Log:
+1. ARCHITECTURE CONTRACT TESTS (Phase 0): Created tests/architecture-contract.test.ts with 5 tests:
+   - No generic service imports any VPP module (checks 14 generic services against 6 VPP import patterns)
+   - Kernel concurrency module does not import VPP
+   - Generic kernel directory exists and is separate from services
+   - VPP service imports generic services (proves dependency direction: kernel ← VPP)
+   - Generic-resource-network template exists (proves platform is not inherently energy-specific)
+   These tests enforce the structural boundary. If any generic service ever imports VPP, the test fails.
+
+2. UNIVERSAL CONCURRENCY PRIMITIVE (Phase 1): Created src/lib/kernel/concurrency/lease.service.ts — the platform-level concurrency primitive extracted from the VPP-2D-4 + VPP-3B fencing pattern:
+   - claimResource(): atomically claims a resource for processing (pending→processing with claimId + lease, or processing(expired)→processing with new claimId + new lease)
+   - fencedCommit(): atomically commits a final state transition, fenced on claimId (stale workers get affected=0)
+   - fencedRevert(): atomically reverts to a retryable state, fenced on claimId
+   - fencedTransition(): generic fenced state transition for any worker-owned write
+   - isLeaseExpired(): utility for checking lease expiry
+   This replaces the ad-hoc lease/fencing implementations that were duplicated across portfolio evaluation, event processing, and buyer settlement. All worker-owned state transitions should use this primitive.
+
+3. VERIFICATION: `bun run lint` clean. `tsc --no-Emit` zero new errors (only pre-existing bun:test). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- Phase 0 (kernel boundary) is complete: architecture contract tests enforce that generic services never import VPP. The dependency direction is structurally verified: kernel ← VPP, never VPP → kernel.
+- Phase 1 (universal concurrency) is complete: the lease/fencing primitive is extracted as a kernel service. It provides claimResource(), fencedCommit(), fencedRevert(), and fencedTransition() — the same pattern used in VPP-2D-4/3B, now available as a platform primitive for all worker-owned state transitions.
+- NEXT: Phase 2 (generic execution model), Phase 3 (generic adapter contract), Phase 4 (runtime-selectable NetworkVersion).
