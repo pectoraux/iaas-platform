@@ -59,7 +59,18 @@ import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 
 export type FulfillmentBasis = 'per_asset_clipped' | 'aggregate_counterfactual'
 export type MeasurementMethod = 'average_power' | 'energy' | 'interval_power'
-export type CommitmentStatus = 'pending' | 'fulfilled' | 'partial' | 'failed'
+export type CommitmentStatus = 'pending' | 'evaluating' | 'fulfilled' | 'partial' | 'failed'
+
+/**
+ * Runtime-validated conversion from string (Prisma) to CommitmentStatus.
+ * Throws if the value is not a valid status (defensive — should never happen
+ * unless the DB is corrupted).
+ */
+function asCommitmentStatus(s: string): CommitmentStatus {
+  const valid: CommitmentStatus[] = ['pending', 'evaluating', 'fulfilled', 'partial', 'failed']
+  if (valid.includes(s as CommitmentStatus)) return s as CommitmentStatus
+  throw new Error(`Invalid commitment status: ${s}`)
+}
 
 export interface PortfolioCommitmentResult {
   commitmentId: string
@@ -319,7 +330,7 @@ export async function evaluatePortfolioCommitment(
     return {
       commitmentId: commitment.id,
       dispatchId,
-      status: commitment.status as CommitmentStatus,
+      status: asCommitmentStatus(commitment.status),
       committedKw: parseFloat(commitment.committedKw),
       buyerDeliveredKw: commitment.deliveredKw ? parseFloat(commitment.deliveredKw) : 0,
       buyerDeliveredKwh: commitment.buyerDeliveredKwh ? parseFloat(commitment.buyerDeliveredKwh) : 0,
@@ -353,7 +364,7 @@ export async function evaluatePortfolioCommitment(
     return {
       commitmentId: commitment.id,
       dispatchId,
-      status: commitment.status as CommitmentStatus,
+      status: asCommitmentStatus(commitment.status),
       committedKw: parseFloat(commitment.committedKw),
       buyerDeliveredKw: 0,
       buyerDeliveredKwh: 0,
@@ -506,12 +517,38 @@ export async function evaluatePortfolioCommitment(
     evaluationOutcome: 'final',
   }
   } catch (evalErr) {
-    // Evaluation failed — revert evaluating → pending so the next caller
-    // can retry. The error PROPAGATES (it is not swallowed).
+    // Evaluation failed — revert evaluating → pending so a retry can occur.
+    // The error PROPAGATES (it is not swallowed).
     await db.vppPortfolioCommitment.updateMany({
       where: { id: commitment.id, status: 'evaluating' },
       data: { status: 'pending' },
     }).catch(() => {}) // best-effort revert; the error itself is what matters
+
+    // LIVENESS FIX (VPP-2D-4): emit an outbox event so a worker can retry
+    // the evaluation. Without this, if the winning evaluator fails and no
+    // other assignment transition occurs, the commitment stays stuck in
+    // 'pending' with no automatic retry. The outbox event ensures the
+    // evaluation is retried by the worker, independent of assignment
+    // lifecycle events.
+    try {
+      const { emit, DomainEventTypes } = await import('@/lib/domain/events')
+      await emit({
+        event_type: DomainEventTypes.PortfolioEvaluationRetryRequested,
+        aggregate_id: commitment.id,
+        tenant_id: tenantId,
+        version: 1,
+        payload: {
+          dispatchId,
+          commitmentId: commitment.id,
+          reason: evalErr instanceof Error ? evalErr.message : 'Evaluation failed',
+        },
+      })
+    } catch {
+      // If the outbox emit fails, the error from the evaluation itself
+      // still propagates. The caller can retry manually. The outbox is
+      // a best-effort liveness mechanism, not a safety requirement.
+    }
+
     throw evalErr
   }
 }
@@ -783,7 +820,7 @@ function toResult(c: {
     toleranceThresholdPct: parseFloat(c.toleranceThresholdPct),
     measurementMethod: c.measurementMethod as MeasurementMethod,
     fulfillmentBasis: c.fulfillmentBasis as FulfillmentBasis,
-    status: c.status as CommitmentStatus,
+    status: asCommitmentStatus(c.status),
     assignmentCount: c.assignmentCount,
   }
 }

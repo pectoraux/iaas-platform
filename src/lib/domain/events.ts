@@ -23,6 +23,7 @@ export const DomainEventTypes = {
   LedgerEntryPosted: 'LedgerEntryPosted',
   SettlementRequested: 'SettlementRequested',
   SettlementCompleted: 'SettlementCompleted',
+  PortfolioEvaluationRetryRequested: 'PortfolioEvaluationRetryRequested',
 } as const
 
 export type DomainEventType = (typeof DomainEventTypes)[keyof typeof DomainEventTypes]
