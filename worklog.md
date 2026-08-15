@@ -1520,3 +1520,24 @@ Work Log:
 Stage Summary:
 - VPP-3 is now economically integrated: buyer settlement is auto-created when the portfolio commitment reaches final state, processed with claim/lease/fencing, uses Decimal arithmetic throughout, respects the commitment's measurement policy, and is recoverable via outbox retry + ledger idempotency check.
 - The architectural rule is preserved: buyer charges are direct ledger postings, not a duplicate of the operator pipeline.
+
+---
+Task ID: VPP-3B-buyer-settlement-hardening
+Agent: orchestrator
+Task: Fix all 7 VPP-3B issues — error propagation, state separation, atomic retry, event-driven queue, string boundary, crash recovery, pricing policy snapshot.
+
+Work Log:
+1. ERROR PROPAGATION: maybeFinalizeDispatch no longer swallows createBuyerSettlement errors. Only NotFoundError (legacy dispatch with no commitment) is silently handled — everything else propagates. Buyer settlement creation is an explicit lifecycle step.
+2. STATE SEPARATION: Added 'buyer_settlement_pending' dispatch state. Lifecycle: delivery_complete → buyer_settlement_pending → completed. The dispatch only reaches 'completed' after buyer settlement is charged. This separates delivery finality from buyer financial settlement finality.
+3. ATOMIC RETRY: The failure path (charging→pending + BuyerSettlementRetryRequested emit) is now in ONE db.$transaction with fencing on claimId. If the transaction commits, both the revert and the event exist. If it rolls back, the settlement stays in 'charging' — recoverable via the repair sweep.
+4. EVENT-DRIVEN QUEUE: processPendingBuyerSettlements serves as the repair sweep (finds pending/expired-charging settlements). The primary retry path is the BuyerSettlementRetryRequested outbox event. processBuyerSettlement advances the dispatch to 'completed' after successful charge.
+5. STRING BOUNDARY: BuyerSettlementResult.charge fields are all string (decimal-as-string). No parseFloat at the service boundary. toResult returns raw DB strings.
+6. CRASH RECOVERY: processBuyerSettlement checks for existing ledger posting by idempotency key (buyer-settlement-{settlementId}) before posting. If found, marks as charged without re-posting. Fencing token prevents stale writes.
+7. PRICING POLICY SNAPSHOT: The settlement record stores pricePerKwh, measurementMethod, toleranceThresholdPct as a snapshot at creation time. These never change — even if VppBuyerProgram.pricePerKwh is later updated, historical settlements use the original pricing. Schema comment explicitly documents this. Tested: different pricePerKwh values produce different charges (historical pricing preserved).
+8. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (15 before = 15 after — all pre-existing). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- VPP-3B delivers the hardened buyer settlement: error propagation, state separation (delivery ≠ buyer settlement ≠ completed), atomic retry, event-driven queue, string boundary, crash recovery, and pricing policy snapshot.
+- The complete lifecycle is: delivery_complete → buyer_settlement_pending → completed (after buyer settlement charged).
+- Buyer charges use Prisma.Decimal throughout, returned as strings at the API boundary.
+- Historical settlements use the pricing policy snapshot — the charge formula cannot silently change for historical dispatches.
