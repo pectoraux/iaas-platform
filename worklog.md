@@ -665,3 +665,22 @@ Stage Summary:
 - No negative performance payments.
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit 7c74e65)
+
+---
+Task ID: VPP-2C-persisted-policy
+Agent: orchestrator
+Task: Fix persisted baseline policy on NetworkVersion + durable evaluation records.
+
+Work Log:
+1. PERSISTED POLICY: NetworkVersion.baselinePolicyJson (immutable after publish). VPP resolves strategy from persisted policy. No hardcoded strategyName.
+2. DURABLE EVALUATION: BaselineEvaluation model with evaluationId, simulatorVersion, engineVersion, scenarioDatasetHash, numScenarios, criteriaJson, metricsJson, selectedStrategy, status. runAndPersistBaselineEvaluation() creates record + sets policy.
+3. IMMUTABILITY: Policy only set on unpublished versions. After publish, policy cannot change. Test proves immutability.
+4. NO ACCEPTABLE: status='no_acceptable_strategy' → VPP throws BASELINE_UNAVAILABLE → no settlement.
+5. INTEGRATION TEST (4 pass): policy persisted with eval record, dispatch resolves persisted strategy, immutable after publish, no-acceptable prevents settlement.
+
+Stage Summary:
+- Baseline policy is genuinely persisted on NetworkVersion (immutable, versioned).
+- Evaluation records are durable and reproducible (scenario hash + versions).
+- Historical dispatches reference the exact version's policy.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit 74e3de1)
