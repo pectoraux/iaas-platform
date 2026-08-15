@@ -451,14 +451,23 @@ export { ensureOperatorAccount, computeBalance }
 export async function processPortfolioEvaluationRetries(
   tenantId?: string,
 ): Promise<{ processed: number; completed: number; failed: number }> {
-  // Find unprocessed PortfolioEvaluationRetryRequested events.
+  const EVENT_LEASE_MS = 60000 // 60 seconds — same as commitment evaluation lease
+  const now = new Date()
+
+  // Find claimable events: pending OR (processing with expired lease).
   const events = await db.domainEvent.findMany({
     where: {
       eventType: 'PortfolioEvaluationRetryRequested',
-      processed: false,
       ...(tenantId ? { tenantId } : {}),
+      OR: [
+        { processingStatus: 'pending' },
+        {
+          processingStatus: 'processing',
+          leaseExpiresAt: { lt: now },
+        },
+      ],
     },
-    select: { id: true, tenantId: true, payloadJson: true },
+    select: { id: true, tenantId: true, payloadJson: true, processingStatus: true },
     take: BATCH_SIZE,
   })
 
@@ -466,11 +475,23 @@ export async function processPortfolioEvaluationRetries(
   let failed = 0
 
   for (const event of events) {
-    // Claim this specific event (atomic CAS: processed=false → true).
-    // This prevents two workers from processing the same event.
+    const leaseExpiry = new Date(Date.now() + EVENT_LEASE_MS)
+
+    // Claim this specific event (atomic CAS: pending→processing OR
+    // processing(expired)→processing(new lease)).
     const claimed = await db.domainEvent.updateMany({
-      where: { id: event.id, processed: false },
-      data: { processed: true },
+      where: {
+        id: event.id,
+        OR: [
+          { processingStatus: 'pending' },
+          { processingStatus: 'processing', leaseExpiresAt: { lt: now } },
+        ],
+      },
+      data: {
+        processingStatus: 'processing',
+        claimedAt: now,
+        leaseExpiresAt: leaseExpiry,
+      },
     })
 
     if (claimed.count === 0) {
@@ -479,14 +500,26 @@ export async function processPortfolioEvaluationRetries(
     }
 
     // Parse the event payload to get the commitment + dispatch IDs.
-    const payload = JSON.parse(event.payloadJson) as {
-      commitmentId?: string
-      dispatchId?: string
+    let payload: { commitmentId?: string; dispatchId?: string }
+    try {
+      payload = JSON.parse(event.payloadJson) as { commitmentId?: string; dispatchId?: string }
+    } catch {
+      // Malformed JSON — mark as dead_letter (not silently processed).
+      await db.domainEvent.update({
+        where: { id: event.id },
+        data: { processingStatus: 'dead_letter', processed: true },
+      }).catch(() => {})
+      failed++
+      continue
     }
 
     if (!payload.dispatchId) {
-      // Malformed event — can't retry without a dispatchId. Leave it
-      // processed (it's unprocessable) and log.
+      // Malformed event — can't retry without a dispatchId.
+      // Mark as dead_letter (not silently processed).
+      await db.domainEvent.update({
+        where: { id: event.id },
+        data: { processingStatus: 'dead_letter', processed: true },
+      }).catch(() => {})
       failed++
       continue
     }
@@ -496,18 +529,30 @@ export async function processPortfolioEvaluationRetries(
       const result = await evaluatePortfolioCommitment(event.tenantId, payload.dispatchId)
 
       if (result.evaluationOutcome === 'final' || result.evaluationOutcome === 'already_final') {
+        // Success — mark the event as processed.
+        await db.domainEvent.update({
+          where: { id: event.id },
+          data: { processingStatus: 'processed', processed: true },
+        }).catch(() => {}) // best-effort — the commitment is final regardless
         completed++
       } else {
-        // Still pending or evaluating — the event is consumed (processed=true)
-        // but the commitment isn't final yet. The fallback sweep
-        // (recoverStuckPortfolioEvaluations) will handle it.
+        // Still pending or evaluating — the event is consumed but the
+        // commitment isn't final yet. The fallback sweep will handle it.
+        await db.domainEvent.update({
+          where: { id: event.id },
+          data: { processingStatus: 'processed', processed: true },
+        }).catch(() => {})
         failed++
       }
     } catch {
       // Evaluation failed again. evaluatePortfolioCommitment's catch block
       // has already emitted a NEW retry event (atomically coupled with the
-      // pending revert). Mark this event as processed (it's been handled —
+      // pending revert). Mark THIS event as processed (it's been handled —
       // the new event will drive the next retry).
+      await db.domainEvent.update({
+        where: { id: event.id },
+        data: { processingStatus: 'processed', processed: true },
+      }).catch(() => {})
       failed++
     }
   }
@@ -517,13 +562,17 @@ export async function processPortfolioEvaluationRetries(
 
 /**
  * Fallback safety-net sweep: find commitments stuck in 'pending' or
- * 'evaluating' with all assignments terminal, and retry evaluation.
+ * 'evaluating' (with expired lease) with all assignments terminal,
+ * and retry evaluation.
+ *
+ * LEASE-AWARE: Only reclaims 'evaluating' commitments whose lease has
+ * expired. Does NOT reclaim active evaluations.
  *
  * This is SEPARATE from processPortfolioEvaluationRetries (which consumes
  * outbox events). This sweep handles edge cases:
  *   - The original evaluator crashed before emitting a retry event.
  *   - The outbox event was lost (DB corruption, operational error).
- *   - The commitment is stuck in 'evaluating' (crashed evaluator, no lease).
+ *   - The commitment is stuck in 'evaluating' (crashed evaluator, expired lease).
  *
  * This should be called periodically (e.g., every few minutes) as a
  * repair mechanism, not as the primary retry path.
@@ -531,11 +580,13 @@ export async function processPortfolioEvaluationRetries(
 export async function recoverStuckPortfolioEvaluations(
   tenantId?: string,
 ): Promise<{ recovered: number; completed: number; failed: number }> {
-  // Find commitments in 'pending' or 'evaluating' whose dispatches have
-  // all assignments terminal. These need evaluation.
+  const now = new Date()
+
+  // Find commitments that need evaluation:
+  //   - status='pending' with all-terminal assignments (never evaluated)
+  //   - status='evaluating' with expired lease (crashed evaluator)
   const stuckCommitments = await db.vppPortfolioCommitment.findMany({
     where: {
-      status: { in: ['pending', 'evaluating'] },
       ...(tenantId ? { tenantId } : {}),
       dispatch: {
         assignments: {
@@ -544,6 +595,13 @@ export async function recoverStuckPortfolioEvaluations(
           },
         },
       },
+      OR: [
+        { status: 'pending' },
+        {
+          status: 'evaluating',
+          evaluationLeaseExpiresAt: { lt: now },
+        },
+      ],
     },
     select: { id: true, dispatchId: true, tenantId: true, status: true },
     take: BATCH_SIZE,
@@ -552,14 +610,28 @@ export async function recoverStuckPortfolioEvaluations(
   let completed = 0
   let failed = 0
 
-  for (const { dispatchId, tenantId: ctTenantId, status } of stuckCommitments) {
-    // If the commitment is stuck in 'evaluating' (crashed evaluator),
-    // revert to 'pending' first so the evaluation can claim it.
+  for (const { id, dispatchId, tenantId: ctTenantId, status } of stuckCommitments) {
+    // If the commitment is stuck in 'evaluating' with an expired lease,
+    // revert to 'pending' first so the evaluation CAS can claim it.
     if (status === 'evaluating') {
-      await db.vppPortfolioCommitment.updateMany({
-        where: { id: stuckCommitments.find((c) => c.dispatchId === dispatchId)!.id, status: 'evaluating' },
-        data: { status: 'pending' },
-      }).catch(() => {}) // best-effort
+      const reverted = await db.vppPortfolioCommitment.updateMany({
+        where: {
+          id,
+          status: 'evaluating',
+          evaluationLeaseExpiresAt: { lt: now },
+        },
+        data: {
+          status: 'pending',
+          evaluationClaimedAt: null,
+          evaluationLeaseExpiresAt: null,
+        },
+      }).catch(() => ({ count: 0 }))
+
+      if (reverted.count === 0) {
+        // Another reclaimer won or the lease was renewed. Skip.
+        failed++
+        continue
+      }
     }
 
     try {

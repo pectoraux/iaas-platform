@@ -820,11 +820,23 @@ model DomainEvent {
   occurredAt   DateTime @default(now())
   processed    Boolean  @default(false)
 
+  // VPP-2D-4: Event processing lease for retry workers.
+  // Lifecycle: pending → processing → processed (or dead_letter).
+  // A worker claims an event by setting processingStatus='processing' +
+  // claimedAt + leaseExpiresAt atomically. If the worker crashes, the
+  // lease expires and another worker can reclaim it.
+  // 'dead_letter' is for malformed/unprocessable events.
+  processingStatus  String   @default("pending") // pending | processing | processed | dead_letter
+  claimedAt         DateTime?
+  leaseExpiresAt    DateTime?
+
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
   @@index([eventType])
   @@index([processed])
+  @@index([processingStatus])
+  @@index([leaseExpiresAt])
 }
 
 // -----------------------------------------------------------------------------
@@ -1194,7 +1206,13 @@ model VppPortfolioCommitment {
   //   pending → evaluating → (final: fulfilled | partial | failed)
   //   evaluating → pending (on failure, retryable)
   //   final states are idempotent (re-evaluation is a no-op)
+  //
+  // LEASE: when status='evaluating', evaluationClaimedAt + evaluationLeaseExpiresAt
+  // track the evaluator's lease. If the evaluator crashes, the lease expires
+  // and recoverStuckPortfolioEvaluations() can reclaim it (revert to 'pending').
   status          String   @default("pending") // pending | evaluating | fulfilled | partial | failed
+  evaluationClaimedAt     DateTime?
+  evaluationLeaseExpiresAt DateTime?
   evaluatedAt     DateTime?
 
   // Reconciliation metadata.

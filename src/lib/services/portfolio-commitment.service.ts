@@ -350,37 +350,100 @@ export async function evaluatePortfolioCommitment(
     }
   }
 
-  // Atomic claim: pending → evaluating. If another evaluator already
-  // claimed it, this returns count=0 and we skip (they'll produce the
-  // result). On failure, we revert to 'pending' so the next caller can retry.
+  // Atomic claim: pending → evaluating with lease. If another evaluator
+  // already claimed it, this returns count=0 and we skip. On failure, we
+  // revert to 'pending' so the next caller can retry. If the evaluator
+  // crashes, the lease expires and recoverStuckPortfolioEvaluations()
+  // can reclaim it.
+  const LEASE_DURATION_MS = 60000 // 60 seconds — evaluation should be fast
+  const now = new Date()
+  const leaseExpiry = new Date(now.getTime() + LEASE_DURATION_MS)
+
   const claimed = await db.vppPortfolioCommitment.updateMany({
     where: { id: commitment.id, status: 'pending' },
-    data: { status: 'evaluating' },
+    data: {
+      status: 'evaluating',
+      evaluationClaimedAt: now,
+      evaluationLeaseExpiresAt: leaseExpiry,
+    },
   })
 
   if (claimed.count === 0) {
-    // Another evaluator is processing (or already done). Return the
-    // current state — the caller can retry to get the final result.
-    return {
-      commitmentId: commitment.id,
-      dispatchId,
-      status: asCommitmentStatus(commitment.status),
-      committedKw: parseFloat(commitment.committedKw),
-      buyerDeliveredKw: 0,
-      buyerDeliveredKwh: 0,
-      operatorContributionKwh: 0,
-      rawSignedPortfolioPerformanceKwh: 0,
-      totalActualKwh: 0,
-      totalBaselineKwh: 0,
-      fulfillmentPct: 0,
-      toleranceThresholdPct: parseFloat(commitment.toleranceThresholdPct),
-      measurementMethod: commitment.measurementMethod as MeasurementMethod,
-      fulfillmentBasis: commitment.fulfillmentBasis as FulfillmentBasis,
-      assignmentCount: assignments.length,
-      completedAssignments: assignments.filter((a) => a.status === 'completed').length,
-      failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
-      perAsset: [],
-      evaluationOutcome: 'already_evaluating',
+    // The CAS failed — either another evaluator is actively processing,
+    // or a previous evaluator crashed and left the commitment in
+    // 'evaluating' with an expired lease.
+
+    // Check if the lease has expired. If so, reclaim it.
+    const leaseExpired = commitment.evaluationLeaseExpiresAt
+      && commitment.evaluationLeaseExpiresAt < now
+
+    if (leaseExpired) {
+      // Reclaim: evaluating (expired lease) → evaluating (new lease).
+      // This uses a CAS on evaluationLeaseExpiresAt to prevent races
+      // between two reclaimers.
+      const reclaimed = await db.vppPortfolioCommitment.updateMany({
+        where: {
+          id: commitment.id,
+          status: 'evaluating',
+          evaluationLeaseExpiresAt: { lt: now },
+        },
+        data: {
+          evaluationClaimedAt: now,
+          evaluationLeaseExpiresAt: leaseExpiry,
+        },
+      })
+
+      if (reclaimed.count > 0) {
+        // We reclaimed the lease — proceed with evaluation.
+        // Fall through to the computation below.
+      } else {
+        // Another reclaimer won — return current state.
+        return {
+          commitmentId: commitment.id,
+          dispatchId,
+          status: asCommitmentStatus(commitment.status),
+          committedKw: parseFloat(commitment.committedKw),
+          buyerDeliveredKw: 0,
+          buyerDeliveredKwh: 0,
+          operatorContributionKwh: 0,
+          rawSignedPortfolioPerformanceKwh: 0,
+          totalActualKwh: 0,
+          totalBaselineKwh: 0,
+          fulfillmentPct: 0,
+          toleranceThresholdPct: parseFloat(commitment.toleranceThresholdPct),
+          measurementMethod: commitment.measurementMethod as MeasurementMethod,
+          fulfillmentBasis: commitment.fulfillmentBasis as FulfillmentBasis,
+          assignmentCount: assignments.length,
+          completedAssignments: assignments.filter((a) => a.status === 'completed').length,
+          failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
+          perAsset: [],
+          evaluationOutcome: 'already_evaluating',
+        }
+      }
+    } else {
+      // Lease is still active — another evaluator is processing. Return
+      // the current state; the caller can retry to get the final result.
+      return {
+        commitmentId: commitment.id,
+        dispatchId,
+        status: asCommitmentStatus(commitment.status),
+        committedKw: parseFloat(commitment.committedKw),
+        buyerDeliveredKw: 0,
+        buyerDeliveredKwh: 0,
+        operatorContributionKwh: 0,
+        rawSignedPortfolioPerformanceKwh: 0,
+        totalActualKwh: 0,
+        totalBaselineKwh: 0,
+        fulfillmentPct: 0,
+        toleranceThresholdPct: parseFloat(commitment.toleranceThresholdPct),
+        measurementMethod: commitment.measurementMethod as MeasurementMethod,
+        fulfillmentBasis: commitment.fulfillmentBasis as FulfillmentBasis,
+        assignmentCount: assignments.length,
+        completedAssignments: assignments.filter((a) => a.status === 'completed').length,
+        failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
+        perAsset: [],
+        evaluationOutcome: 'already_evaluating',
+      }
     }
   }
 
@@ -529,10 +592,14 @@ export async function evaluatePortfolioCommitment(
     try {
       const { emit, DomainEventTypes } = await import('@/lib/domain/events')
       await db.$transaction(async (tx) => {
-        // Revert evaluating → pending inside the transaction.
+        // Revert evaluating → pending inside the transaction, clearing lease.
         await tx.vppPortfolioCommitment.updateMany({
           where: { id: commitment.id, status: 'evaluating' },
-          data: { status: 'pending' },
+          data: {
+            status: 'pending',
+            evaluationClaimedAt: null,
+            evaluationLeaseExpiresAt: null,
+          },
         })
         // Emit the retry event in the SAME transaction.
         await emit(
