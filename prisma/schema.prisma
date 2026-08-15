@@ -64,6 +64,7 @@ model Tenant {
   vppDispatches  VppDispatch[]
   vppAssignments VppDispatchAssignment[]
   vppBaselines   VppBaseline[]
+  vppPortfolioCommitments VppPortfolioCommitment[]
   capacityResources CapacityResource[]
   capacityReservations CapacityReservation[]
   capacityCommitments CapacityCommitment[]
@@ -989,6 +990,7 @@ model VppDispatch {
   tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   program     VppBuyerProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
   assignments VppDispatchAssignment[]
+  portfolioCommitment VppPortfolioCommitment?
 
   @@index([tenantId])
   @@index([programId])
@@ -1090,5 +1092,77 @@ model BaselineEvaluation {
 
   @@index([tenantId])
   @@index([networkVersionId])
+}
+
+// -----------------------------------------------------------------------------
+// VPP-2D-4: Portfolio Commitment — the buyer-facing obligation fulfillment
+// record. Aggregates individual assignment results into a portfolio-level
+// assessment: did the platform deliver what it promised the buyer?
+//
+// ARCHITECTURAL RULE: This model does NOT create new economic objects
+// (no PortfolioLedger, no PortfolioReward, no PortfolioSettlement). The
+// individual assignment Contributions → Rewards → Ledger → Settlements
+// remain the source of truth for operator payments. This model is the
+// BUYER-FACING commitment fulfillment record that evaluates:
+//   - committed kW (from the optimizer)
+//   - delivered kW (aggregate of individual verified performance)
+//   - shortfall / overdelivery
+//   - fulfillment status (fulfilled | partial | failed)
+//
+// The buyer settlement (if any) is a separate commercial layer that may
+// reference this commitment — but the generic economic kernel is not
+// duplicated.
+// -----------------------------------------------------------------------------
+
+/// Portfolio-level commitment for a VPP dispatch.
+/// Created when the optimizer reserves capacity for a buyer request.
+/// Updated when individual assignments complete, aggregating their
+/// verified performance into a portfolio fulfillment assessment.
+model VppPortfolioCommitment {
+  id              String   @id @default(cuid())
+  tenantId        String
+  dispatchId      String   @unique // 1:1 with VppDispatch
+
+  // The buyer's request (what was promised).
+  requestedKw     String   // decimal as string — buyer's requested power
+  requestedKwh    String   // decimal as string — buyer's requested energy
+  confidenceLevel String   // decimal as string — e.g. "0.99"
+
+  // The optimizer's commitment (what the platform safely promised).
+  committedKw     String   // decimal as string — safe capacity at confidence
+  algorithm       String   @default("greedy_lexicographic_marginal_safe_capacity")
+  optimalityGuarantee String @default("heuristic")
+
+  // The shortfall policy (tolerance band for fulfillment).
+  // If fulfillmentPct >= toleranceThresholdPct → fulfilled.
+  // If fulfillmentPct < toleranceThresholdPct → partial or failed.
+  toleranceThresholdPct String @default("90") // e.g. "90" = 90% required
+
+  // Aggregate delivered performance (filled when assignments complete).
+  // NULL until the portfolio is evaluated.
+  deliveredKw     String?  // decimal as string — aggregate verified kW
+  deliveredKwh    String?  // decimal as string — aggregate verified kWh
+  totalBaselineKwh String? // decimal as string — sum of individual baselines
+  totalActualKwh  String?  // decimal as string — sum of individual actuals
+
+  // Fulfillment assessment.
+  fulfillmentPct  String?  // decimal as string — deliveredKw / committedKw * 100
+  status          String   @default("pending") // pending | fulfilled | partial | failed
+  evaluatedAt     DateTime?
+
+  // Reconciliation metadata.
+  assignmentCount Int      @default(0) // number of assignments in the portfolio
+  completedAssignments Int @default(0) // number that reached 'completed' state
+  metadataJson    String   @default("{}")
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  dispatch  VppDispatch @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([dispatchId])
+  @@index([status])
 }
 

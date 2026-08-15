@@ -29,6 +29,8 @@ export const AuditEvents = {
   AssetAssignedToNetwork: 'asset.assigned_to_network',
   SettlementFailed: 'settlement.failed',
   PortfolioReservationCreated: 'portfolio.reservation_created',
+  PortfolioCommitmentCreated: 'vpp.portfolio_commitment_created',
+  PortfolioCommitmentEvaluated: 'vpp.portfolio_commitment_evaluated',
 } as const
 
 export type AuditEventType = (typeof AuditEvents)[keyof typeof AuditEvents]
