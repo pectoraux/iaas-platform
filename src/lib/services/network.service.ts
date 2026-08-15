@@ -97,12 +97,17 @@ export async function createNetworkVersion(
  * and a RewardRule attached to the version, so downstream services can resolve
  * policy by version id.
  *
- * VPP-2C publication-readiness gate:
+ * VPP-2C publication-readiness gate (concurrency-safe):
  *   Publication is the immutable-version boundary — once publishedAt is set,
  *   the version becomes an immutable policy artifact. Therefore the
- *   publication-readiness invariant must be enforced HERE, inside the same
- *   transaction that flips publishedAt, so a version can never become
- *   published without satisfying it.
+ *   publication-readiness invariant is enforced HERE, INSIDE the same
+ *   transaction that flips publishedAt, against a FOR UPDATE locked row.
+ *
+ *   Why the lock matters: an unpublished NetworkVersion is still mutable, so
+ *   another writer could change baselinePolicyJson between a pre-transaction
+ *   validation and the publish commit. By loading the row FOR UPDATE inside
+ *   the transaction, we guarantee the readiness check validates the exact
+ *   policy snapshot that gets published. No race window exists.
  *
  *   Current vertical rules (extensible):
  *     energy_vpp: baselinePolicyJson must exist, status === 'accepted',
@@ -117,20 +122,54 @@ export async function publishNetworkVersion(
   actorId?: string,
 ) {
   const network = await getNetwork(tenantId, networkId)
-  const version = await db.networkVersion.findFirst({ where: { id: versionId, networkId } })
-  if (!version) throw new NotFoundError('network_version', versionId)
-  if (version.publishedAt) throw new ImmutableResourceError('Network version already published (immutable)')
 
-  const config: VersionConfiguration = JSON.parse(version.configurationJson)
+  // CONCURRENCY-SAFE PUBLICATION:
+  // The readiness check and the publication run against the SAME locked
+  // transaction snapshot. The FOR UPDATE lock on the NetworkVersion row
+  // prevents any concurrent writer from mutating baselinePolicyJson between
+  // validation and commit.
+  const publishedVersion = await db.$transaction(async (tx) => {
+    // Lock the NetworkVersion row FOR UPDATE. This blocks any concurrent
+    // transaction that tries to read/update this row until we COMMIT (or
+    // ROLLBACK on validation failure).
+    const lockedRows = await tx.$queryRaw<Array<{
+      id: string
+      networkId: string
+      version: number
+      configurationJson: string
+      baselinePolicyJson: string | null
+      publishedAt: Date | null
+    }>>`
+      SELECT "id", "networkId", "version", "configurationJson",
+             "baselinePolicyJson", "publishedAt"
+      FROM "NetworkVersion"
+      WHERE "id" = ${versionId}::text
+      FOR UPDATE
+    `
+    const version = lockedRows[0]
+    if (!version) throw new NotFoundError('network_version', versionId)
 
-  // Publication-readiness gate — validated BEFORE the transaction, but the
-  // transaction below is what makes the version immutable. Because the gate
-  // throws before any write, a rejected publication leaves no partial state.
-  // (The version row itself is untouched; publishedAt stays null.)
-  assertPublicationReadiness(network.vertical, version)
+    // The networkId scope check still applies (defend against a caller passing
+    // a versionId from a different network).
+    if (version.networkId !== networkId) {
+      throw new NotFoundError('network_version', versionId)
+    }
 
-  // Atomic publish + capability/rule materialisation.
-  await db.$transaction(async (tx) => {
+    // Re-check immutability against the LOCKED row — a concurrent caller may
+    // have published it between our initial getNetwork and this transaction.
+    if (version.publishedAt) {
+      throw new ImmutableResourceError('Network version already published (immutable)')
+    }
+
+    // Publication-readiness gate — validated against the LOCKED row, so the
+    // policy snapshot we check here is exactly the one that gets published.
+    // This closes the race where Writer B mutates baselinePolicyJson between
+    // a pre-transaction validation and the publish commit.
+    assertPublicationReadiness(network.vertical, version)
+
+    const config: VersionConfiguration = JSON.parse(version.configurationJson)
+
+    // Flip the version to immutable + make it the network's current version.
     await tx.networkVersion.update({
       where: { id: versionId },
       data: { publishedAt: new Date() },
@@ -165,7 +204,9 @@ export async function publishNetworkVersion(
         configJson: JSON.stringify({ platform_fee_pct: config.reward.platform_fee_pct ?? 5 }),
       },
     })
-  })
+
+    return version
+  }, { timeout: 30000 })
 
   await appendAudit({
     tenantId,
@@ -173,14 +214,14 @@ export async function publishNetworkVersion(
     eventType: AuditEvents.NetworkPublished,
     resourceType: 'network_version',
     resourceId: versionId,
-    metadata: { networkId, version: version.version, vertical: network.vertical },
+    metadata: { networkId, version: publishedVersion.version, vertical: network.vertical },
   })
   await emit({
     event_type: 'NetworkPublished',
     aggregate_id: versionId,
     tenant_id: tenantId,
-    version: version.version,
-    payload: { networkId, version: version.version },
+    version: publishedVersion.version,
+    payload: { networkId, version: publishedVersion.version },
   })
 
   return db.networkVersion.findUnique({ where: { id: versionId } })
@@ -191,10 +232,16 @@ export async function publishNetworkVersion(
  * determines whether a NetworkVersion may transition from mutable draft to
  * immutable published.
  *
- * This is the defense-in-depth layer the reviewer identified as missing:
+ * This function is PURE: it validates a version object's policy fields and
+ * throws ValidationError if the version is not publication-ready. It does
+ * NOT touch the database. The caller is responsible for passing a version
+ * object loaded FOR UPDATE inside the same transaction that will publish it,
+ * so the check is concurrency-safe.
+ *
+ * This is the defense-in-depth layer:
  *   - Template builder (instantiateTemplate)        ✅
  *   - Program creation (createBuyerProgram)          ✅
- *   - Version publication (publishNetworkVersion)    ✅ ← THIS
+ *   - Version publication (publishNetworkVersion)    ✅ ← THIS (locked row)
  *   - Runtime execution (executeDispatchAssignment)  ✅
  *
  * Publication is the most important layer because after publication the
@@ -206,8 +253,6 @@ export async function publishNetworkVersion(
  *   case 'storage': assert proof policy accepted
  *   case 'wireless': assert coverage verification accepted
  *   case 'compute': assert workload verification accepted
- *
- * Throws ValidationError when the version is not publication-ready.
  */
 function assertPublicationReadiness(
   vertical: string,
