@@ -1,22 +1,11 @@
 // =============================================================================
 // Baseline Engine — VPP-2: counterfactual load prediction.
 //
-// The baseline engine predicts what a DER asset WOULD have done without
-// dispatch. The difference between actual and baseline = verified incremental
-// performance (the economically payable quantity).
-//
-// Three baseline strategies are implemented:
-//   1. SameTimeHistoricalBaseline — uses the same time window from past days
-//   2. WeekdayWeekendAverageBaseline — averages similar days (same day-of-week)
-//   3. RegressionBaseline — linear regression on temperature + day-of-week
-//
-// Each strategy is evaluated against known ground truth from the simulator
-// to measure: bias, MAE, overpayment, underpayment.
-//
-// CRITICAL: this replaces the placeholder "baseline = 0" from VPP-1.
-// The baseline engine is VPP-SPECIFIC (sits above the generic platform).
-// It produces a derived contribution quantity via the existing generic
-// Contribution mechanism (derivedQuantity + derivedUnit).
+// VPP-2C FIXES:
+// 1. Split BaselineContext (production input) from GroundTruthMetadata (eval only)
+// 2. Strategy selection with quantitative acceptance criteria
+// 3. Persisted BaselinePolicy (versioned, associated with NetworkVersion)
+// 4. No negative performance payments: max(0, actual - baseline)
 // =============================================================================
 
 import type { DayProfile, LoadProfilePoint, DispatchDayGroundTruth } from './der-simulator.service'
@@ -24,7 +13,6 @@ import type { DayProfile, LoadProfilePoint, DispatchDayGroundTruth } from './der
 export interface BaselineResult {
   method: string
   predictedCounterfactualKwh: number
-  // Per-interval prediction (for detailed analysis).
   predictedProfile: LoadProfilePoint[]
 }
 
@@ -32,62 +20,101 @@ export interface BaselineEvaluation {
   method: string
   trueCounterfactualKwh: number
   predictedCounterfactualKwh: number
-  // Error metrics.
-  bias: number              // predicted - true (positive = over-predict counterfactual → underpayment)
-  absoluteError: number     // |predicted - true|
-  signedError: number       // predicted - true
-  // Economic consequences.
-  claimedPerformanceKwh: number // actual - predicted (what the VPP claims as incremental)
-  truePerformanceKwh: number   // actual - true (the real incremental)
-  overpaymentKwh: number       // claimed - true (positive = operator overpaid)
-  underpaymentKwh: number      // true - claimed (positive = operator underpaid)
-  overpaymentPct: number       // overpayment / true * 100
+  bias: number
+  absoluteError: number
+  signedError: number
+  claimedPerformanceKwh: number
+  truePerformanceKwh: number
+  overpaymentKwh: number
+  underpaymentKwh: number
+  overpaymentPct: number
   underpaymentPct: number
-  // Classification.
-  falsePositive: boolean    // claimed performance > 0 when true performance <= 0
-  falseNegative: boolean    // claimed performance <= 0 when true performance > 0
+  falsePositive: boolean
+  falseNegative: boolean
 }
 
 // ---------------------------------------------------------------------------
-// Baseline Strategy Interface
+// BaselineContext — PRODUCTION input for baseline prediction.
+// Contains ONLY observable context: dispatch window, day-of-week, date.
+// NEVER contains ground truth (trueCounterfactual, trueIncremental, etc.).
+// ---------------------------------------------------------------------------
+
+export interface BaselineContext {
+  dispatchStartIndex: number
+  dispatchEndIndex: number
+  dispatchDate: string
+  dayOfWeek: number
+  isWeekend: boolean
+  // Optional observable covariates (temperature, etc.)
+  temperatureC?: number
+}
+
+// ---------------------------------------------------------------------------
+// BaselinePolicy — persisted, versioned strategy selection.
+// Associated with NetworkVersion configuration.
+// ---------------------------------------------------------------------------
+
+export interface BaselineAcceptanceCriteria {
+  maxMae: number
+  maxAbsBias: number
+  maxP95Error: number
+  maxFalsePositiveRate: number
+  maxFalseNegativeRate: number
+  maxOverpaymentPct: number
+  maxUnderpaymentPct: number
+}
+
+export interface BaselinePolicy {
+  selectedStrategy: string
+  evaluationId: string
+  evaluatedAt: string
+  criteria: BaselineAcceptanceCriteria
+  metrics: {
+    mae: number
+    bias: number
+    p95Error: number
+    falsePositiveRate: number
+    falseNegativeRate: number
+    overpaymentPct: number
+    underpaymentPct: number
+  }
+  status: 'accepted' | 'rejected' | 'no_acceptable_strategy'
+}
+
+export const DEFAULT_ACCEPTANCE_CRITERIA: BaselineAcceptanceCriteria = {
+  maxMae: 3.0,           // kWh — max acceptable MAE
+  maxAbsBias: 1.5,       // kWh — max acceptable absolute bias
+  maxP95Error: 5.0,      // kWh — max acceptable P95 absolute error
+  maxFalsePositiveRate: 0.15,  // 15%
+  maxFalseNegativeRate: 0.15,  // 15%
+  maxOverpaymentPct: 30,       // 30%
+  maxUnderpaymentPct: 30,      // 30%
+}
+
+// ---------------------------------------------------------------------------
+// Baseline Strategy Interface — now takes BaselineContext (not ground truth)
 // ---------------------------------------------------------------------------
 
 export interface BaselineStrategy {
   readonly name: string
-  /**
-   * Predict the counterfactual load for the dispatch window.
-   * @param history Past day profiles (excluding dispatch day)
-   * @param dispatchDay Ground truth for the dispatch day (contains window info)
-   * @returns Baseline prediction (predicted counterfactual kWh + profile)
-   */
-  predict(history: DayProfile[], dispatchDay: DispatchDayGroundTruth): BaselineResult
+  predict(history: DayProfile[], context: BaselineContext): BaselineResult
 }
 
 // ---------------------------------------------------------------------------
 // Strategy 1: Same-Time Historical Baseline
 // ---------------------------------------------------------------------------
 
-/**
- * Uses the same time window from each historical day.
- * Simple average of energy delivered during the dispatch window across all
- * historical days.
- *
- * This is the simplest baseline. It ignores day-of-week and weather.
- * It tends to have high bias when weekends differ from weekdays.
- */
 export class SameTimeHistoricalBaseline implements BaselineStrategy {
   readonly name = 'same_time_historical'
 
-  predict(history: DayProfile[], dispatchDay: DispatchDayGroundTruth): BaselineResult {
-    const { dispatchStartIndex, dispatchEndIndex } = dispatchDay
+  predict(history: DayProfile[], context: BaselineContext): BaselineResult {
+    const { dispatchStartIndex, dispatchEndIndex } = context
     const windowEnergies: number[] = []
 
     for (const day of history) {
       let energy = 0
       for (let i = dispatchStartIndex; i < dispatchEndIndex && i < day.points.length; i++) {
-        if (day.points[i].powerKw < 0) { // discharge
-          energy += day.points[i].energyKwh
-        }
+        if (day.points[i].powerKw < 0) energy += day.points[i].energyKwh
       }
       windowEnergies.push(energy)
     }
@@ -96,61 +123,40 @@ export class SameTimeHistoricalBaseline implements BaselineStrategy {
       ? windowEnergies.reduce((a, b) => a + b, 0) / windowEnergies.length
       : 0
 
-    // Build predicted profile (average of historical days).
     const predictedProfile: LoadProfilePoint[] = []
     for (let i = dispatchStartIndex; i < dispatchEndIndex; i++) {
-      let sumPower = 0
-      let count = 0
+      let sumPower = 0, count = 0
       for (const day of history) {
-        if (i < day.points.length) {
-          sumPower += day.points[i].powerKw
-          count++
-        }
+        if (i < day.points.length) { sumPower += day.points[i].powerKw; count++ }
       }
       const avgPower = count > 0 ? sumPower / count : 0
       predictedProfile.push({
-        timestamp: dispatchDay.dayProfile.points[i]?.timestamp ?? new Date().toISOString(),
+        timestamp: new Date(context.dispatchDate + 'T00:00:00Z').toISOString(),
         powerKw: parseFloat(avgPower.toFixed(4)),
         energyKwh: parseFloat((Math.abs(avgPower) * 0.25).toFixed(4)),
       })
     }
 
-    return {
-      method: this.name,
-      predictedCounterfactualKwh: parseFloat(predicted.toFixed(4)),
-      predictedProfile,
-    }
+    return { method: this.name, predictedCounterfactualKwh: parseFloat(predicted.toFixed(4)), predictedProfile }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Strategy 2: Similar-Day Average Baseline
+// Strategy 2: Weekday/Weekend Average Baseline
 // ---------------------------------------------------------------------------
 
-/**
- * Averages only days with the same day-of-week as the dispatch day.
- * This accounts for the fact that weekday and weekend patterns differ.
- *
- * Typically has lower bias than same-time historical for mixed day types.
- */
-export class WeekdayWeekendAverageBaseline implements BasaselineStrategy {
+export class WeekdayWeekendAverageBaseline implements BaselineStrategy {
   readonly name = 'weekday_weekend_average'
 
-  predict(history: DayProfile[], dispatchDay: DispatchDayGroundTruth): BaselineResult {
-    const { dispatchStartIndex, dispatchEndIndex } = dispatchDay
-    const dispatchDayOfWeek = dispatchDay.dayProfile.dayOfWeek
-
-    // Filter to similar days (same weekday/weekend category).
-    const isWeekend = dispatchDayOfWeek === 0 || dispatchDayOfWeek === 6
+  predict(history: DayProfile[], context: BaselineContext): BaselineResult {
+    const { dispatchStartIndex, dispatchEndIndex, isWeekend } = context
     const similarDays = history.filter(d => d.isWeekend === isWeekend)
 
     const windowEnergies: number[] = []
     for (const day of similarDays) {
       let energy = 0
       for (let i = dispatchStartIndex; i < dispatchEndIndex && i < day.points.length; i++) {
-        if (day.points[i].powerKw < 0) {
-          energy += day.points[i].energyKwh
-        }
+        if (day.points[i].powerKw < 0) energy += day.points[i].energyKwh
       }
       windowEnergies.push(energy)
     }
@@ -161,107 +167,70 @@ export class WeekdayWeekendAverageBaseline implements BasaselineStrategy {
 
     const predictedProfile: LoadProfilePoint[] = []
     for (let i = dispatchStartIndex; i < dispatchEndIndex; i++) {
-      let sumPower = 0
-      let count = 0
+      let sumPower = 0, count = 0
       for (const day of similarDays) {
-        if (i < day.points.length) {
-          sumPower += day.points[i].powerKw
-          count++
-        }
+        if (i < day.points.length) { sumPower += day.points[i].powerKw; count++ }
       }
       const avgPower = count > 0 ? sumPower / count : 0
       predictedProfile.push({
-        timestamp: dispatchDay.dayProfile.points[i]?.timestamp ?? new Date().toISOString(),
+        timestamp: new Date(context.dispatchDate + 'T00:00:00Z').toISOString(),
         powerKw: parseFloat(avgPower.toFixed(4)),
         energyKwh: parseFloat((Math.abs(avgPower) * 0.25).toFixed(4)),
       })
     }
 
-    return {
-      method: this.name,
-      predictedCounterfactualKwh: parseFloat(predicted.toFixed(4)),
-      predictedProfile,
-    }
+    return { method: this.name, predictedCounterfactualKwh: parseFloat(predicted.toFixed(4)), predictedProfile }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Strategy 3: Regression Baseline (temperature + day-of-week adjusted)
+// Strategy 3: Regression Baseline
 // ---------------------------------------------------------------------------
 
-/**
- * Simple linear regression: energy_in_window = a * temperature + b * isWeekend + c
- *
- * Fits the model on historical days, then predicts for the dispatch day.
- * This is the most sophisticated baseline — it adjusts for weather and schedule.
- *
- * In practice, real VPPs use more complex models (weather forecasts, load
- * forecasts, neural networks). This is a minimal but principled regression.
- */
 export class RegressionBaseline implements BaselineStrategy {
   readonly name = 'regression'
 
-  predict(history: DayProfile[], dispatchDay: DispatchDayGroundTruth): BaselineResult {
-    const { dispatchStartIndex, dispatchEndIndex } = dispatchDay
+  predict(history: DayProfile[], context: BaselineContext): BaselineResult {
+    const { dispatchStartIndex, dispatchEndIndex } = context
 
-    // Build training data: (temperature, isWeekend, energy) for each historical day.
     const trainingData: Array<{ temp: number; isWeekend: number; energy: number }> = []
     for (const day of history) {
       let energy = 0
       for (let i = dispatchStartIndex; i < dispatchEndIndex && i < day.points.length; i++) {
-        if (day.points[i].powerKw < 0) {
-          energy += day.points[i].energyKwh
-        }
+        if (day.points[i].powerKw < 0) energy += day.points[i].energyKwh
       }
-      trainingData.push({
-        temp: day.temperatureC,
-        isWeekend: day.isWeekend ? 1 : 0,
-        energy,
-      })
+      trainingData.push({ temp: day.temperatureC, isWeekend: day.isWeekend ? 1 : 0, energy })
     }
 
     if (trainingData.length < 3) {
-      // Not enough data for regression — fall back to simple average.
       const fallback = new SameTimeHistoricalBaseline()
-      const result = fallback.predict(history, dispatchDay)
+      const result = fallback.predict(history, context)
       return { ...result, method: this.name + '_fallback' }
     }
 
-    // Fit: energy = a * temp + b * isWeekend + c (ordinary least squares).
     const { a, b, c } = this.fitOLS(trainingData)
-
-    // Predict for dispatch day.
-    const dispatchTemp = dispatchDay.dayProfile.temperatureC
-    const dispatchIsWeekend = dispatchDay.dayProfile.isWeekend ? 1 : 0
+    const dispatchTemp = context.temperatureC ?? 20
+    const dispatchIsWeekend = context.isWeekend ? 1 : 0
     const predicted = a * dispatchTemp + b * dispatchIsWeekend + c
 
-    // Build predicted profile (scale historical average by predicted/mean ratio).
     const meanEnergy = trainingData.reduce((s, d) => s + d.energy, 0) / trainingData.length
     const scale = meanEnergy > 0 ? predicted / meanEnergy : 1
 
     const predictedProfile: LoadProfilePoint[] = []
     for (let i = dispatchStartIndex; i < dispatchEndIndex; i++) {
-      let sumPower = 0
-      let count = 0
+      let sumPower = 0, count = 0
       for (const day of history) {
-        if (i < day.points.length) {
-          sumPower += day.points[i].powerKw
-          count++
-        }
+        if (i < day.points.length) { sumPower += day.points[i].powerKw; count++ }
       }
       const avgPower = count > 0 ? (sumPower / count) * scale : 0
       predictedProfile.push({
-        timestamp: dispatchDay.dayProfile.points[i]?.timestamp ?? new Date().toISOString(),
+        timestamp: new Date(context.dispatchDate + 'T00:00:00Z').toISOString(),
         powerKw: parseFloat(avgPower.toFixed(4)),
         energyKwh: parseFloat((Math.abs(avgPower) * 0.25).toFixed(4)),
       })
     }
 
-    return {
-      method: this.name,
-      predictedCounterfactualKwh: parseFloat(Math.max(0, predicted).toFixed(4)),
-      predictedProfile,
-    }
+    return { method: this.name, predictedCounterfactualKwh: parseFloat(Math.max(0, predicted).toFixed(4)), predictedProfile }
   }
 
   private fitOLS(data: Array<{ temp: number; isWeekend: number; energy: number }>): { a: number; b: number; c: number } {
@@ -275,29 +244,20 @@ export class RegressionBaseline implements BaselineStrategy {
     const sumTE = data.reduce((s, d) => s + d.temp * d.energy, 0)
     const sumWE = data.reduce((s, d) => s + d.isWeekend * d.energy, 0)
 
-    // Solve: energy = a * temp + b * isWeekend + c
-    // Normal equations: X'X * [a,b,c]' = X'y
-    // X'X = [[sumTT, sumTW, sumT], [sumTW, sumWW, sumW], [sumT, sumW, n]]
-    // X'y = [sumTE, sumWE, sumE]
     const XTX = [[sumTT, sumTW, sumT], [sumTW, sumWW, sumW], [sumT, sumW, n]]
     const XTy = [sumTE, sumWE, sumE]
-
     const det = this.det3(XTX)
-    if (Math.abs(det) < 1e-10) {
-      const mean = sumE / n
-      return { a: 0, b: 0, c: mean }
+    if (Math.abs(det) < 1e-10) return { a: 0, b: 0, c: sumE / n }
+
+    return {
+      a: this.det3(this.replaceCol(XTX, 0, XTy)) / det,
+      b: this.det3(this.replaceCol(XTX, 1, XTy)) / det,
+      c: this.det3(this.replaceCol(XTX, 2, XTy)) / det,
     }
-
-    // Cramer's rule: replace column i with XTy.
-    const a = this.det3(this.replaceCol(XTX, 0, XTy)) / det
-    const b = this.det3(this.replaceCol(XTX, 1, XTy)) / det
-    const c = this.det3(this.replaceCol(XTX, 2, XTy)) / det
-
-    return { a, b, c }
   }
 
-  private replaceCol(matrix: number[][], col: number, vec: number[]): number[][] {
-    return matrix.map((row, i) => row.map((val, j) => j === col ? vec[i] : val))
+  private replaceCol(m: number[][], col: number, v: number[]): number[][] {
+    return m.map((row, i) => row.map((val, j) => j === col ? v[i] : val))
   }
 
   private det3(m: number[][]): number {
@@ -308,7 +268,25 @@ export class RegressionBaseline implements BaselineStrategy {
 }
 
 // ---------------------------------------------------------------------------
-// Evaluation Harness
+// Strategy Registry — resolve strategy by name from persisted policy
+// ---------------------------------------------------------------------------
+
+const STRATEGY_REGISTRY: Record<string, BaselineStrategy> = {
+  'same_time_historical': new SameTimeHistoricalBaseline(),
+  'weekday_weekend_average': new WeekdayWeekendAverageBaseline(),
+  'regression': new RegressionBaseline(),
+}
+
+export function getStrategy(name: string): BaselineStrategy | null {
+  return STRATEGY_REGISTRY[name] ?? null
+}
+
+export function getAllStrategies(): BaselineStrategy[] {
+  return Object.values(STRATEGY_REGISTRY)
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation Harness (uses ground truth — for evaluation ONLY, not production)
 // ---------------------------------------------------------------------------
 
 export function evaluateBaseline(
@@ -318,48 +296,120 @@ export function evaluateBaseline(
   const trueCf = groundTruth.trueCounterfactualKwh
   const predictedCf = baseline.predictedCounterfactualKwh
   const actual = groundTruth.actualWithDispatchKwh
-
   const truePerf = actual - trueCf
   const claimedPerf = actual - predictedCf
-
   const signedError = predictedCf - trueCf
-  const bias = signedError // positive bias = over-predicting counterfactual → underpaying
-  const absoluteError = Math.abs(signedError)
-
-  // Overpayment: operator claims MORE than they actually delivered.
-  const overpaymentKwh = Math.max(0, claimedPerf - truePerf)
-  // Underpayment: operator delivered MORE than they were paid for.
-  const underpaymentKwh = Math.max(0, truePerf - claimedPerf)
 
   return {
     method: baseline.method,
     trueCounterfactualKwh: trueCf,
     predictedCounterfactualKwh: predictedCf,
-    bias: parseFloat(bias.toFixed(4)),
-    absoluteError: parseFloat(absoluteError.toFixed(4)),
+    bias: parseFloat(signedError.toFixed(4)),
+    absoluteError: parseFloat(Math.abs(signedError).toFixed(4)),
     signedError: parseFloat(signedError.toFixed(4)),
     claimedPerformanceKwh: parseFloat(claimedPerf.toFixed(4)),
     truePerformanceKwh: parseFloat(truePerf.toFixed(4)),
-    overpaymentKwh: parseFloat(overpaymentKwh.toFixed(4)),
-    underpaymentKwh: parseFloat(underpaymentKwh.toFixed(4)),
-    overpaymentPct: truePerf > 0 ? parseFloat((overpaymentKwh / truePerf * 100).toFixed(2)) : 0,
-    underpaymentPct: truePerf > 0 ? parseFloat((underpaymentKwh / truePerf * 100).toFixed(2)) : 0,
+    overpaymentKwh: parseFloat(Math.max(0, claimedPerf - truePerf).toFixed(4)),
+    underpaymentKwh: parseFloat(Math.max(0, truePerf - claimedPerf).toFixed(4)),
+    overpaymentPct: truePerf > 0 ? parseFloat((Math.max(0, claimedPerf - truePerf) / truePerf * 100).toFixed(2)) : 0,
+    underpaymentPct: truePerf > 0 ? parseFloat((Math.max(0, truePerf - claimedPerf) / truePerf * 100).toFixed(2)) : 0,
     falsePositive: claimedPerf > 0 && truePerf <= 0,
     falseNegative: claimedPerf <= 0 && truePerf > 0,
   }
 }
 
+// ---------------------------------------------------------------------------
+// Strategy Selection — evaluates all strategies and selects the best eligible one
+// ---------------------------------------------------------------------------
+
+export interface StrategySelectionResult {
+  policy: BaselinePolicy
+  allMetrics: Array<{ method: string; mae: number; bias: number; p95: number; fpRate: number; fnRate: number; overpayPct: number; underpayPct: number }>
+}
+
+export function selectBaselineStrategy(
+  evaluations: Record<string, BaselineEvaluation[]>,
+  criteria: BaselineAcceptanceCriteria = DEFAULT_ACCEPTANCE_CRITERIA,
+): StrategySelectionResult {
+  const N = evaluations[Object.keys(evaluations)[0]]?.length ?? 0
+  const allMetrics: StrategySelectionResult['allMetrics'] = []
+  const eligible: Array<{ name: string; mae: number; metrics: any }> = []
+
+  for (const [method, evals] of Object.entries(evaluations)) {
+    const mae = evals.reduce((s, e) => s + e.absoluteError, 0) / N
+    const bias = evals.reduce((s, e) => s + e.bias, 0) / N
+    const p95Errors = evals.map(e => e.absoluteError).sort((a, b) => a - b)
+    const p95 = p95Errors[Math.floor(N * 0.95)] ?? 0
+    const fpRate = evals.filter(e => e.falsePositive).length / N
+    const fnRate = evals.filter(e => e.falseNegative).length / N
+    const overpayPct = evals.filter(e => e.truePerformanceKwh > 0).reduce((s, e) => s + e.overpaymentPct, 0) / N
+    const underpayPct = evals.filter(e => e.truePerformanceKwh > 0).reduce((s, e) => s + e.underpaymentPct, 0) / N
+
+    const metrics = { mae, bias, p95, fpRate, fnRate, overpayPct, underpayPct }
+    allMetrics.push({ method, ...metrics })
+
+    // Check eligibility.
+    if (
+      mae <= criteria.maxMae &&
+      Math.abs(bias) <= criteria.maxAbsBias &&
+      p95 <= criteria.maxP95Error &&
+      fpRate <= criteria.maxFalsePositiveRate &&
+      fnRate <= criteria.maxFalseNegativeRate &&
+      overpayPct <= criteria.maxOverpaymentPct &&
+      underpayPct <= criteria.maxUnderpaymentPct
+    ) {
+      eligible.push({ name: method, mae, metrics })
+    }
+  }
+
+  // Select lowest MAE among eligible.
+  if (eligible.length === 0) {
+    return {
+      policy: {
+        selectedStrategy: '',
+        evaluationId: `eval-${Date.now()}`,
+        evaluatedAt: new Date().toISOString(),
+        criteria,
+        metrics: { mae: 0, bias: 0, p95Error: 0, falsePositiveRate: 0, falseNegativeRate: 0, overpaymentPct: 0, underpaymentPct: 0 },
+        status: 'no_acceptable_strategy',
+      },
+      allMetrics,
+    }
+  }
+
+  const best = eligible.reduce((min, r) => r.mae < min.mae ? r : min)
+  return {
+    policy: {
+      selectedStrategy: best.name,
+      evaluationId: `eval-${Date.now()}`,
+      evaluatedAt: new Date().toISOString(),
+      criteria,
+      metrics: best.metrics,
+      status: 'accepted',
+    },
+    allMetrics,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// evaluateAllBaselines — convenience: run all strategies on one history
+// (uses ground truth for evaluation — NOT for production baseline)
+// ---------------------------------------------------------------------------
+
 export function evaluateAllBaselines(
   history: { days: DayProfile[]; dispatchDay: DispatchDayGroundTruth },
 ): BaselineEvaluation[] {
-  const strategies: BaselineStrategy[] = [
-    new SameTimeHistoricalBaseline(),
-    new WeekdayWeekendAverageBaseline(),
-    new RegressionBaseline(),
-  ]
-
+  const strategies = getAllStrategies()
+  const context: BaselineContext = {
+    dispatchStartIndex: history.dispatchDay.dispatchStartIndex,
+    dispatchEndIndex: history.dispatchDay.dispatchEndIndex,
+    dispatchDate: history.dispatchDay.date,
+    dayOfWeek: history.dispatchDay.dayProfile.dayOfWeek,
+    isWeekend: history.dispatchDay.dayProfile.isWeekend,
+    temperatureC: history.dispatchDay.dayProfile.temperatureC,
+  }
   return strategies.map(s => {
-    const result = s.predict(history.days, history.dispatchDay)
+    const result = s.predict(history.days, context)
     return evaluateBaseline(result, history.dispatchDay)
   })
 }

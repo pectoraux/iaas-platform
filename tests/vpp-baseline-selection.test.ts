@@ -189,8 +189,8 @@ describe('VPP-2B: Hard scenarios (real tests)', () => {
 
     // The counterfactuals should differ (weekday has different pattern).
     const strategy = new WeekdayWeekendAverageBaseline()
-    const weekdayResult = strategy.predict(weekdayHistory.days, weekdayHistory.dispatchDay)
-    const weekendResult = strategy.predict(weekendHistory.days, weekendHistory.dispatchDay)
+    const weekdayResult = strategy.predict(weekdayHistory.days, { dispatchStartIndex: weekdayHistory.dispatchDay.dispatchStartIndex, dispatchEndIndex: weekdayHistory.dispatchDay.dispatchEndIndex, dispatchDate: weekdayHistory.dispatchDay.date, dayOfWeek: weekdayHistory.dispatchDay.dayProfile.dayOfWeek, isWeekend: weekdayHistory.dispatchDay.dayProfile.isWeekend })
+    const weekendResult = strategy.predict(weekendHistory.days, { dispatchStartIndex: weekendHistory.dispatchDay.dispatchStartIndex, dispatchEndIndex: weekendHistory.dispatchDay.dispatchEndIndex, dispatchDate: weekendHistory.dispatchDay.date, dayOfWeek: weekendHistory.dispatchDay.dayProfile.dayOfWeek, isWeekend: weekendHistory.dispatchDay.dayProfile.isWeekend })
 
     // Predictions should differ because the training data has different weekday/weekend mix.
     expect(weekdayResult.predictedCounterfactualKwh).not.toBe(weekendResult.predictedCounterfactualKwh)
@@ -201,7 +201,7 @@ describe('VPP-2B: Hard scenarios (real tests)', () => {
     const history = sim.generateHistory(3, 17, 2, 5)
 
     const strategy = new WeekdayWeekendAverageBaseline()
-    const result = strategy.predict(history.days, history.dispatchDay)
+    const result = strategy.predict(history.days, { dispatchStartIndex: history.dispatchDay.dispatchStartIndex, dispatchEndIndex: history.dispatchDay.dispatchEndIndex, dispatchDate: history.dispatchDay.date, dayOfWeek: history.dispatchDay.dayProfile.dayOfWeek, isWeekend: history.dispatchDay.dayProfile.isWeekend })
 
     expect(result.predictedCounterfactualKwh).toBeGreaterThanOrEqual(0)
     // With only 3 days, the prediction should be less stable — just verify it's finite.
@@ -234,7 +234,7 @@ describe('VPP-2B: Hard scenarios (real tests)', () => {
     const history = sim.generateHistory(14, 3, 2, 5) // 3 AM, low actual
 
     const strategy = new SameTimeHistoricalBaseline()
-    const result = strategy.predict(history.days, history.dispatchDay)
+    const result = strategy.predict(history.days, { dispatchStartIndex: history.dispatchDay.dispatchStartIndex, dispatchEndIndex: history.dispatchDay.dispatchEndIndex, dispatchDate: history.dispatchDay.date, dayOfWeek: history.dispatchDay.dayProfile.dayOfWeek, isWeekend: history.dispatchDay.dayProfile.isWeekend })
     const eval_ = evaluateBaseline(result, history.dispatchDay)
 
     expect(isFinite(eval_.claimedPerformanceKwh)).toBe(true)
@@ -246,7 +246,7 @@ describe('VPP-2B: Hard scenarios (real tests)', () => {
     const history = sim.generateHistory(2, 17, 2, 5) // only 2 days
 
     const strategy = new RegressionBaseline()
-    const result = strategy.predict(history.days, history.dispatchDay)
+    const result = strategy.predict(history.days, { dispatchStartIndex: history.dispatchDay.dispatchStartIndex, dispatchEndIndex: history.dispatchDay.dispatchEndIndex, dispatchDate: history.dispatchDay.date, dayOfWeek: history.dispatchDay.dayProfile.dayOfWeek, isWeekend: history.dispatchDay.dayProfile.isWeekend })
 
     // Should fall back to historical method.
     expect(result.method).toContain('fallback')

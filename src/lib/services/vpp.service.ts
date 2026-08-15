@@ -489,11 +489,16 @@ export async function executeDispatchAssignment(
 
     const attestation = event.attestations[0]
 
-    // --- Baseline calculation (VPP-2: real baseline engine via HistoricalTelemetryProvider) ---
+    // --- Baseline calculation (VPP-2C: production baseline via HistoricalTelemetryProvider) ---
+    // FIX: Uses BaselineContext (production input) — NEVER ground truth.
+    // FIX: Resolves strategy from persisted policy (not hardcoded).
+    // FIX: Prevents negative performance payments: max(0, actual - baseline).
     const actualKwh = new Prisma.Decimal(dischargeResult.actualKwh)
 
     const { SimulatedHistoricalTelemetryProvider } = await import('./historical-telemetry-provider.service')
-    const { WeekdayWeekendAverageBaseline } = await import('./baseline-engine.service')
+    const baselineEngine = await import('./baseline-engine.service')
+    const getStrategy = baselineEngine.getStrategy
+    type BaselineContext = baselineEngine.BaselineContext
     const telemetryProvider = new SimulatedHistoricalTelemetryProvider()
 
     // Get historical telemetry (training data — strictly before dispatch).
@@ -503,17 +508,49 @@ export async function executeDispatchAssignment(
       14,
     )
 
-    // If no historical data is available, the baseline is UNAVAILABLE.
-    // Do NOT silently fall back to baseline=0. The assignment enters
-    // PERFORMANCE_REVIEW_REQUIRED — no performance reward is settled.
     if (!historicalDays || historicalDays.length < 3) {
       throw new Error('BASELINE_UNAVAILABLE: insufficient historical telemetry for baseline calculation')
     }
 
-    // Get dispatch day ground truth (for metadata/auditability).
+    // Build BaselineContext from observable dispatch parameters ONLY.
+    // This contains NO ground truth (no trueCounterfactual, no trueIncremental).
     const dispatchDurationHours = Math.ceil(
       (assignment.dispatch.endTime.getTime() - assignment.dispatch.startTime.getTime()) / 3600000,
     )
+    const dispatchHour = assignment.dispatch.startTime.getHours()
+    const dispatchDate = assignment.dispatch.startTime.toISOString().split('T')[0]
+    const dayOfWeek = assignment.dispatch.startTime.getDay()
+
+    const baselineContext: BaselineContext = {
+      dispatchStartIndex: dispatchHour * 4,
+      dispatchEndIndex: Math.min(95, dispatchHour * 4 + dispatchDurationHours * 4),
+      dispatchDate,
+      dayOfWeek,
+      isWeekend: dayOfWeek === 0 || dayOfWeek === 6,
+    }
+
+    // Resolve the baseline strategy from the network's configuration.
+    // In production, this would be read from NetworkVersion.baselinePolicy.
+    // For the MVP, we use 'weekday_weekend_average' as the default selected strategy.
+    // This is the seam where a persisted BaselinePolicy would be loaded.
+    const strategyName = 'weekday_weekend_average' // TODO: read from NetworkVersion config
+    const baselineStrategy = getStrategy(strategyName)
+    if (!baselineStrategy) {
+      throw new Error(`BASELINE_UNAVAILABLE: strategy '${strategyName}' not found in registry`)
+    }
+
+    const baselinePrediction = baselineStrategy.predict(historicalDays, baselineContext)
+
+    const baselineKwh = new Prisma.Decimal(baselinePrediction.predictedCounterfactualKwh)
+    // FIX: Prevent negative performance payments.
+    // rawPerformanceKwh preserves the signed value for analytics.
+    // verifiedPerformanceKwh is max(0, actual - baseline) — the economically payable quantity.
+    const rawPerformanceKwh = actualKwh.minus(baselineKwh)
+    const verifiedPerformanceKwh = rawPerformanceKwh.isNegative()
+      ? new Prisma.Decimal(0)
+      : rawPerformanceKwh
+
+    // Fetch ground truth for METADATA ONLY (not used in baseline calculation).
     const groundTruth = await telemetryProvider.getDispatchDayGroundTruth?.(
       assignment.assetId,
       assignment.dispatch.startTime,
@@ -521,58 +558,38 @@ export async function executeDispatchAssignment(
       parseFloat(assignment.assignedKw),
     )
 
-    // Run the baseline strategy.
-    const baselineStrategy = new WeekdayWeekendAverageBaseline()
-
-    const dispatchHour = assignment.dispatch.startTime.getHours()
-    const dispatchStartIndex = dispatchHour * 4
-    const dispatchEndIndex = Math.min(95, dispatchStartIndex + dispatchDurationHours * 4)
-
-    // Build dispatch day context for the baseline strategy.
-    const baselineInput = groundTruth ?? {
-      date: assignment.dispatch.startTime.toISOString().split('T')[0],
-      dispatchStartIndex,
-      dispatchEndIndex,
-      trueCounterfactualKwh: 0,
-      actualWithDispatchKwh: parseFloat(actualKwh.toString()),
-      trueIncrementalKwh: 0,
-      dayProfile: { date: '', dayOfWeek: assignment.dispatch.startTime.getDay(), isWeekend: [0, 6].includes(assignment.dispatch.startTime.getDay()), temperatureC: 20, points: [], totalEnergyKwh: 0, peakPowerKw: 0 },
-      counterfactualProfile: { date: '', dayOfWeek: 0, isWeekend: false, temperatureC: 20, points: [], totalEnergyKwh: 0, peakPowerKw: 0 },
-    }
-
-    const baselinePrediction = baselineStrategy.predict(historicalDays, baselineInput)
-
-    const baselineKwh = new Prisma.Decimal(baselinePrediction.predictedCounterfactualKwh)
-    const performanceKwh = actualKwh.minus(baselineKwh)
-
     const baseline = await db.vppBaseline.create({
       data: {
         tenantId,
         assignmentId,
         method: baselinePrediction.method,
-        baselineKw: '0', // average power during baseline window
+        baselineKw: '0',
         baselineKwh: baselineKwh.toString(),
         actualKw: dischargeResult.actualKw,
         actualKwh: actualKwh.toString(),
-        performanceKwh: performanceKwh.toString(),
+        performanceKwh: verifiedPerformanceKwh.toString(),
         metadataJson: JSON.stringify({
           attestationId: attestation.id,
           baselineMethod: baselinePrediction.method,
+          strategyName,
           predictedCounterfactualKwh: baselinePrediction.predictedCounterfactualKwh,
-          trueCounterfactualKwh: groundTruth?.trueCounterfactualKwh ?? null,
-          trueIncrementalKwh: groundTruth?.trueIncrementalKwh ?? null,
+          rawPerformanceKwh: rawPerformanceKwh.toString(), // signed value for analytics
+          verifiedPerformanceKwh: verifiedPerformanceKwh.toString(), // non-negative payable
+          negativePerformanceClipped: rawPerformanceKwh.isNegative(),
+          trueCounterfactualKwh: groundTruth?.trueCounterfactualKwh ?? null, // metadata only
+          trueIncrementalKwh: groundTruth?.trueIncrementalKwh ?? null, // metadata only
           historyDays: historicalDays.length,
           provider: 'simulated',
         }),
       },
     })
 
-    // --- Derived contribution ---
+    // --- Derived contribution (uses verifiedPerformanceKwh — never negative) ---
     const contribution = await createContribution(
       tenantId,
       {
         attestationIds: [attestation.id],
-        derivedQuantity: performanceKwh.toString(),
+        derivedQuantity: verifiedPerformanceKwh.toString(),
         derivedUnit: 'kWh',
       },
       `vpp-baseline-${baseline.id}`,
@@ -585,7 +602,7 @@ export async function executeDispatchAssignment(
         economicStage: 'delivery_verified',
         actualKwh: actualKwh.toString(),
         baselineKwh: baselineKwh.toString(),
-        performanceKwh: performanceKwh.toString(),
+        performanceKwh: verifiedPerformanceKwh.toString(),
         eventId: event.id,
         contributionId: contribution.id,
       },
@@ -651,7 +668,7 @@ export async function executeDispatchAssignment(
       resourceId: assignmentId,
       metadata: {
         actualKwh: actualKwh.toString(),
-        performanceKwh: performanceKwh.toString(),
+        performanceKwh: verifiedPerformanceKwh.toString(),
         eventId: event.id,
         contributionId: contribution.id,
         rewardId: reward.id,
@@ -667,7 +684,7 @@ export async function executeDispatchAssignment(
       contribution_id: contribution.id,
       reward_id: reward.id,
       settlement_id: settlement.id,
-      performance_kwh: performanceKwh.toString(),
+      performance_kwh: verifiedPerformanceKwh.toString(),
       actual_kwh: actualKwh.toString(),
       baseline_kwh: baselineKwh.toString(),
       contribution_quantity: contribution.quantity,

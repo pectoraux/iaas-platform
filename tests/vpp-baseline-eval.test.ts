@@ -165,7 +165,7 @@ describe('VPP-2A: Hard scenarios', () => {
     const history = sim.generateHistory(3, 17, 2, 5)
 
     const strategy = new WeekdayWeekendAverageBaseline()
-    const result = strategy.predict(history.days, history.dispatchDay)
+    const result = strategy.predict(history.days, { dispatchStartIndex: history.dispatchDay.dispatchStartIndex, dispatchEndIndex: history.dispatchDay.dispatchEndIndex, dispatchDate: history.dispatchDay.date, dayOfWeek: history.dispatchDay.dayProfile.dayOfWeek, isWeekend: history.dispatchDay.dayProfile.isWeekend })
 
     expect(result.predictedCounterfactualKwh).toBeGreaterThanOrEqual(0)
   })
@@ -177,7 +177,7 @@ describe('VPP-2A: Hard scenarios', () => {
     const history = sim.generateHistory(14, 3, 2, 5) // 3 AM, low actual
 
     const strategy = new SameTimeHistoricalBaseline()
-    const result = strategy.predict(history.days, history.dispatchDay)
+    const result = strategy.predict(history.days, { dispatchStartIndex: history.dispatchDay.dispatchStartIndex, dispatchEndIndex: history.dispatchDay.dispatchEndIndex, dispatchDate: history.dispatchDay.date, dayOfWeek: history.dispatchDay.dayProfile.dayOfWeek, isWeekend: history.dispatchDay.dayProfile.isWeekend })
 
     // At 3 AM, actual discharge should be high (dispatch), counterfactual near 0.
     // But if baseline overpredicts, claimed performance could be low.
