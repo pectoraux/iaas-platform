@@ -422,18 +422,35 @@ export function classifyReservationError(
  * Check if an error is a retryable transaction conflict (serialization
  * failure, deadlock, or timeout).
  *
- * Prisma error codes:
- *   P2034 — too many connections / serialization failure
- *   P2031 — transaction timeout
- *   P2024 — operation timeout
- *   P2033 — connection error
- *   P1001 — connection lost
- *   P1002 — connection timed out
+ * Prisma error codes (per Prisma's error reference):
+ *   P2034 — transaction write conflict or deadlock → RETRYABLE
+ *          (genuine transaction conflict; retrying with a fresh
+ *           transaction is the correct response)
+ *   P2024 — connection pool timeout → RETRYABLE
+ *          (transient; the connection pool was momentarily exhausted)
+ *
+ *   P1001 — connection lost → RETRYABLE (transient infrastructure)
+ *   P1002 — connection timed out → RETRYABLE (transient infrastructure)
+ *          (These are connection-level failures, not transaction conflicts
+ *           per se, but they are transient infrastructure issues where a
+ *           retry is appropriate. They are classified as retryable_conflict
+ *           because the caller should retry with backoff.)
+ *
+ * EXPLICITLY NOT RETRYABLE (removed — they are application/data bugs,
+ * not transient conflicts):
+ *   P2033 — a number doesn't fit into a 64-bit signed integer → RE-THROWN
+ *          (This is a data/programming error, not a capacity or conflict
+ *           issue. Retrying won't help — the data is wrong.)
+ *   P2031 — MongoDB transaction requires a replica set → RE-THROWN
+ *          (This is a configuration error specific to MongoDB, not a
+ *           transient transaction conflict. Our database is PostgreSQL.)
  */
 function isRetryableTransactionError(err: unknown): boolean {
-  // PrismaKnownRequestError carries a `code` field.
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
-    const retryableCodes = ['P2034', 'P2031', 'P2024', 'P2033', 'P1001', 'P1002']
+    // Only genuine transaction conflicts and transient connection failures.
+    // P2033 (integer overflow) and P2031 (MongoDB replica set) are NOT
+    // included — they are application/config errors, not retryable.
+    const retryableCodes = ['P2034', 'P2024', 'P1001', 'P1002']
     if (retryableCodes.includes(err.code)) return true
   }
 

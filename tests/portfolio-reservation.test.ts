@@ -669,6 +669,51 @@ describe('VPP-2D-3: classifyReservationError (direct unit tests)', () => {
     expect(() => classifyReservationError(err, dummyPortfolio)).toThrow(err)
   })
 
+  it('P2033 (integer overflow) → RE-THROWN (not retryable_conflict)', () => {
+    // P2033 = "a number doesn't fit into a 64-bit signed integer" — this is
+    // a data/programming error, NOT a transient transaction conflict.
+    // Retrying won't help — the data is wrong. Must be re-thrown, not
+    // disguised as a retryable conflict.
+    const err = new Prisma.PrismaClientKnownRequestError(
+      'Number out of range for 64-bit signed integer',
+      { code: 'P2033', clientVersion: '6.0.0' },
+    )
+    expect(() => classifyReservationError(err, dummyPortfolio)).toThrow(err)
+  })
+
+  it('P2031 (MongoDB replica set required) → RE-THROWN (not retryable_conflict)', () => {
+    // P2031 = "MongoDB transaction requires a replica set" — this is a
+    // configuration error specific to MongoDB, not a transient transaction
+    // conflict. Our database is PostgreSQL. Must be re-thrown.
+    const err = new Prisma.PrismaClientKnownRequestError(
+      'Transaction must be run on a MongoDB replica set',
+      { code: 'P2031', clientVersion: '6.0.0' },
+    )
+    expect(() => classifyReservationError(err, dummyPortfolio)).toThrow(err)
+  })
+
+  it('P1001 (connection lost) → retryable_conflict (transient infrastructure)', () => {
+    // P1001 = connection lost — transient infrastructure failure where a
+    // retry is appropriate. Classified as retryable_conflict because the
+    // caller should retry with backoff.
+    const err = new Prisma.PrismaClientKnownRequestError(
+      'Connection lost',
+      { code: 'P1001', clientVersion: '6.0.0' },
+    )
+    const result = classifyReservationError(err, dummyPortfolio)
+    expect(result.status).toBe('retryable_conflict')
+  })
+
+  it('P1002 (connection timed out) → retryable_conflict (transient infrastructure)', () => {
+    // P1002 = connection timed out — transient infrastructure failure.
+    const err = new Prisma.PrismaClientKnownRequestError(
+      'Connection timed out',
+      { code: 'P1002', clientVersion: '6.0.0' },
+    )
+    const result = classifyReservationError(err, dummyPortfolio)
+    expect(result.status).toBe('retryable_conflict')
+  })
+
   it('non-Error value (string) is RE-THROWN', () => {
     expect(() => classifyReservationError('something weird', dummyPortfolio)).toThrow()
   })
