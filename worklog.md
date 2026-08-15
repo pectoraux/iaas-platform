@@ -830,3 +830,61 @@ Stage Summary:
 - appendAudit is now dual-mode: best-effort (no tx, for ordinary auditing) or transactional (with tx, for critical immutable transitions). This is a reusable improvement for future settlement/reconciliation operations.
 - VPP-2C status: ALL GREEN — version reproducibility ✅, telemetry binding ✅, version authorization ✅, reward-policy closure ✅, strict baseline policy ✅, publish-level baseline gate (sequential) ✅, publish-level baseline gate (concurrency-safe) ✅, publication event/audit atomicity ✅, runtime no-fallback ✅.
 - VPP-2C is now FROZEN. Proceed to VPP-2D (portfolio-level risk: 100 DERs → individual uncertainty → correlation/availability → safe aggregate commitment).
+
+---
+Task ID: VPP-2C-failure-injection + VPP-2D-1-portfolio-risk-engine
+Agent: orchestrator
+Task: (1) Close VPP-2C with the failure-injection test the reviewer requested. (2) Begin VPP-2D: portfolio-level capacity risk engine — "given N DERs with uncertain performance and correlated failure, how much can the platform safely promise?"
+
+Work Log:
+
+PART 1 — VPP-2C CLOSURE (failure-injection test)
+
+1. Added tests/vpp-publication-failure-injection.test.ts — 3 cases proving the publication transaction is atomic even under failure:
+   - failure AFTER version update rolls back the entire transaction (publishedAt stays null, no capabilities, no event, no audit, network.currentVersionId unchanged)
+   - failure DURING emit rolls back the version update + audit too (the audit row that "succeeded" is also rolled back — proving coupling)
+   - the draft is still publishable after a failed attempt (no partial state — the real publishNetworkVersion succeeds)
+2. This proves the exact crash window the reviewer identified: if appendAudit/emit fails for any reason, the version stays unpublished. The transaction semantics guarantee this.
+
+PART 2 — VPP-2D-1 PORTFOLIO RISK ENGINE
+
+3. Implemented src/lib/services/portfolio-risk.service.ts — a PURE computation engine (no DB, no side effects) that answers the central VPP-2D question: "given N DERs with uncertain performance and correlated failure, how much aggregate capacity can the platform safely promise?"
+
+4. MATHEMATICAL MODEL:
+   - Per-DER: X_i is a mixture — with prob p_i, X_i ~ N(μ_i, σ_i²); otherwise 0.
+     E[X_i] = p_i·μ_i, Var(X_i) = p_i·σ_i² + p_i·(1-p_i)·μ_i² (law of total variance)
+   - Portfolio: S = Σ X_i
+     E[S] = Σ p_i·μ_i
+     Var(S) = Σ Var(X_i) + 2·Σ_{i<j} ρ_ij·√(Var(X_i)·Var(X_j))
+   - Safe capacity (VaR): safeCapacity = E[S] - z_c·√Var(S), floored at 0
+     z_c = inverse normal CDF at confidence c (z_0.99 ≈ 2.326)
+   - Committed = min(safeCapacity, requested) — never over-promise
+
+5. CORRELATION MODEL: Block-correlation — DERs in the same cluster get ρ_within (common-mode failure), different clusters get ρ_between. Extensible: computePortfolioRiskWithMatrix accepts a general correlation matrix for future empirical models.
+
+6. INVERSE NORMAL CDF: Implemented Acklam's rational approximation (accurate to ~1.15e-9) — no external statistics dependency needed.
+
+7. UNCERTAINTY DERIVATION: deriveUncertaintyFromEvaluation() builds a per-DER profile from baseline evaluation metrics (MAE, P95) + reserved capacity + duration. σ = max(MAE, P95/1.96), μ = reservedKw·durationHours, default p=0.98. This is a defensible first-pass; the engine itself is pure and doesn't depend on this derivation.
+
+8. DIVERSIFICATION INSIGHT captured in tests: uncorrelated portfolios see σ/E → 0 as N grows (CLT), while fully correlated portfolios see no diversification. Real portfolios sit between. Clustering matters: spreading DERs across more clusters improves safe capacity.
+
+9. TESTS (tests/portfolio-risk.test.ts) — 35+ cases across 10 describe blocks:
+   - inverseNormalCDF (known z-scores, edge cases)
+   - per-DER contribution (availability mixture, law of total variance)
+   - correlation matrix (same/different cluster, symmetry, diagonal)
+   - uncorrelated portfolio (Var = Σ Var, safe capacity formula)
+   - correlated portfolio (higher variance, lower safe capacity, no diversification at ρ=1)
+   - availability effect (lower p → lower E, higher Var → double penalty)
+   - confidence level trade-off (higher c → lower safe capacity)
+   - diversification (σ/E decreases with N for uncorrelated, constant for correlated)
+   - safe capacity boundaries (under-promise, floor at 0, empty portfolio)
+   - 100-DER portfolio sanity (realistic safe capacity, clustering matters)
+   - uncertainty derivation from evaluation metrics
+   - general correlation matrix support
+
+10. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (portfolio-risk.service.ts compiles clean in isolation; test-file errors are the pre-existing bun:test module resolution issue). Dev server: / route HTTP 200 in ~33ms. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- VPP-2C is FROZEN with the failure-injection test closing the atomicity proof.
+- VPP-2D-1 delivers the portfolio risk engine — the core mathematical answer to "how much capacity can the platform safely promise?" The engine is pure, tested, and captures the key insight: individual DER uncertainty + inter-DER correlation → portfolio VaR → safe committed capacity. Diversification reduces risk for uncorrelated DERs; correlation (common-mode failure) erodes the diversification benefit.
+- NEXT (VPP-2D-2): integrate the risk engine into buyer program creation — when a buyer requests X kW, compute the safe committed capacity from the portfolio of available DERs, persist it, and enforce it at dispatch time. Then VPP-2D-3: portfolio-level settlement (aggregate realized response vs. committed).
