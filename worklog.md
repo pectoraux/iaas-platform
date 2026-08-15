@@ -987,3 +987,43 @@ Stage Summary:
 - Correlation-aware diversification is built into the scoring: assets in new clusters get a novelty bonus, so the optimizer naturally spreads selections across clusters to reduce common-mode failure risk.
 - The pruning pass reduces opportunity cost by removing redundant assets after greedy selection.
 - NEXT (VPP-2D-3): integrate the optimizer into buyer program creation — when a buyer requests X kW, query available capacity from the generic layer, build candidates from DERs + their baseline evaluations, run the optimizer, persist the selected portfolio as reservations, and enforce the commitment at dispatch time.
+
+---
+Task ID: VPP-2D-2B-optimizer-hardening
+Agent: orchestrator
+Task: Harden the portfolio optimizer per reviewer's 7 requirements — explicit objective, marginal-safe-capacity scoring, partial allocation, immutable profiles, candidate validation, optimality tests, label as heuristic.
+
+Work Log:
+1. EXPLICIT LEXICOGRAPHIC OBJECTIVE (documented as the contract):
+   Primary: meet requested normal-approximation safe capacity
+   Secondary: minimize total opportunity cost
+   Tertiary: minimize direct cost
+   Quaternary: minimize concentration (diversify across clusters)
+2. MARGINAL SAFE CAPACITY SCORING: Replaced arbitrary fixed weights (expectedKw*0.3, cost*0.01) with actual marginal contribution: marginalSafeKw = safeCapacity(selected+candidate) - safeCapacity(selected), scored as marginalSafeKw / (1 + totalCost + totalOppCost). This is a principled signal derived from the risk engine itself.
+3. PARTIAL ALLOCATION: Implemented binary search on the last-added asset to find the minimum allocation that meets the target. The optimizer now returns committedKw < availableCapacityKw for the last asset (e.g., 53.5 kW of 100 available), freeing unused capacity. This is the key abstraction for the capacity marketplace — same primitive works for VPP (kW), storage (TB), compute (GPU), wireless (Gbps).
+4. IMMUTABLE UNCERTAINTY PROFILES: buildCandidate() no longer mutates the caller's DerUncertaintyProfile. availableCapacityKw is stored as a separate hard constraint. If expected > available, the optimizer handles it at allocation time (via partial allocation + profile scaling), not by silently editing the statistical model.
+5. CANDIDATE VALIDATION: Added validateCandidates() — checks unique assetId, non-empty clusterId, non-negative finite availableCapacityKw/expectedPerformanceKw/stdDevKw, availabilityProb ∈ [0,1], non-negative cost fields. Throws ValidationError on the first invalid candidate.
+6. OPTIMALITY TESTS: Implemented exhaustiveOptimize() (2^N brute-force for N≤15) and measureOptimalityGap(). The test suite compares greedy vs exhaustive and asserts gap < 10% (uncorrelated) and < 20% (correlated). Runtime verification shows gap = 0% in both tested cases.
+7. LABELED AS HEURISTIC: Result carries algorithm='greedy_marginal_safe_capacity' (or 'exhaustive' for the reference). JSDoc explicitly states "HEURISTIC — not guaranteed globally optimal." The optimalityGap field is populated when the exhaustive reference is available.
+8. RUNTIME VERIFICATION (5 scenarios, all pass):
+   - Partial allocation: 3 assets selected, last allocated 53.5/100 kW, total 253.5 kW (close to 250 request)
+   - Immutable profile: expected=80 preserved when available=50 (not silently capped)
+   - Optimality gap (uncorrelated, 8 candidates): 0.00%
+   - Optimality gap (correlated, 10 candidates): 0.00%
+   - Opportunity cost: all 5 selected from cheap pool
+9. TESTS: 35+ cases across 11 describe blocks:
+   - Candidate validation (8 cases: valid, duplicate, negative, out-of-range, non-finite, empty cluster, negative cost)
+   - Basic selection, insufficient capacity
+   - Partial allocation (committedKw < availableCapacityKw, totalCommittedKw near request)
+   - Correlation diversification
+   - Opportunity cost preference
+   - Immutable profiles (buildCandidate doesn't mutate, optimizer respects availableCapacityKw)
+   - Pruning, edge cases
+   - Optimality gap (exhaustive valid, greedy close to optimal, gap bounded, N>15 rejected)
+   - Result structure, 100-candidate sanity, buildCandidate helper
+10. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors in portfolio-optimizer.service.ts (only pre-existing bun:test test-file error). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The optimizer is now a principled allocator: it scores candidates by actual marginal safe capacity (not arbitrary weights), supports partial kW allocation (the key marketplace primitive), preserves uncertainty profiles immutably, validates candidates, and carries a measurable optimality gap.
+- The exhaustive reference optimizer (2^N brute-force) proves the greedy heuristic finds the optimal solution in tested cases (gap = 0%), with bounded gaps (< 10-20%) asserted in the test suite.
+- The engine remains GENERIC (no VPP types, no DB access) and ready for VPP-2D-3 integration: candidate pool → optimizer → partial capacity reservations.
