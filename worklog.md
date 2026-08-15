@@ -703,3 +703,24 @@ Stage Summary:
 - Evaluation + policy persistence is atomic.
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit 77c8d2b)
+
+---
+Task ID: VPP-2C-version-binding-final
+Agent: orchestrator
+Task: Fix two final VPP-2C correctness gaps — (1) telemetry events must bind to dispatch's NetworkVersion, (2) createBuyerProgram must validate the version belongs to network+tenant and is published.
+
+Work Log:
+1. TELEMETRY VERSION BINDING: Replaced `db.networkVersion.findFirst({ orderBy: version desc })` (latest published) with `assignment.dispatch.program.networkVersion` (already eager-loaded). The SAME `programVersion` object is now used for BOTH `ingestEvent.network_version_id` AND baseline policy resolution — eliminating the version-split where baseline→V12 but verification→V13. Added defend-in-depth check that programVersion is non-null and published.
+2. BASELINE METADATA AUDIT TRAIL: Added `networkVersionId` + `networkVersionNumber` to VppBaseline.metadataJson so the exact version used for baseline is auditable per-execution. Must always equal event.networkVersionId (no version split).
+3. REMOVED DUPLICATE DB LOOKUP: Baseline policy resolution previously did a second `db.networkVersion.findUnique` for the same version — now reuses `programVersion` from the single eager-loaded object.
+4. CREATEBUYERPROGRAM VALIDATION: When `networkVersionId` is supplied explicitly, atomically validates via compound filter `{ id, network: { id: networkId, tenantId } }` — enforces cross-network AND cross-tenant constraints in one round-trip. Requires `publishedAt != null` (no draft-program state exists). Default path (no explicit version) uses `network.currentVersionId`, which is always published (set by publishNetworkVersion).
+5. REPRODUCIBILITY TEST STRENGTHENED: Added 3 invariants per dispatch — (a) `event.networkVersionId == v12Id` (the key missing assertion the reviewer identified), (b) baseline strategy matches the bound version, (c) `metadata.networkVersionId == event.networkVersionId` (no version split). Both V12 and V13 cases now assert all three.
+6. NEW VALIDATION TEST FILE (tests/vpp-version-binding.test.ts): 6 cases — valid binding accepted, cross-network rejected, cross-tenant rejected, unpublished rejected, non-existent rejected, default-to-current works.
+7. VERIFICATION: `bun run lint` clean. `tsc --noEmit` introduces ZERO new errors (all remaining errors pre-existing in reconcileAssignment + bun:test module resolution). Dev server healthy: / route HTTP 200 in ~30ms, VPP API route compiles vpp.service.ts (284ms) and returns proper 401 auth. Agent-browser confirms page renders cleanly with no console/page errors.
+
+Stage Summary:
+- NetworkVersion is now the immutable policy boundary for the ENTIRE dispatch execution chain: verification → baseline → reward → contribution all reference the SAME programVersion object (dispatch.program.networkVersionId). No version split is possible.
+- createBuyerProgram is a proper authorization boundary: cross-network, cross-tenant, and unpublished versions are all rejected before a program is created.
+- Historical reproducibility test now asserts event.networkVersionId (not just baseline.strategyName), closing the gap the reviewer identified.
+- The architectural rule the reviewer wanted frozen is now enforced in code: "Every event and every economic calculation associated with a dispatch must resolve against the same immutable NetworkVersion."
+- Ready to freeze NetworkVersion as the immutable policy boundary and proceed to VPP-2D (portfolio-level risk).

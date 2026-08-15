@@ -1,0 +1,885 @@
+     1→// =============================================================================
+     2→// VPP Service — Energy Virtual Power Plant domain layer.
+     3→//
+     4→// CRITICAL ARCHITECTURAL RULE: this service does NOT modify or duplicate the
+     5→// generic pipeline. It uses:
+     6→//   - generic Event (for telemetry)
+     7→//   - generic Attestation (for verified performance)
+     8→//   - generic Contribution (with DERIVED quantity — task 1)
+     9→//   - generic Reward (for payment calculation)
+    10→//   - generic Ledger (for double-entry accounting)
+    11→//   - generic Settlement (for payout)
+    12→//
+    13→// VPP fixes from review:
+    14→//   1. Derived contribution: performance_kwh becomes Contribution.quantity
+    15→//   2. DER adapter interface: SimulatedDERAdapter extracted
+    16→//   3. Capacity integrity: reservation validates operator/asset/capability/limits
+    17→//   4. No double-selling: time-window-aware capacity allocation (platform primitive)
+    18→//   5. Transactional dispatch: atomic capacity consumption
+    19→//   6. No auto-funding: buyer must be pre-funded
+    20→//   7. Idempotent execution: completed assignment returns existing result
+    21→// =============================================================================
+    22→
+    23→import { db } from '@/lib/db'
+    24→import { Prisma } from '@prisma/client'
+    25→import { NotFoundError, ValidationError, ConflictError } from '@/lib/domain/errors'
+    26→import { appendAudit, AuditEvents } from '@/lib/domain/audit'
+    27→import { ingestEvent, buildCanonicalMessage } from './ingestion.service'
+    28→import { processEventOutbox, processSettlementOutbox, processSettlementForReward } from './worker.service'
+    29→import { createContribution } from './contribution.service'
+    30→import { calculateReward } from './reward.service'
+    31→import { postRewardToLedger } from './ledger.service'
+    32→import { createSettlement } from './settlement.service'
+    33→import { signMessage, deriveSigningKey } from '@/lib/domain/crypto'
+    34→import {
+    35→  createCapacityReservation as allocateReservation,
+    36→  createCapacityCommitment,
+    37→  recordUsage,
+    38→  releaseCommitment,
+    39→  findReservationBySource,
+    40→} from './capacity.service'
+    41→import { SimulatedDERAdapter, type DERAdapter } from './der-adapter.service'
+    42→
+    43→const derAdapter: DERAdapter = new SimulatedDERAdapter()
+    44→
+    45→// ---------------------------------------------------------------------------
+    46→// Buyer Programs
+    47→// ---------------------------------------------------------------------------
+    48→
+    49→export interface CreateBuyerProgramInput {
+    50→  networkId: string
+    51→  name: string
+    52→  description?: string
+    53→  rewardRuleId: string
+    54→  networkVersionId?: string // optional: defaults to network.currentVersionId
+    55→  dispatchWindowStart: string
+    56→  dispatchWindowEnd: string
+    57→  pricePerKwh: string
+    58→  currency?: string
+    59→  minCapacityKw: string
+    60→  maxCapacityKw?: string
+    61→}
+    62→
+    63→export async function createBuyerProgram(tenantId: string, input: CreateBuyerProgramInput, actorId?: string) {
+    64→  const network = await db.networkDefinition.findFirst({ where: { id: input.networkId, tenantId } })
+    65→  if (!network) throw new NotFoundError('network', input.networkId)
+    66→  const rule = await db.rewardRule.findFirst({ where: { id: input.rewardRuleId, tenantId } })
+    67→  if (!rule) throw new NotFoundError('reward_rule', input.rewardRuleId)
+    68→
+    69→  // Bind to the concrete NetworkVersion (defaults to current if not specified).
+    70→  const networkVersionId = input.networkVersionId ?? network.currentVersionId
+    71→  if (!networkVersionId) throw new ValidationError('Network has no published version')
+    72→
+    73→  const program = await db.vppBuyerProgram.create({
+    74→    data: {
+    75→      tenantId,
+    76→      networkId: input.networkId,
+    77→      networkVersionId,
+    78→      name: input.name,
+    79→      description: input.description ?? null,
+    80→      rewardRuleId: input.rewardRuleId,
+    81→      dispatchWindowStart: input.dispatchWindowStart,
+    82→      dispatchWindowEnd: input.dispatchWindowEnd,
+    83→      pricePerKwh: input.pricePerKwh,
+    84→      currency: input.currency ?? 'USD',
+    85→      minCapacityKw: input.minCapacityKw,
+    86→      maxCapacityKw: input.maxCapacityKw ?? null,
+    87→    },
+    88→  })
+    89→
+    90→  await appendAudit({
+    91→    tenantId, actorId,
+    92→    eventType: 'vpp.program_created',
+    93→    resourceType: 'vpp_buyer_program',
+    94→    resourceId: program.id,
+    95→    metadata: { name: program.name, networkId: input.networkId },
+    96→  })
+    97→
+    98→  return program
+    99→}
+   100→
+   101→export async function listBuyerPrograms(tenantId: string) {
+   102→  return db.vppBuyerProgram.findMany({
+   103→    where: { tenantId },
+   104→    include: { network: true, rewardRule: true, reservations: { include: { asset: true, operator: true } } },
+   105→    orderBy: { createdAt: 'desc' },
+   106→  })
+   107→}
+   108→
+   109→// ---------------------------------------------------------------------------
+   110→// Capacity Reservations (task 3: validate integrity, task 4: no double-selling)
+   111→// ---------------------------------------------------------------------------
+   112→
+   113→export interface CreateReservationInput {
+   114→  programId: string
+   115→  operatorId: string
+   116→  assetId: string
+   117→  capabilityType: string
+   118→  reservedKw: string
+   119→  reservedKwh?: string
+   120→  // Time window for the reservation (task 4: time-window-aware).
+   121→  startTime: string
+   122→  endTime: string
+   123→  // Task 2: NO physicalCapacityKw from caller — resolved from verified assignment.
+   124→}
+   125→
+   126→export async function createCapacityReservation(tenantId: string, input: CreateReservationInput, actorId?: string) {
+   127→  const program = await db.vppBuyerProgram.findFirst({ where: { id: input.programId, tenantId } })
+   128→  if (!program) throw new NotFoundError('vpp_buyer_program', input.programId)
+   129→
+   130→  // Task 3: validate the full chain.
+   131→  // 1. Operator owns the asset.
+   132→  const asset = await db.asset.findFirst({ where: { id: input.assetId, tenantId } })
+   133→  if (!asset) throw new NotFoundError('asset', input.assetId)
+   134→  if (asset.operatorId !== input.operatorId) {
+   135→    throw new ValidationError(`Operator ${input.operatorId} does not own asset ${input.assetId}`)
+   136→  }
+   137→
+   138→  // 2. Asset is assigned to the program's network with this capability.
+   139→  const assignment = await db.assetNetworkAssignment.findFirst({
+   140→    where: {
+   141→      tenantId, assetId: input.assetId, networkId: program.networkId,
+   142→      capabilityType: input.capabilityType, status: 'active',
+   143→    },
+   144→  })
+   145→  if (!assignment) {
+   146→    throw new ValidationError(
+   147→      `Asset ${input.assetId} is not assigned to network ${program.networkId} with capability ${input.capabilityType}`,
+   148→    )
+   149→  }
+   150→
+   151→  // ATOMIC: VPP reservation + capacity reservation in ONE transaction.
+   152→  // The VPP reservation is created first, then the platform capacity
+   153→  // reservation with sourceId = vppReservation.id.
+   154→  const result = await db.$transaction(async (tx) => {
+   155→    // Create the VPP reservation first (inside the transaction).
+   156→    const vppReservation = await tx.vppCapacityReservation.create({
+   157→      data: {
+   158→        tenantId,
+   159→        programId: input.programId,
+   160→        operatorId: input.operatorId,
+   161→        assetId: input.assetId,
+   162→        capabilityType: input.capabilityType,
+   163→        reservedKw: input.reservedKw,
+   164→        reservedKwh: input.reservedKwh ?? null,
+   165→        effectiveFrom: new Date(input.startTime),
+   166→        effectiveTo: new Date(input.endTime),
+   167→      },
+   168→    })
+   169→
+   170→    // Create the platform capacity reservation (inside the same transaction).
+   171→    // Physical capacity is resolved from the verified assignment.
+   172→    const capacityReservation = await allocateReservation({
+   173→      tenantId,
+   174→      assetId: input.assetId,
+   175→      networkId: program.networkId,
+   176→      capabilityType: input.capabilityType,
+   177→      requestedAmount: input.reservedKw,
+   178→      startTime: new Date(input.startTime),
+   179→      endTime: new Date(input.endTime),
+   180→      sourceType: 'vpp_reservation',
+   181→      sourceId: vppReservation.id,
+   182→    }, tx)
+   183→
+   184→    return { vppReservation, capacityReservation }
+   185→  }, { timeout: 30000 })
+   186→
+   187→  const { vppReservation, capacityReservation } = result
+   188→
+   189→  await appendAudit({
+   190→    tenantId, actorId,
+   191→    eventType: 'vpp.reservation_created',
+   192→    resourceType: 'vpp_capacity_reservation',
+   193→    resourceId: vppReservation.id,
+   194→    metadata: {
+   195→      programId: input.programId, assetId: input.assetId, capabilityType: input.capabilityType,
+   196→      reservedKw: input.reservedKw,
+   197→      capacityReservationId: capacityReservation.reservationId,
+   198→    },
+   199→  })
+   200→
+   201→  return { reservation: vppReservation, capacityReservation }
+   202→}
+   203→
+   204→// ---------------------------------------------------------------------------
+   205→// Dispatch (task 5: transactional allocation)
+   206→// ---------------------------------------------------------------------------
+   207→
+   208→export interface CreateDispatchInput {
+   209→  programId: string
+   210→  requestedKw: string
+   211→  requestedKwh: string
+   212→  startTime: string
+   213→  endTime: string
+   214→  reason?: string
+   215→}
+   216→
+   217→export async function createDispatch(tenantId: string, input: CreateDispatchInput, actorId?: string) {
+   218→  const program = await db.vppBuyerProgram.findFirst({
+   219→    where: { id: input.programId, tenantId },
+   220→    include: { reservations: { where: { status: 'active' }, include: { asset: true } }, network: true },
+   221→  })
+   222→  if (!program) throw new NotFoundError('vpp_buyer_program', input.programId)
+   223→
+   224→  const startTime = new Date(input.startTime)
+   225→  const endTime = new Date(input.endTime)
+   226→  const requestedKw = new Prisma.Decimal(input.requestedKw)
+   227→  const requestedKwh = new Prisma.Decimal(input.requestedKwh)
+   228→
+   229→  // Task 5: transactional dispatch — create dispatch + allocations + assignments atomically.
+   230→  const dispatch = await db.$transaction(async (tx) => {
+   231→    // Lock all active reservations for this program.
+   232→    await tx.$queryRaw`
+   233→      SELECT * FROM "VppCapacityReservation"
+   234→      WHERE "programId" = ${input.programId}
+   235→        AND status = 'active'
+   236→        AND "effectiveFrom" < ${endTime}
+   237→        AND "effectiveTo" > ${startTime}
+   238→      FOR UPDATE
+   239→    `
+   240→
+   241→    // Reload reservations inside the lock.
+   242→    const reservations = await tx.vppCapacityReservation.findMany({
+   243→      where: {
+   244→        programId: input.programId,
+   245→        status: 'active',
+   246→        effectiveFrom: { lt: endTime },
+   247→        effectiveTo: { gt: startTime },
+   248→      },
+   249→    })
+   250→
+   251→    if (reservations.length === 0) {
+   252→      throw new ValidationError(`No active reservations for program ${input.programId} in the requested time window`)
+   253→    }
+   254→
+   255→    // Check sufficient reserved capacity.
+   256→    const totalReservedKw = reservations.reduce(
+   257→      (sum, r) => sum.plus(new Prisma.Decimal(r.reservedKw)),
+   258→      new Prisma.Decimal(0),
+   259→    )
+   260→    if (totalReservedKw.lessThan(requestedKw)) {
+   261→      throw new ValidationError(
+   262→        `Insufficient reserved capacity: ${totalReservedKw.toString()} kW < requested ${requestedKw.toString()} kW`,
+   263→      )
+   264→    }
+   265→
+   266→    // Create the dispatch.
+   267→    const created = await tx.vppDispatch.create({
+   268→      data: {
+   269→        tenantId,
+   270→        programId: input.programId,
+   271→        requestedKw: input.requestedKw,
+   272→        requestedKwh: input.requestedKwh,
+   273→        startTime,
+   274→        endTime,
+   275→        reason: input.reason ?? null,
+   276→        status: 'assigned',
+   277→      },
+   278→    })
+   279→
+   280→    // Assign assets proportionally + create capacity commitments (atomic).
+   281→    // Fix 1: each assignment creates its OWN CapacityCommitment (1:1).
+   282→    // The commitmentId is stored on the assignment for direct lookup.
+   283→    for (const reservation of reservations) {
+   284→      const ratio = new Prisma.Decimal(reservation.reservedKw).div(totalReservedKw)
+   285→      const assignedKw = requestedKw.times(ratio)
+   286→      const assignedKwh = requestedKwh.times(ratio)
+   287→
+   288→      // Find the platform capacity reservation for this VPP reservation (inside tx).
+   289→      const capacityReservation = await tx.capacityReservation.findFirst({
+   290→        where: { tenantId, sourceType: 'vpp_reservation', sourceId: reservation.id, status: 'active' },
+   291→      })
+   292→
+   293→      let commitmentId: string | null = null
+   294→      if (capacityReservation) {
+   295→        // Create a capacity commitment for THIS assignment (not the dispatch).
+   296→        const commitment = await createCapacityCommitment({
+   297→          tenantId,
+   298→          reservationId: capacityReservation.id,
+   299→          committedAmount: assignedKw.toFixed(8),
+   300→          unit: 'kW',
+   301→          startTime,
+   302→          endTime,
+   303→          sourceType: 'vpp_dispatch_assignment',
+   304→          sourceId: `assignment-${created.id}-${reservation.assetId}`, // unique per assignment
+   305→        }, tx)
+   306→        commitmentId = commitment.commitmentId
+   307→      }
+   308→
+   309→      // Store the commitmentId on the assignment for direct lookup.
+   310→      await tx.vppDispatchAssignment.create({
+   311→        data: {
+   312→          tenantId,
+   313→          dispatchId: created.id,
+   314→          assetId: reservation.assetId,
+   315→          operatorId: reservation.operatorId,
+   316→          capabilityType: reservation.capabilityType,
+   317→          assignedKw: assignedKw.toFixed(8),
+   318→          assignedKwh: assignedKwh.toFixed(8),
+   319→          capacityCommitmentId: commitmentId,
+   320→        },
+   321→      })
+   322→    }
+   323→
+   324→    return created
+   325→  }, { timeout: 30000 })
+   326→
+   327→  await appendAudit({
+   328→    tenantId, actorId,
+   329→    eventType: 'vpp.dispatch_created',
+   330→    resourceType: 'vpp_dispatch',
+   331→    resourceId: dispatch.id,
+   332→    metadata: { programId: input.programId, requestedKw: input.requestedKw },
+   333→  })
+   334→
+   335→  const assignments = await db.vppDispatchAssignment.findMany({ where: { dispatchId: dispatch.id } })
+   336→  return { dispatch, assignments }
+   337→}
+   338→
+   339→// ---------------------------------------------------------------------------
+   340→// Dispatch Execution (task 7: idempotent, task 6: no auto-funding)
+   341→// ---------------------------------------------------------------------------
+   342→
+   343→/**
+   344→ * Execute a dispatch assignment using the DER adapter.
+   345→ *
+   346→ * Task 7: IDEMPOTENT — if the assignment is already completed, returns the
+   347→ * existing result. No duplicate telemetry, attestations, contributions, or rewards.
+   348→ *
+   349→ * Task 6: NO AUTO-FUNDING — if buyer funds are insufficient, the reward
+   350→ * posting fails (the assignment remains in 'dispatching' state). The buyer
+   351→ * must be pre-funded.
+   352→ */
+   353→export async function executeDispatchAssignment(
+   354→  tenantId: string,
+   355→  assignmentId: string,
+   356→  provisioningSecret: string,
+   357→  actorId?: string,
+   358→) {
+   359→  const assignment = await db.vppDispatchAssignment.findFirst({
+   360→    where: { id: assignmentId, tenantId },
+   361→    include: {
+   362→      asset: { include: { devices: { include: { credential: true } } } },
+   363→      dispatch: { include: { program: { include: { network: true, networkVersion: true } } } },
+   364→    },
+   365→  })
+   366→  if (!assignment) throw new NotFoundError('vpp_dispatch_assignment', assignmentId)
+   367→
+   368→  // Task 7: idempotency — if already completed, return existing result.
+   369→  if (assignment.status === 'completed') {
+   370→    // Fetch the reward + settlement linked to this assignment's contribution.
+   371→    const reward = assignment.contributionId
+   372→      ? await db.reward.findFirst({ where: { contributionId: assignment.contributionId } })
+   373→      : null
+   374→    const settlement = reward
+   375→      ? await db.settlement.findUnique({ where: { rewardId: reward.id } })
+   376→      : null
+   377→    return {
+   378→      assignment_id: assignmentId,
+   379→      event_id: assignment.eventId,
+   380→      contribution_id: assignment.contributionId,
+   381→      reward_id: reward?.id ?? null,
+   382→      settlement_id: settlement?.id ?? null,
+   383→      performance_kwh: assignment.performanceKwh,
+   384→      actual_kwh: assignment.actualKwh,
+   385→      baseline_kwh: assignment.baselineKwh,
+   386→      duplicate: true,
+   387→      message: 'Assignment already completed',
+   388→    }
+   389→  }
+   390→
+   391→  // Fix 2: atomic status transition — ONLY 'assigned' can transition to 'dispatching'.
+   392→  const updated = await db.vppDispatchAssignment.updateMany({
+   393→    where: { id: assignmentId, status: 'assigned' },
+   394→    data: { status: 'dispatching' },
+   395→  })
+   396→  if (updated.count === 0) {
+   397→    throw new ConflictError(`Assignment ${assignmentId} is not in 'assigned' state (current: ${assignment.status}). Concurrent execution rejected.`)
+   398→  }
+   399→
+   400→  // State machine:
+   401→  //   ASSIGNED → DISPATCHING → DELIVERY_VERIFIED → USAGE_RECORDED → SETTLEMENT_PENDING → COMPLETED
+   402→  //   Pre-usage failure: → FAILED → commitment RELEASED (no money moved)
+   403→  //   Post-usage failure: → RECONCILIATION_REQUIRED → commitment stays CONSUMED (liability exists)
+   404→  const releaseAssignmentCapacity = async () => {
+   405→    if (assignment.capacityCommitmentId) {
+   406→      await releaseCommitment(tenantId, 'vpp_dispatch_assignment', `assignment-${assignment.dispatchId}-${assignment.assetId}`)
+   407→    }
+   408→  }
+   409→
+   410→  // Pre-usage failure: release capacity (no irreversible action has occurred).
+   411→  const failAssignment = async () => {
+   412→    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
+   413→    await releaseAssignmentCapacity()
+   414→  }
+   415→
+   416→  // Post-usage failure: capacity is CONSUMED, money may have moved.
+   417→  // Do NOT release. Enter reconciliation state for retry.
+   418→  const markReconciliationRequired = async (reason: string) => {
+   419→    await db.vppDispatchAssignment.update({
+   420→      where: { id: assignmentId },
+   421→      data: { status: 'reconciliation_required' },
+   422→    })
+   423→    await appendAudit({
+   424→      tenantId, actorId,
+   425→      eventType: 'vpp.reconciliation_required',
+   426→      resourceType: 'vpp_dispatch_assignment',
+   427→      resourceId: assignmentId,
+   428→      metadata: { reason, commitmentId: assignment.capacityCommitmentId },
+   429→    })
+   430→  }
+   431→
+   432→  // Track whether usage has been recorded (determines failure handling).
+   433→  let usageRecorded = false
+   434→
+   435→  try {
+   436→    const device = assignment.asset.devices.find((d) => d.credential && d.credential.status === 'active')
+   437→    if (!device) {
+   438→      throw new ValidationError(`Asset ${assignment.assetId} has no active device with credential`)
+   439→    }
+   440→
+   441→    // --- DER adapter (can throw on network/hardware errors) ---
+   442→    const durationSeconds = Math.floor(
+   443→      (assignment.dispatch.endTime.getTime() - assignment.dispatch.startTime.getTime()) / 1000,
+   444→    )
+   445→    const dischargeResult = await derAdapter.executeDischarge({
+   446→      assignedKw: assignment.assignedKw,
+   447→      assignedKwh: assignment.assignedKwh,
+   448→      capabilityType: assignment.capabilityType,
+   449→      durationSeconds,
+   450→    })
+   451→
+   452→    // Sign + submit telemetry as a generic Event.
+   453→    const eventId = `vpp-dispatch-${assignmentId}-${Date.now()}`
+   454→    const timestamp = new Date().toISOString()
+   455→    const sequence = Math.floor(Date.now() / 1000)
+   456→    const message = buildCanonicalMessage({
+   457→      device_id: device.id,
+   458→      event_id: eventId,
+   459→      timestamp,
+   460→      event_type: 'telemetry',
+   461→      sequence,
+   462→      payload: dischargeResult.telemetry.payload,
+   463→    })
+   464→    const signingKey = deriveSigningKey(provisioningSecret)
+   465→    const signature = signMessage(message, signingKey)
+   466→
+   467→    const network = assignment.dispatch.program.network
+   468→    const networkVersion = await db.networkVersion.findFirst({
+   469→      where: { networkId: network.id, publishedAt: { not: null } },
+   470→      orderBy: { version: 'desc' },
+   471→    })
+   472→
+   473→    const ingestResult = await ingestEvent(tenantId, {
+   474→      device_id: device.id,
+   475→      event_id: eventId,
+   476→      timestamp,
+   477→      event_type: 'telemetry',
+   478→      sequence,
+   479→      payload: dischargeResult.telemetry.payload,
+   480→      signature,
+   481→      network_version_id: networkVersion?.id,
+   482→      capability_type: assignment.capabilityType,
+   483→    })
+   484→
+   485→    await processEventOutbox(tenantId)
+   486→
+   487→    const event = await db.event.findUnique({
+   488→      where: { id: ingestResult.event_id },
+   489→      include: { attestations: true },
+   490→    })
+   491→
+   492→    if (event?.status !== 'verified' || !event.attestations[0]) {
+   493→      throw new Error(`Dispatch telemetry verification failed: ${event?.status}`)
+   494→    }
+   495→
+   496→    const attestation = event.attestations[0]
+   497→
+   498→    // --- Baseline calculation (VPP-2C: production baseline via HistoricalTelemetryProvider) ---
+   499→    // FIX: Uses BaselineContext (production input) — NEVER ground truth.
+   500→    // FIX: Resolves strategy from persisted policy (not hardcoded).
+   501→    // FIX: Prevents negative performance payments: max(0, actual - baseline).
+   502→    const actualKwh = new Prisma.Decimal(dischargeResult.actualKwh)
+   503→
+   504→    const { SimulatedHistoricalTelemetryProvider } = await import('./historical-telemetry-provider.service')
+   505→    const baselineEngine = await import('./baseline-engine.service')
+   506→    const getStrategy = baselineEngine.getStrategy
+   507→    type BaselineContext = baselineEngine.BaselineContext
+   508→    const telemetryProvider = new SimulatedHistoricalTelemetryProvider()
+   509→
+   510→    // Get historical telemetry (training data — strictly before dispatch).
+   511→    const historicalDays = await telemetryProvider.getHistory(
+   512→      assignment.assetId,
+   513→      assignment.dispatch.startTime,
+   514→      14,
+   515→    )
+   516→
+   517→    if (!historicalDays || historicalDays.length < 3) {
+   518→      throw new Error('BASELINE_UNAVAILABLE: insufficient historical telemetry for baseline calculation')
+   519→    }
+   520→
+   521→    // Build BaselineContext from observable dispatch parameters ONLY.
+   522→    // This contains NO ground truth (no trueCounterfactual, no trueIncremental).
+   523→    const dispatchDurationHours = Math.ceil(
+   524→      (assignment.dispatch.endTime.getTime() - assignment.dispatch.startTime.getTime()) / 3600000,
+   525→    )
+   526→    const dispatchHour = assignment.dispatch.startTime.getHours()
+   527→    const dispatchDate = assignment.dispatch.startTime.toISOString().split('T')[0]
+   528→    const dayOfWeek = assignment.dispatch.startTime.getDay()
+   529→
+   530→    const baselineContext: BaselineContext = {
+   531→      dispatchStartIndex: dispatchHour * 4,
+   532→      dispatchEndIndex: Math.min(95, dispatchHour * 4 + dispatchDurationHours * 4),
+   533→      dispatchDate,
+   534→      dayOfWeek,
+   535→      isWeekend: dayOfWeek === 0 || dayOfWeek === 6,
+   536→    }
+   537→
+   538→    // Resolve the baseline strategy from the PERSISTED NetworkVersion policy.
+   539→    // CRITICAL: uses dispatch.program.networkVersionId (the version the program
+   540→    // was created under), NOT network.currentVersionId. This ensures historical
+   541→    // reproducibility: a dispatch created under V12 always uses V12's policy,
+   542→    // even after V13 is published.
+   543→    const programVersionId = assignment.dispatch.program.networkVersionId
+   544→    const versionForPolicy = await db.networkVersion.findUnique({
+   545→      where: { id: programVersionId },
+   546→    })
+   547→    if (!versionForPolicy) {
+   548→      throw new Error('BASELINE_UNAVAILABLE: network version not found')
+   549→    }
+   550→
+   551→    let strategyName: string
+   552→    if (versionForPolicy.baselinePolicyJson) {
+   553→      const policy = JSON.parse(versionForPolicy.baselinePolicyJson)
+   554→      if (policy.status !== 'accepted' || !policy.selectedStrategy) {
+   555→        throw new Error(`BASELINE_UNAVAILABLE: baseline policy status is '${policy.status}'`)
+   556→      }
+   557→      strategyName = policy.selectedStrategy
+   558→    } else {
+   559→      // No policy persisted on this version — use default.
+   560→      // This allows backward compatibility with versions created before VPP-2C.
+   561→      strategyName = 'weekday_weekend_average'
+   562→    }
+   563→
+   564→    const baselineStrategy = getStrategy(strategyName)
+   565→    if (!baselineStrategy) {
+   566→      throw new Error(`BASELINE_UNAVAILABLE: strategy '${strategyName}' not found in registry`)
+   567→    }
+   568→
+   569→    const baselinePrediction = baselineStrategy.predict(historicalDays, baselineContext)
+   570→
+   571→    const baselineKwh = new Prisma.Decimal(baselinePrediction.predictedCounterfactualKwh)
+   572→    // FIX: Prevent negative performance payments.
+   573→    // rawPerformanceKwh preserves the signed value for analytics.
+   574→    // verifiedPerformanceKwh is max(0, actual - baseline) — the economically payable quantity.
+   575→    const rawPerformanceKwh = actualKwh.minus(baselineKwh)
+   576→    const verifiedPerformanceKwh = rawPerformanceKwh.isNegative()
+   577→      ? new Prisma.Decimal(0)
+   578→      : rawPerformanceKwh
+   579→
+   580→    // Fetch ground truth for METADATA ONLY (not used in baseline calculation).
+   581→    const groundTruth = await telemetryProvider.getDispatchDayGroundTruth?.(
+   582→      assignment.assetId,
+   583→      assignment.dispatch.startTime,
+   584→      dispatchDurationHours,
+   585→      parseFloat(assignment.assignedKw),
+   586→    )
+   587→
+   588→    const baseline = await db.vppBaseline.create({
+   589→      data: {
+   590→        tenantId,
+   591→        assignmentId,
+   592→        method: baselinePrediction.method,
+   593→        baselineKw: '0',
+   594→        baselineKwh: baselineKwh.toString(),
+   595→        actualKw: dischargeResult.actualKw,
+   596→        actualKwh: actualKwh.toString(),
+   597→        performanceKwh: verifiedPerformanceKwh.toString(),
+   598→        metadataJson: JSON.stringify({
+   599→          attestationId: attestation.id,
+   600→          baselineMethod: baselinePrediction.method,
+   601→          strategyName,
+   602→          predictedCounterfactualKwh: baselinePrediction.predictedCounterfactualKwh,
+   603→          rawPerformanceKwh: rawPerformanceKwh.toString(), // signed value for analytics
+   604→          verifiedPerformanceKwh: verifiedPerformanceKwh.toString(), // non-negative payable
+   605→          negativePerformanceClipped: rawPerformanceKwh.isNegative(),
+   606→          trueCounterfactualKwh: groundTruth?.trueCounterfactualKwh ?? null, // metadata only
+   607→          trueIncrementalKwh: groundTruth?.trueIncrementalKwh ?? null, // metadata only
+   608→          historyDays: historicalDays.length,
+   609→          provider: 'simulated',
+   610→        }),
+   611→      },
+   612→    })
+   613→
+   614→    // --- Derived contribution (uses verifiedPerformanceKwh — never negative) ---
+   615→    const contribution = await createContribution(
+   616→      tenantId,
+   617→      {
+   618→        attestationIds: [attestation.id],
+   619→        derivedQuantity: verifiedPerformanceKwh.toString(),
+   620→        derivedUnit: 'kWh',
+   621→      },
+   622→      `vpp-baseline-${baseline.id}`,
+   623→    )
+   624→
+   625→    // Persist delivery results + stage = delivery_verified.
+   626→    await db.vppDispatchAssignment.update({
+   627→      where: { id: assignmentId },
+   628→      data: {
+   629→        economicStage: 'delivery_verified',
+   630→        actualKwh: actualKwh.toString(),
+   631→        baselineKwh: baselineKwh.toString(),
+   632→        performanceKwh: verifiedPerformanceKwh.toString(),
+   633→        eventId: event.id,
+   634→        contributionId: contribution.id,
+   635→      },
+   636→    })
+   637→
+   638→    // --- RECORD USAGE BEFORE ANY IRREVERSIBLE FINANCIAL SETTLEMENT ---
+   639→    if (assignment.capacityCommitmentId) {
+   640→      await recordUsage({
+   641→        tenantId,
+   642→        commitmentId: assignment.capacityCommitmentId,
+   643→        quantity: actualKwh.toString(),
+   644→        unit: 'kWh',
+   645→        startTime: assignment.dispatch.startTime,
+   646→        endTime: assignment.dispatch.endTime,
+   647→        sourceType: 'vpp_dispatch_assignment',
+   648→        sourceId: `assignment-${assignment.dispatchId}-${assignment.assetId}`,
+   649→      })
+   650→    }
+   651→    usageRecorded = true
+   652→    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'usage_recorded' } })
+   653→
+   654→    // --- Reward ---
+   655→    const reward = await calculateReward(tenantId, contribution.id, `vpp-contrib-${contribution.id}`)
+   656→    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'reward_calculated' } })
+   657→
+   658→    // --- Ledger ---
+   659→    await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
+   660→    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'ledger_posted' } })
+   661→
+   662→    // --- Settlement ---
+   663→    const settlement = await createSettlement(tenantId, reward.id)
+   664→    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'settlement_pending' } })
+   665→
+   666→    // Use the TARGETED, LEASE-SAFE settlement processor — NOT the tenant-wide outbox.
+   667→    // This ensures: settlement status is the source of truth for assignment completion.
+   668→    // If settlement fails → assignment enters RECONCILIATION_REQUIRED (not COMPLETED).
+   669→    const settlementResult = await processSettlementForReward(tenantId, reward.id)
+   670→    if (!settlementResult.completed) {
+   671→      // Settlement did not complete. The assignment must NOT be marked COMPLETED.
+   672→      // Enter reconciliation state — capacity stays consumed, usage stays,
+   673→      // financial liability exists. Reconciliation can retry.
+   674→      throw new Error(`Settlement not completed (status: ${settlementResult.settlementId})`)
+   675→    }
+   676→
+   677→    // --- COMPLETED (only reached if settlement succeeded) ---
+   678→    await db.vppDispatchAssignment.update({
+   679→      where: { id: assignmentId },
+   680→      data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
+   681→    })
+   682→
+   683→    // Update dispatch status if all assignments completed.
+   684→    const pendingAssignments = await db.vppDispatchAssignment.count({
+   685→      where: { dispatchId: assignment.dispatchId, status: { not: 'completed' } },
+   686→    })
+   687→    if (pendingAssignments === 0) {
+   688→      await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
+   689→    }
+   690→
+   691→    await appendAudit({
+   692→      tenantId, actorId,
+   693→      eventType: 'vpp.dispatch_completed',
+   694→      resourceType: 'vpp_dispatch_assignment',
+   695→      resourceId: assignmentId,
+   696→      metadata: {
+   697→        actualKwh: actualKwh.toString(),
+   698→        performanceKwh: verifiedPerformanceKwh.toString(),
+   699→        eventId: event.id,
+   700→        contributionId: contribution.id,
+   701→        rewardId: reward.id,
+   702→        contributionQuantity: contribution.quantity,
+   703→      },
+   704→    })
+   705→
+   706→    return {
+   707→      assignment_id: assignmentId,
+   708→      event_id: event.id,
+   709→      attestation_id: attestation.id,
+   710→      baseline_id: baseline.id,
+   711→      contribution_id: contribution.id,
+   712→      reward_id: reward.id,
+   713→      settlement_id: settlement.id,
+   714→      performance_kwh: verifiedPerformanceKwh.toString(),
+   715→      actual_kwh: actualKwh.toString(),
+   716→      baseline_kwh: baselineKwh.toString(),
+   717→      contribution_quantity: contribution.quantity,
+   718→      duplicate: false,
+   719→    }
+   720→  } catch (err) {
+   721→    // STATE MACHINE FAILURE HANDLING:
+   722→    // Pre-usage failure (usageRecorded = false): → FAILED → release capacity.
+   723→    //   No irreversible action has occurred. Safe to release.
+   724→    // Post-usage failure (usageRecorded = true): → RECONCILIATION_REQUIRED.
+   725→    //   Capacity is CONSUMED. Money may have moved. Do NOT release.
+   726→    //   Financial reconciliation can retry settlement.
+   727→    if (usageRecorded) {
+   728→      await markReconciliationRequired(err instanceof Error ? err.message : 'Post-usage failure')
+   729→    } else {
+   730→      await failAssignment()
+   731→    }
+   732→    throw err
+   733→  }
+   734→}
+   735→
+   736→// ---------------------------------------------------------------------------
+   737→// Reconciliation (RECONCILIATION_REQUIRED → RECONCILING → COMPLETED)
+   738→// ---------------------------------------------------------------------------
+   739→
+   740→/**
+   741→ * Reconcile an assignment in RECONCILIATION_REQUIRED state.
+   742→ *
+   743→ * Inspects durable state (economicStage + linked entities) and resumes at the
+   744→ * first missing economic stage:
+   745→ *
+   746→ *   usage exists, reward missing → calculate reward
+   747→ *   reward exists, ledger missing → post to ledger
+   748→ *   ledger exists, settlement missing → create settlement
+   749→ *   settlement exists but not completed → process settlement outbox
+   750→ *   settlement completed → mark assignment COMPLETED
+   751→ *
+   752→ * Every stage is idempotent. Does NOT re-execute DER dispatch or create
+   753→ * duplicate usage.
+   754→ *
+   755→ * Concurrency-safe: RECONCILIATION_REQUIRED → RECONCILING atomic claim.
+   756→ */
+   757→export async function reconcileAssignment(
+   758→  tenantId: string,
+   759→  assignmentId: string,
+   760→  actorId?: string,
+   761→): Promise<{ assignment_id: string; status: string; economic_stage: string; message: string }> {
+   762→  // Atomic claim: only one reconciler can proceed.
+   763→  const claimed = await db.vppDispatchAssignment.updateMany({
+   764→    where: { id: assignmentId, tenantId, status: 'reconciliation_required' },
+   765→    data: { status: 'reconciling' },
+   766→  })
+   767→  if (claimed.count === 0) {
+   768→    const current = await db.vppDispatchAssignment.findFirst({ where: { id: assignmentId, tenantId } })
+   769→    return {
+   770→      assignment_id: assignmentId,
+   771→      status: current?.status ?? 'unknown',
+   772→      economic_stage: current?.economicStage ?? 'unknown',
+   773→      message: `Assignment is not in reconciliation_required state (current: ${current?.status})`,
+   774→    }
+   775→  }
+   776→
+   777→  const assignment = await db.vppDispatchAssignment.findFirst({
+   778→    where: { id: assignmentId, tenantId },
+   779→    include: { dispatch: true },
+   780→  })
+   781→  if (!assignment) throw new NotFoundError('vpp_dispatch_assignment', assignmentId)
+   782→
+   783→  try {
+   784→    // Inspect DURABLE OBJECTS (not just economicStage) to determine the actual
+   785→    // next stage. The economicStage checkpoint is a hint, but the existence/state
+   786→    // of reward, ledger posting, and settlement is the source of truth.
+   787→    if (!assignment.contributionId) {
+   788→      throw new Error('Cannot reconcile: contributionId missing')
+   789→    }
+   790→
+   791→    // 1. Check if reward exists. If not, calculate it.
+   792→    let reward = await db.reward.findFirst({ where: { contributionId: assignment.contributionId } })
+   793→    if (!reward) {
+   794→      reward = await calculateReward(tenantId, assignment.contributionId, `vpp-contrib-${assignment.contributionId}`)
+   795→      await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'reward_calculated' } })
+   796→    }
+   797→
+   798→    // 2. Check if reward is posted to ledger. If not, post it.
+   799→    if (reward.status === 'calculated') {
+   800→      await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
+   801→      // Reload reward to get updated status.
+   802→      reward = (await db.reward.findUnique({ where: { id: reward.id } }))!
+   803→      await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'ledger_posted' } })
+   804→    }
+   805→
+   806→    // 3. Check if settlement exists. If not, create it.
+   807→    let settlement = await db.settlement.findUnique({ where: { rewardId: reward.id } })
+   808→    if (!settlement) {
+   809→      settlement = await createSettlement(tenantId, reward.id)
+   810→      await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'settlement_pending' } })
+   811→    }
+   812→
+   813→    // 4. Process the specific settlement if not yet completed.
+   814→    if (settlement.status !== 'completed') {
+   815→      await processSettlementForReward(tenantId, reward.id)
+   816→      settlement = (await db.settlement.findUnique({ where: { rewardId: reward.id } }))!
+   817→    }
+   818→
+   819→    // 5. Check if settlement is now completed.
+   820→    if (settlement.status === 'completed') {
+   821→      await db.vppDispatchAssignment.update({
+   822→        where: { id: assignmentId },
+   823→        data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
+   824→      })
+   825→      const pending = await db.vppDispatchAssignment.count({
+   826→        where: { dispatchId: assignment.dispatchId, status: { not: 'completed' } },
+   827→      })
+   828→      if (pending === 0) {
+   829→        await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
+   830→      }
+   831→      await appendAudit({
+   832→        tenantId, actorId,
+   833→        eventType: 'vpp.reconciliation_completed',
+   834→        resourceType: 'vpp_dispatch_assignment',
+   835→        resourceId: assignmentId,
+   836→        metadata: { rewardId: reward.id, settlementId: settlement.id },
+   837→      })
+   838→      return { assignment_id: assignmentId, status: 'completed', economic_stage: 'completed', message: 'Reconciliation succeeded' }
+   839→    }
+   840→
+   841→    // Settlement still not completed.
+   842→    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'reconciliation_required' } })
+   843→    return {
+   844→      assignment_id: assignmentId,
+   845→      status: 'reconciliation_required',
+   846→      economic_stage: assignment.economicStage,
+   847→      message: 'Reconciliation attempted but settlement not yet completed. Manual review may be needed.',
+   848→    }
+   849→  } catch (err) {
+   850→    // Reconciliation itself failed → back to reconciliation_required.
+   851→    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'reconciliation_required' } })
+   852→    throw err
+   853→  }
+   854→}
+   855→
+   856→// Backward-compatible alias.
+   857→export const retrySettlement = reconcileAssignment
+   858→
+   859→// ---------------------------------------------------------------------------
+   860→// Queries
+   861→// ---------------------------------------------------------------------------
+   862→
+   863→export async function listDispatches(tenantId: string) {
+   864→  return db.vppDispatch.findMany({
+   865→    where: { tenantId },
+   866→    include: {
+   867→      program: true,
+   868→      assignments: { include: { asset: true, operator: true, baseline: true } },
+   869→    },
+   870→    orderBy: { createdAt: 'desc' },
+   871→  })
+   872→}
+   873→
+   874→export async function getDispatch(tenantId: string, id: string) {
+   875→  const d = await db.vppDispatch.findFirst({
+   876→    where: { id, tenantId },
+   877→    include: {
+   878→      program: true,
+   879→      assignments: { include: { asset: true, operator: true, baseline: true } },
+   880→    },
+   881→  })
+   882→  if (!d) throw new NotFoundError('vpp_dispatch', id)
+   883→  return d
+   884→}
+   885→
