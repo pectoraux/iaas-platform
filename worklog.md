@@ -1462,3 +1462,38 @@ Work Log:
 Stage Summary:
 - The fencing tests are now real DB integration tests that exercise the actual Prisma updateMany against the database. They prove the stale-worker race is not just implemented but exercised: a stale evaluator/worker's fenced write genuinely returns count=0, and the newer worker's result remains authoritative.
 - VPP-2D-4 is now FROZEN with real DB-backed fencing evidence.
+
+---
+Task ID: VPP-3-buyer-settlement
+Agent: orchestrator
+Task: Connect the frozen portfolio commitment flow to actual buyer commercial terms — buyer charge computation, ledger posting, and settlement record.
+
+Work Log:
+1. SCHEMA: Added VppBuyerSettlement model (1:1 with VppDispatch). Fields: buyerDeliveredKwh, pricePerKwh, deliveredCharge, capacityCeiling, cappedCharge, fulfillmentPct, toleranceThresholdPct, metTolerance, buyerCharge, shortfall, currency, status (pending|charging|charged|failed), ledgerPostingId, buyerFundsBalanceAfter, chargedAt. Added buyerSettlement? relation to VppDispatch + vppBuyerSettlements to Tenant.
+2. CHARGE MODEL (performance-based with cap): 
+   - deliveredCharge = buyerDeliveredKwh × pricePerKwh
+   - capacityCeiling = committedKw × durationHours × pricePerKwh
+   - cappedCharge = min(deliveredCharge, capacityCeiling)
+   - If fulfillmentPct ≥ tolerance: buyerCharge = cappedCharge (full payment)
+   - If fulfillmentPct < tolerance: buyerCharge = cappedCharge × (fulfillmentPct / 100) (proportional reduction)
+   - If buyerDeliveredKwh = 0: buyerCharge = 0 (failed → no charge)
+   - Overdelivery is capped at capacity ceiling — buyer never pays more than committed
+3. LEDGER POSTING: Buyer charge is a direct double-entry posting (buyer_funds debit + platform revenue credit), NOT a Contribution→Reward chain. Uses postBalancedPosting with FOR UPDATE lock on buyer funds account. Insufficient funds → settlement fails, buyer must be pre-funded.
+4. ARCHITECTURAL RULE: The buyer settlement layer is ABOVE the generic economic kernel. No BuyerContribution, BuyerReward, or duplicate pipeline. Operator payments remain on the existing generic Contribution → Reward → Ledger → Settlement pipeline.
+5. IMPLEMENTED buyer-settlement.service.ts:
+   - computeBuyerCharge(): pure function (testable without DB)
+   - createBuyerSettlement(): reads portfolio commitment (must be final), reads buyer program contract terms, computes charge, posts to ledger, creates settlement record. Idempotent (1:1 with dispatch).
+   - getBuyerSettlement(): query
+6. TESTS (tests/buyer-settlement.test.ts): 15+ cases across 5 describe blocks:
+   - Fulfilled: full capped charge, at-threshold charge
+   - Partial: proportional reduction, low fulfillment → low charge
+   - Failed: zero delivery → zero charge
+   - Overdelivery: capped at ceiling, met tolerance → capped, exceeded ceiling
+   - Charge model properties: buyerCharge ≤ ceiling, shortfall formula, zero price, price proportionality
+7. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (only pre-existing bun:test). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- VPP-3 delivers the buyer economics layer: portfolio fulfillment → buyer charge → ledger posting → settlement record.
+- The charge model is performance-based with cap: buyer pays for delivered energy, capped at the commitment ceiling, with proportional reduction for partial fulfillment below tolerance.
+- The architectural rule is preserved: buyer charges are direct ledger postings, not a duplicate of the operator pipeline.
+- NEXT: wire buyer settlement into the dispatch lifecycle (after portfolio evaluation completes), add real external buyer/DER interface, begin Protocol Runtime architecture.
