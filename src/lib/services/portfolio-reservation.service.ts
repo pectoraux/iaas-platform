@@ -86,7 +86,7 @@
 
 import { db } from '@/lib/db'
 import { Prisma } from '@prisma/client'
-import { ValidationError, NotFoundError, DomainError } from '@/lib/domain/errors'
+import { ValidationError, NotFoundError, InsufficientCapacityError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import {
   createCapacityReservation as allocateReservation,
@@ -343,19 +343,44 @@ export async function optimizeAndReserve(
 // ---------------------------------------------------------------------------
 
 /**
- * Classify a reservation error into one of three categories.
+ * Classify a reservation error into one of three externally observable
+ * outcomes (the fourth — system_error — is the re-throw path).
  *
- * Exported for direct unit testing — proves that unexpected DB/system
- * errors are re-thrown rather than converted to insufficient_capacity.
+ *   1. INSUFFICIENT_CAPACITY — the capacity service threw
+ *      InsufficientCapacityError, meaning the requested amount exceeds
+ *      currently available capacity (physical minus overlapping
+ *      reservations). This is EXPECTED market behavior; the caller can
+ *      retry with a fresh candidate pool.
+ *
+ *   2. RETRYABLE_CONFLICT — a transaction serialization failure, deadlock,
+ *      or timeout. The caller should retry with backoff.
+ *
+ *   3. RE-THROWN (system_error path) — everything else, including:
+ *      - ValidationError ("Requested amount must be positive", "Unit
+ *        mismatch") — these are input/programming errors, NOT capacity
+ *        conflicts.
+ *      - NotFoundError — a missing asset/assignment is a stale/invalid
+ *        candidate, not a capacity shortage.
+ *      - Unexpected DB/Prisma errors — infrastructure failures.
+ *
+ *      These must NOT be presented to the caller as "insufficient
+ *      capacity." They propagate as infrastructure/input errors.
+ *
+ * Only InsufficientCapacityError (code: CAPACITY_UNAVAILABLE) maps to
+ * insufficient_capacity. This gives the reservation layer a precise
+ * contract rather than inferring market semantics from a broad
+ * ValidationError.
+ *
+ * Exported for direct unit testing.
  */
 export function classifyReservationError(
   err: unknown,
   portfolio: OptimizationResult,
 ): OptimizeAndReserveResult {
-  // 1. Domain errors from the capacity service (ValidationError, NotFoundError).
-  //    These are EXPECTED — the capacity layer rejected the reservation
-  //    because the optimizer's view was stale or the pool is insufficient.
-  if (err instanceof ValidationError || err instanceof NotFoundError) {
+  // 1. InsufficientCapacityError — the ONLY error that maps to
+  //    insufficient_capacity. This is a specific capacity-contention
+  //    error from the capacity service, NOT a generic ValidationError.
+  if (err instanceof InsufficientCapacityError) {
     return {
       portfolio,
       reservations: [], // transaction rolled back
@@ -368,7 +393,6 @@ export function classifyReservationError(
   }
 
   // 2. Retryable transaction conflicts (Prisma serialization/deadlock/timeout).
-  //    These are transient — the caller should retry with backoff.
   if (isRetryableTransactionError(err)) {
     return {
       portfolio,
@@ -381,16 +405,16 @@ export function classifyReservationError(
     }
   }
 
-  // 3. Unexpected system errors — RE-THROW.
-  //    These are NOT capacity problems. They are infrastructure failures
-  //    (DB connection lost, Prisma internal error, etc.) that need operator
-  //    attention. Converting them to "insufficient_capacity" would be
-  //    operationally dangerous — it would hide real failures behind a
-  //    normal buyer-facing result.
+  // 3. Everything else — RE-THROW.
+  //    This includes:
+  //    - ValidationError ("Requested amount must be positive", "Unit mismatch")
+  //    - NotFoundError (missing asset/assignment — stale/invalid candidate)
+  //    - Unexpected DB/Prisma errors (infrastructure failures)
+  //    - Non-domain errors
   //
-  //    Domain errors that aren't ValidationError/NotFoundError (e.g.,
-  //    ConflictError, ImmutableResourceError) also fall through here — they
-  //    indicate something unexpected that the caller should handle explicitly.
+  //    None of these are capacity conflicts. They must propagate to the
+  //    caller as infrastructure/input errors, NOT be disguised as
+  //    "insufficient capacity."
   throw err
 }
 

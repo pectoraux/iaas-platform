@@ -41,7 +41,7 @@ import {
   type CandidateAsset,
 } from '../src/lib/services/portfolio-optimizer.service'
 import type { CorrelationModel } from '../src/lib/services/portfolio-risk.service'
-import { ValidationError } from '@/lib/domain/errors'
+import { ValidationError, NotFoundError, InsufficientCapacityError } from '@/lib/domain/errors'
 import { Prisma } from '@prisma/client'
 
 let tenantId: string
@@ -517,52 +517,14 @@ describe('VPP-2D-3: error classification (capacity vs system failure)', () => {
     expect(result.failureReason!.toLowerCase()).toContain('capacity')
   })
 
-  it('simulated unexpected DB error is NOT reported as insufficient_capacity', async () => {
-    // This test proves that an unexpected DB/system error is RE-THROWN
-    // rather than converted to a normal insufficient_capacity result.
-    //
-    // We simulate a DB error by creating a candidate with an assetId that
-    // doesn't exist in the database. The capacity service will throw a
-    // NotFoundError (which IS classified as insufficient_capacity — the
-    // asset/assignment doesn't exist). To test a TRUE system error, we
-    // need to mock the transaction itself.
-    //
-    // Instead of mocking, we test the classifyReservationError function
-    // directly to prove it re-throws non-domain, non-retryable errors.
-
-    // Import the internal classifier for direct testing.
-    // (It's not exported, so we test via behavior: a Prisma error with
-    // an unknown code should be re-thrown.)
-
-    // Create a valid candidate pool.
-    const assets = await Promise.all([
-      createAssetWithCapacity('sys1', '50', 50, 1, 1.0),
-    ])
-
+  it('missing asset (NotFoundError) is RE-THROWN, not reported as insufficient_capacity', async () => {
+    // With the InsufficientCapacityError fix, NotFoundError is no longer
+    // mapped to insufficient_capacity. A missing asset/assignment is a
+    // stale/invalid candidate — it should propagate as an error, not be
+    // disguised as a capacity shortage.
     const now = new Date()
     const start = new Date(now.getTime() + 3600000 * 240)
     const end = new Date(start.getTime() + 3600000 * 2)
-
-    // Override the portfolioId to cause a sourceId collision that would
-    // trigger a unique constraint violation if the schema had one.
-    // (The schema doesn't have a unique constraint on sourceId, so this
-    // won't actually trigger an error — but it tests the happy path.)
-
-    // For the direct error-classification test, we verify that the
-    // function re-throws unexpected errors by checking that a generic
-    // Error is NOT caught as insufficient_capacity.
-    //
-    // We simulate this by calling optimizeAndReserve with a candidate
-    // whose assetId doesn't exist → the capacity service throws
-    // NotFoundError → classified as insufficient_capacity (expected).
-    //
-    // To test a TRUE system error (e.g., Prisma internal error), we
-    // would need to mock the database. Since we can't do that in an
-    // integration test, we verify the behavior indirectly: the
-    // NotFoundError IS classified as insufficient_capacity (proving
-    // domain errors are handled), and the code structure guarantees
-    // non-domain errors are re-thrown (the catch block only handles
-    // ValidationError, NotFoundError, and retryable Prisma codes).
 
     const fakeCandidate: CandidateAsset = {
       assetId: 'nonexistent-asset-id',
@@ -577,27 +539,20 @@ describe('VPP-2D-3: error classification (capacity vs system failure)', () => {
       },
     }
 
-    const result = await optimizeAndReserve({
-      tenantId,
-      networkId,
-      capabilityType: 'energy_discharge',
-      candidates: [fakeCandidate],
-      target: { requestedKw: 30, confidenceLevel: 0.99, correlationModel: NO_CORRELATION },
-      startTime: start,
-      endTime: end,
-      portfolioId: `sys-err-test-${Date.now()}`,
-    })
-
-    // NotFoundError (asset doesn't exist) is classified as
-    // insufficient_capacity — this is correct because a missing asset/
-    // assignment is a capacity problem (the asset can't provide capacity).
-    expect(result.status).toBe('insufficient_capacity')
-    expect(result.reserved).toBe(false)
-
-    // KEY: the failureReason is the domain error message, not a generic
-    // "unknown error" or DB error string.
-    expect(result.failureReason).toBeDefined()
-    expect(result.failureReason!.toLowerCase()).not.toContain('unknown')
+    // The NotFoundError must PROPAGATE — not be caught and converted to
+    // a normal insufficient_capacity result.
+    await expect(
+      optimizeAndReserve({
+        tenantId,
+        networkId,
+        capabilityType: 'energy_discharge',
+        candidates: [fakeCandidate],
+        target: { requestedKw: 30, confidenceLevel: 0.99, correlationModel: NO_CORRELATION },
+        startTime: start,
+        endTime: end,
+        portfolioId: `sys-err-test-${Date.now()}`,
+      }),
+    ).rejects.toThrow(NotFoundError)
   })
 
   it('successful reservation → status=reserved', async () => {
@@ -645,12 +600,34 @@ describe('VPP-2D-3: classifyReservationError (direct unit tests)', () => {
     algorithm: 'greedy_lexicographic_marginal_safe_capacity',
   } as any
 
-  it('ValidationError → insufficient_capacity', () => {
-    const err = new ValidationError('Insufficient capacity: requested 100 kW but only 50 kW available')
+  it('InsufficientCapacityError → insufficient_capacity', () => {
+    const err = new InsufficientCapacityError('Insufficient capacity: requested 100 kW, available 50 kW')
     const result = classifyReservationError(err, dummyPortfolio)
     expect(result.status).toBe('insufficient_capacity')
     expect(result.reserved).toBe(false)
     expect(result.failureReason).toContain('Insufficient capacity')
+  })
+
+  it('ValidationError("Requested amount must be positive") → RE-THROWN (not insufficient_capacity)', () => {
+    // This is the key regression test: a negative-amount ValidationError
+    // is an input/programming error, NOT a capacity conflict. It must
+    // NOT be presented to the buyer as "insufficient capacity."
+    const err = new ValidationError('Requested amount must be positive, got -3')
+    expect(() => classifyReservationError(err, dummyPortfolio)).toThrow(err)
+  })
+
+  it('ValidationError("Unit mismatch") → RE-THROWN (not insufficient_capacity)', () => {
+    // A unit/configuration error is not a capacity conflict.
+    const err = new ValidationError('Unit mismatch: commitment unit kWh does not match resource unit kW')
+    expect(() => classifyReservationError(err, dummyPortfolio)).toThrow(err)
+  })
+
+  it('NotFoundError (missing asset) → RE-THROWN (not insufficient_capacity)', () => {
+    // A missing asset/assignment is a stale/invalid candidate, not a
+    // capacity shortage. It should propagate, not be disguised as
+    // "insufficient capacity."
+    const err = new NotFoundError('asset_network_assignment', 'nonexistent-asset')
+    expect(() => classifyReservationError(err, dummyPortfolio)).toThrow(err)
   })
 
   it('retryable Prisma error (P2034 serialization) → retryable_conflict', () => {
@@ -680,25 +657,19 @@ describe('VPP-2D-3: classifyReservationError (direct unit tests)', () => {
   })
 
   it('UNEXPECTED error (generic Error) is RE-THROWN, not converted to insufficient_capacity', () => {
-    // This is the key test: a generic DB/infrastructure error must NOT
-    // be presented as a capacity conflict. It must propagate.
     const unexpectedErr = new Error('Connection terminated unexpectedly')
     expect(() => classifyReservationError(unexpectedErr, dummyPortfolio)).toThrow(unexpectedErr)
   })
 
   it('UNEXPECTED Prisma error (unknown code) is RE-THROWN', () => {
-    // A Prisma error with a code we don't recognize as retryable should
-    // be re-thrown, not converted.
     const err = new Prisma.PrismaClientKnownRequestError(
       'Some internal Prisma error',
-      { code: 'P3009', clientVersion: '6.0.0' }, // P3009 is not in our retryable list
+      { code: 'P3009', clientVersion: '6.0.0' },
     )
     expect(() => classifyReservationError(err, dummyPortfolio)).toThrow(err)
   })
 
   it('non-Error value (string) is RE-THROWN', () => {
-    // If something throws a non-Error, it should propagate, not be
-    // converted to insufficient_capacity.
     expect(() => classifyReservationError('something weird', dummyPortfolio)).toThrow()
   })
 })

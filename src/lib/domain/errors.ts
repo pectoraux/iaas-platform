@@ -69,6 +69,27 @@ export class PaymentError extends DomainError {
   }
 }
 
+/**
+ * Thrown when a capacity reservation cannot be satisfied because the
+ * requested amount exceeds the currently available capacity (physical
+ * capacity minus overlapping active reservations).
+ *
+ * This is a SPECIFIC capacity-contention error — distinct from generic
+ * ValidationError. The portfolio reservation layer maps ONLY this error
+ * to `status = 'insufficient_capacity'`. Generic ValidationError (e.g.,
+ * "Requested amount must be positive", "Unit mismatch") is NOT a capacity
+ * conflict and is re-thrown as a system/input error.
+ *
+ * HTTP 409 Conflict — the request is well-formed but cannot be satisfied
+ * due to current resource contention. The caller can retry with a fresh
+ * candidate pool.
+ */
+export class InsufficientCapacityError extends DomainError {
+  constructor(message: string, details?: unknown) {
+    super(message, 'CAPACITY_UNAVAILABLE', 409, details);
+  }
+}
+
 /** Map a thrown value to a JSON-serialisable API error body. */
 export function toApiError(err: unknown) {
   if (err instanceof DomainError) {

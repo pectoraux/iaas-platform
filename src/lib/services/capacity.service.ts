@@ -26,7 +26,7 @@
 
 import { db, type ExtendedTransactionClient } from '@/lib/db'
 import { Prisma } from '@prisma/client'
-import { NotFoundError, ValidationError } from '@/lib/domain/errors'
+import { NotFoundError, ValidationError, InsufficientCapacityError } from '@/lib/domain/errors'
 
 // ---------------------------------------------------------------------------
 // CapacityResource — the verified physical capacity (stable lock target)
@@ -126,7 +126,7 @@ export async function createCapacityReservation(
   const physical = new Prisma.Decimal(resource.physicalCapacity)
 
   if (requested.greaterThan(physical)) {
-    throw new ValidationError(
+    throw new InsufficientCapacityError(
       `Requested ${requested.toString()} exceeds verified physical capacity ${physical.toString()} ${resource.unit}`,
     )
   }
@@ -172,7 +172,7 @@ export async function createCapacityReservation(
   const available = physical.minus(alreadyReserved)
 
   if (requested.greaterThan(available)) {
-    throw new ValidationError(
+    throw new InsufficientCapacityError(
       `Insufficient capacity: requested ${requested.toString()}, available ${available.toString()} ${resource.unit}`,
     )
   }
@@ -273,7 +273,7 @@ export async function createCapacityCommitment(
 
   const remaining = new Prisma.Decimal(reservation.remainingAmount)
   if (committed.greaterThan(remaining)) {
-    throw new ValidationError(
+    throw new InsufficientCapacityError(
       `Insufficient remaining capacity: requested ${committed.toString()} ${input.unit}, remaining ${remaining.toString()} ${input.unit}`,
     )
   }
