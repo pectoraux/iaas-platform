@@ -1393,3 +1393,25 @@ Stage Summary:
 - The fallback sweep is lease-aware — it only reclaims expired evaluations, not active ones.
 - Malformed events go to dead_letter, not silently consumed.
 - VPP-2D-4 is now complete with safety, liveness, lease-based crash recovery, and dead-letter handling.
+
+---
+Task ID: VPP-2D-4-fencing-tokens
+Agent: orchestrator
+Task: Add fencing tokens to prevent stale workers/evaluators from overwriting newer results after lease expiry.
+
+Work Log:
+1. COMMITMENT FENCING: Added evaluationClaimId (UUID) to VppPortfolioCommitment. Each claim generates a unique token. The final result write is now an updateMany conditioned on status='evaluating' AND evaluationClaimId=claimId. If count=0, the evaluator lost its lease and must NOT overwrite. The failure revert is also fenced — only reverts if the evaluator still owns the claim. Lease fields (evaluationClaimedAt, evaluationLeaseExpiresAt, evaluationClaimId) are cleared on successful final write.
+2. EVENT FENCING: Added processingClaimId (UUID) to DomainEvent. Each event claim generates a unique token. All worker-owned event transitions (processed, dead_letter) are now updateMany conditioned on processingStatus='processing' AND processingClaimId=eventClaimId. If count=0, the worker lost its lease and must not overwrite.
+3. STALE-WORKER PROTECTION: The race scenario is now safe:
+   - Evaluator A claims token X, lease expires
+   - Evaluator B reclaims with token Y, produces final result
+   - Evaluator A wakes up, attempts final write with token X
+   - A's write affects 0 rows (evaluationClaimId=X no longer matches)
+   - B's result remains authoritative
+4. DEAD_LETER FENCING: Malformed events are marked dead_letter only if the worker still owns the claim (processingClaimId matches). A stale worker cannot dead-letter an event another worker is processing.
+5. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (only pre-existing bun:test + vpp.service.ts). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- Fencing tokens prevent stale workers/evaluators from overwriting newer results — the critical distributed-systems safety property that leases alone don't provide.
+- Both commitment evaluation and DomainEvent processing use fencing: every worker-owned write checks the claim token.
+- VPP-2D-4 now has lease expiration + stale-writer protection = genuinely concurrency-safe distributed worker.
