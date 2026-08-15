@@ -1191,3 +1191,27 @@ Stage Summary:
 - This closes the remaining semantic gap: a malformed optimizer allocation (e.g., requestedAmount = -3) will never be presented to a buyer as "insufficient capacity; retry with a fresh pool."
 - VPP-2D-3 is now FROZEN. The architecture has a clean, precise error boundary.
 - NEXT (VPP-2D-4): economic integration — connect the reserved portfolio to the actual buyer obligation: dispatch → actual DER response → aggregate portfolio performance → commitment fulfillment → portfolio-level settlement.
+
+---
+Task ID: VPP-2D-3-retryable-error-precision
+Agent: orchestrator
+Task: Fix the retryable-error classifier — P2033 (integer overflow) and P2031 (MongoDB replica set) are NOT transaction conflicts and should not be classified as retryable.
+
+Work Log:
+1. REMOVED P2033 and P2031 from isRetryableTransactionError: P2033 is "a number doesn't fit into a 64-bit signed integer" (a data/programming error — retrying won't help). P2031 is "MongoDB transaction requires a replica set" (a configuration error — our database is PostgreSQL). Both are now re-thrown, not disguised as retryable_conflict.
+2. FIXED INACCURATE COMMENT: The old comment said "P2033 — connection error" and "P2031 — transaction timeout" which are wrong per Prisma's error reference. Updated with accurate descriptions: P2034 = write conflict/deadlock, P2024 = connection pool timeout, P1001/P1002 = transient connection failures (documented as infrastructure retry, not transaction conflict per se). P2033 and P2031 are explicitly documented as NOT RETRYABLE with their actual meanings.
+3. KEPT P2034, P2024, P1001, P1002: P2034 (write conflict/deadlock) and P2024 (connection pool timeout) are genuine transaction conflicts. P1001 (connection lost) and P1002 (connection timed out) are transient infrastructure failures where a retry is appropriate — documented explicitly in the comment.
+4. REGRESSION TESTS (4 new direct unit tests):
+   - P2033 (integer overflow) → RE-THROWN ✓
+   - P2031 (MongoDB replica set) → RE-THROWN ✓
+   - P1001 (connection lost) → retryable_conflict ✓ (documented as transient infrastructure)
+   - P1002 (connection timed out) → retryable_conflict ✓ (documented as transient infrastructure)
+5. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (only pre-existing bun:test). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The retryable-error classifier now only includes genuine transaction conflicts (P2034, P2024) and transient connection failures (P1001, P1002). Application/data errors (P2033 integer overflow, P2031 MongoDB config) are re-thrown — they will never be presented to the caller as "retryable_conflict."
+- VPP-2D-3 is now FROZEN. The error boundary is precise:
+  - InsufficientCapacityError → insufficient_capacity (expected market conflict)
+  - P2034/P2024/P1001/P1002 → retryable_conflict (genuine transient failures)
+  - Everything else → re-thrown (input errors, config errors, system failures)
+- NEXT (VPP-2D-4): economic integration — connect the reserved portfolio to the actual buyer obligation: dispatch → actual DER response → aggregate portfolio performance → commitment fulfillment → portfolio-level settlement.
