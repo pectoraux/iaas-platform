@@ -507,20 +507,32 @@ export async function processPortfolioEvaluationRetries(
     try {
       payload = JSON.parse(event.payloadJson) as { commitmentId?: string; dispatchId?: string }
     } catch {
-      // Malformed JSON — mark as dead_letter with fencing.
+      // Malformed JSON — mark as dead_letter with fencing. Clear lease fields.
       await db.domainEvent.updateMany({
         where: { id: event.id, processingStatus: 'processing', processingClaimId: eventClaimId },
-        data: { processingStatus: 'dead_letter', processed: true },
+        data: {
+          processingStatus: 'dead_letter',
+          processed: true,
+          claimedAt: null,
+          leaseExpiresAt: null,
+          processingClaimId: null,
+        },
       }).catch(() => {})
       failed++
       continue
     }
 
     if (!payload.dispatchId) {
-      // Malformed event — mark as dead_letter with fencing.
+      // Malformed event — mark as dead_letter with fencing. Clear lease fields.
       await db.domainEvent.updateMany({
         where: { id: event.id, processingStatus: 'processing', processingClaimId: eventClaimId },
-        data: { processingStatus: 'dead_letter', processed: true },
+        data: {
+          processingStatus: 'dead_letter',
+          processed: true,
+          claimedAt: null,
+          leaseExpiresAt: null,
+          processingClaimId: null,
+        },
       }).catch(() => {})
       failed++
       continue
@@ -531,25 +543,43 @@ export async function processPortfolioEvaluationRetries(
       const result = await evaluatePortfolioCommitment(event.tenantId, payload.dispatchId)
 
       if (result.evaluationOutcome === 'final' || result.evaluationOutcome === 'already_final') {
-        // Success — mark the event as processed with fencing.
+        // Success — mark processed with fencing. Clear lease fields.
         await db.domainEvent.updateMany({
           where: { id: event.id, processingStatus: 'processing', processingClaimId: eventClaimId },
-          data: { processingStatus: 'processed', processed: true },
+          data: {
+            processingStatus: 'processed',
+            processed: true,
+            claimedAt: null,
+            leaseExpiresAt: null,
+            processingClaimId: null,
+          },
         }).catch(() => {})
         completed++
       } else {
-        // Still pending or evaluating — consumed but not final.
+        // Still pending or evaluating — consumed but not final. Clear lease fields.
         await db.domainEvent.updateMany({
           where: { id: event.id, processingStatus: 'processing', processingClaimId: eventClaimId },
-          data: { processingStatus: 'processed', processed: true },
+          data: {
+            processingStatus: 'processed',
+            processed: true,
+            claimedAt: null,
+            leaseExpiresAt: null,
+            processingClaimId: null,
+          },
         }).catch(() => {})
         failed++
       }
     } catch {
-      // Evaluation failed again. Mark THIS event as processed with fencing.
+      // Evaluation failed again. Mark processed with fencing. Clear lease fields.
       await db.domainEvent.updateMany({
         where: { id: event.id, processingStatus: 'processing', processingClaimId: eventClaimId },
-        data: { processingStatus: 'processed', processed: true },
+        data: {
+          processingStatus: 'processed',
+          processed: true,
+          claimedAt: null,
+          leaseExpiresAt: null,
+          processingClaimId: null,
+        },
       }).catch(() => {})
       failed++
     }
