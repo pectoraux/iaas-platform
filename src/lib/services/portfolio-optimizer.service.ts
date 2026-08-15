@@ -13,19 +13,27 @@
 // OPTIMIZATION OBJECTIVE (lexicographic — the optimizer's contract)
 // =============================================================================
 //
-//   1. Feasibility:     Meet the requested safe capacity (or get as close as
-//                       the pool allows). fullyServed beats infeasible.
-//   2. Safe capacity:   Among feasible portfolios, maximize safe capacity
-//                       surplus (higher committedKw is better — more margin).
-//   3. Opportunity cost: Minimize total opportunity cost (don't tie up
-//                       high-value assets when lower-value ones suffice).
-//   4. Direct cost:     Minimize total direct cost.
-//   5. Diversification: Maximize cluster count (reduce common-mode risk).
-//   6. Resource lockup: Minimize total physical capacity committed.
+//   1. Feasibility:      Meet the requested safe capacity (or get as close as
+//                        the pool allows). fullyServed beats infeasible.
+//   2. Opportunity cost: Minimize total opportunity cost (don't tie up
+//                        high-value assets when lower-value ones suffice).
+//   3. Direct cost:      Minimize total direct cost.
+//   4. Resource lockup:  Minimize total physical capacity committed.
+//                        (Don't lock up 700 kW when the buyer only needs 500.)
+//   5. Diversification:  Maximize cluster count (reduce common-mode risk).
+//
+// NOTE: This objective does NOT maximize safe-capacity surplus. A buyer
+// requesting 500 kW does not want the platform to commit 700 kW of safe
+// capacity and unnecessarily lock 200 kW of physical resources. The
+// binary-search partial allocation and the pruning pass both serve the
+// "minimize lockup" objective — they reduce committed capacity to the
+// minimum that meets the target.
 //
 // The greedy algorithm below optimizes these in order. It is a HEURISTIC —
-// not guaranteed globally optimal. The optimality gap is measurable via the
-// exhaustive reference optimizer (discretized partial allocations, N ≤ ~8).
+// not guaranteed globally optimal. The gap is measurable via the grid
+// reference optimizer (discretized partial allocations, 10% grid, N ≤ 6).
+// See `gridOptimalityGap` in the result — this is a GRID APPROXIMATION
+// gap, NOT an exact continuous-optimum gap.
 //
 // =============================================================================
 // KEY DESIGN DECISIONS (VPP-2D-2C corrections)
@@ -155,16 +163,31 @@ export interface OptimizationResult {
   totalOpportunityCost?: number
   algorithm: string
   /**
-   * Optimality gap vs the discretized exhaustive reference (partial allocations),
-   * when computed (small N). Defined as:
-   *   (optimalSafeKw - heuristicSafeKw) / optimalSafeKw
-   * Undefined for large N where exhaustive search is infeasible.
+   * Grid optimality gap vs the 10%-discretized exhaustive reference
+   * (partial allocations at 0%, 10%, ..., 100%), when computed (small N).
+   *
+   * Defined as:
+   *   (gridOptimalSafeKw - heuristicSafeKw) / gridOptimalSafeKw
+   *
+   * IMPORTANT: This is a GRID APPROXIMATION gap, NOT an exact
+   * continuous-optimum gap. The production optimizer supports continuous
+   * partial allocation (any kW value), while the reference only searches
+   * 10% increments. The true continuous optimum may differ from the grid
+   * optimum. A gridOptimalityGap of 0% means "matches the best 10%-grid
+   * solution," not "globally optimal."
+   *
+   * Undefined for large N where grid search is infeasible (N > 6).
    */
-  optimalityGap?: number
+  gridOptimalityGap?: number
+  /**
+   * The grid step used by the reference optimizer (e.g., 0.10 = 10%).
+   * Present when gridOptimalityGap is computed.
+   */
+  allocationGridStep?: number
   /**
    * Gap vs the whole-subset exhaustive reference (no partial allocations).
-   * This is a WEAKER metric than optimalityGap because it doesn't search
-   * the same solution space. Retained for backwards compatibility.
+   * This is a WEAKER metric than gridOptimalityGap because it doesn't
+   * search partial allocations at all. Retained for backwards compatibility.
    */
   subsetSelectionGap?: number
 }
@@ -787,28 +810,48 @@ function evaluatePortfolio(
  * Compare two optimization results under the full lexicographic objective.
  * Returns < 0 if a is better.
  *
- *   1. fullyServed wins
- *   2. higher safe capacity (if not both served)
+ *   1. fullyServed wins (feasibility)
+ *   2. higher safe capacity (only if not both served — get as close as possible)
  *   3. lower opportunity cost
  *   4. lower direct cost
- *   5. more clusters
- *   6. less total committed
+ *   5. less total committed (minimize lockup)
+ *   6. more clusters (diversification)
+ *
+ * NOTE: Once both portfolios are feasible (fullyServed), safe capacity
+ * surplus is NOT maximized — the objective moves to minimizing opportunity
+ * cost and resource lockup. This matches the commercial goal: a buyer
+ * asking for 500 kW does not want the platform to commit 700 kW.
  */
 function compareResultsLexicographic(
   a: OptimizationResult,
   b: OptimizationResult,
   _target: OptimizationTarget,
 ): number {
+  // 1. Feasibility: fullyServed wins.
   if (a.fullyServed !== b.fullyServed) return a.fullyServed ? -1 : 1
-  if (Math.abs(a.committedKw - b.committedKw) > 0.01) return b.committedKw - a.committedKw
+
+  // 2. If not both served, higher safe capacity is better (get as close as possible).
+  if (!a.fullyServed && !b.fullyServed) {
+    if (Math.abs(a.committedKw - b.committedKw) > 0.01) return b.committedKw - a.committedKw
+  }
+
+  // Both are feasible (or both infeasible with equal safe capacity).
+  // Minimize opportunity cost, direct cost, lockup, then maximize diversification.
   const aOpp = a.totalOpportunityCost ?? 0
   const bOpp = b.totalOpportunityCost ?? 0
   if (Math.abs(aOpp - bOpp) > 0.01) return aOpp - bOpp
+
   const aCost = a.totalCost ?? 0
   const bCost = b.totalCost ?? 0
   if (Math.abs(aCost - bCost) > 0.01) return aCost - bCost
-  if (a.clusterCount !== b.clusterCount) return b.clusterCount - a.clusterCount
-  return a.totalCommittedKw - b.totalCommittedKw
+
+  // Minimize physical lockup.
+  if (Math.abs(a.totalCommittedKw - b.totalCommittedKw) > 0.01) {
+    return a.totalCommittedKw - b.totalCommittedKw
+  }
+
+  // Maximize diversification.
+  return b.clusterCount - a.clusterCount
 }
 
 // ---------------------------------------------------------------------------
@@ -865,18 +908,34 @@ export function exhaustiveOptimizeSubsets(
 // ---------------------------------------------------------------------------
 
 /**
- * Measure the optimality gap between the greedy heuristic and the discretized
- * exhaustive reference (partial allocations). This is the VALID gap metric
- * because both optimizers search the same solution space.
+ * Measure the grid optimality gap between the greedy heuristic and the
+ * 10%-discretized exhaustive reference (partial allocations at 0%, 10%,
+ * ..., 100%).
  *
- * gap = (optimalSafeKw - heuristicSafeKw) / optimalSafeKw
+ * IMPORTANT: This is a GRID APPROXIMATION gap, NOT an exact
+ * continuous-optimum gap. The production optimizer supports continuous
+ * partial allocation (any kW value via binary search), while the reference
+ * only searches 10% increments. The true continuous optimum may differ
+ * from the grid optimum.
+ *
+ * A gridOptimalityGap of 0% means "matches the best 10%-grid solution,"
+ * not "globally optimal."
+ *
+ * gap = (gridOptimalSafeKw - heuristicSafeKw) / gridOptimalSafeKw
  *
  * Only feasible for N ≤ 6 (11^N combinations).
  */
 export function measureOptimalityGap(
   candidates: CandidateAsset[],
   target: OptimizationTarget,
-): { heuristic: OptimizationResult; optimal: OptimizationResult; gap: number } {
+): {
+  heuristic: OptimizationResult
+  optimal: OptimizationResult
+  /** Grid approximation gap (10% grid). NOT an exact continuous-optimum gap. */
+  gap: number
+  /** The grid step used by the reference (0.10 = 10%). */
+  gridStep: number
+} {
   const heuristic = optimizePortfolio(candidates, target)
   const optimal = exhaustiveOptimizeDiscretized(candidates, target)
 
@@ -884,7 +943,7 @@ export function measureOptimalityGap(
     ? Math.max(0, (optimal.committedKw - heuristic.committedKw) / optimal.committedKw)
     : 0
 
-  return { heuristic, optimal, gap }
+  return { heuristic, optimal, gap, gridStep: 0.10 }
 }
 
 /**
