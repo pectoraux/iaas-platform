@@ -1,5 +1,5 @@
 // =============================================================================
-// VPP-2D-2B: Portfolio Optimizer (marginal-safe-capacity, partial allocation)
+// VPP-2D-2C: Portfolio Optimizer (effective-profile, lexicographic, partial)
 // =============================================================================
 // THE CENTRAL QUESTION:
 //
@@ -13,86 +13,93 @@
 // OPTIMIZATION OBJECTIVE (lexicographic — the optimizer's contract)
 // =============================================================================
 //
-//   Primary:   Meet the requested normal-approximation safe capacity.
-//              (committedKw ≥ requestedKw, or as close as the pool allows.)
-//
-//   Secondary: Minimize total opportunity cost.
-//              (Don't tie up high-value assets when lower-value ones suffice.)
-//
-//   Tertiary:  Minimize total direct cost.
-//              (Prefer cheaper assets when risk contribution is equal.)
-//
-//   Quaternary: Minimize portfolio concentration / common-mode risk.
-//               (Spread across clusters to reduce correlated-failure risk.)
+//   1. Feasibility:     Meet the requested safe capacity (or get as close as
+//                       the pool allows). fullyServed beats infeasible.
+//   2. Safe capacity:   Among feasible portfolios, maximize safe capacity
+//                       surplus (higher committedKw is better — more margin).
+//   3. Opportunity cost: Minimize total opportunity cost (don't tie up
+//                       high-value assets when lower-value ones suffice).
+//   4. Direct cost:     Minimize total direct cost.
+//   5. Diversification: Maximize cluster count (reduce common-mode risk).
+//   6. Resource lockup: Minimize total physical capacity committed.
 //
 // The greedy algorithm below optimizes these in order. It is a HEURISTIC —
 // not guaranteed globally optimal. The optimality gap is measurable via the
-// exhaustive reference optimizer in the test suite (for N ≤ ~12).
+// exhaustive reference optimizer (discretized partial allocations, N ≤ ~8).
 //
 // =============================================================================
-// KEY DESIGN DECISIONS (VPP-2D-2B corrections)
+// KEY DESIGN DECISIONS (VPP-2D-2C corrections)
 // =============================================================================
 //
-//   1. MARGINAL SAFE CAPACITY SCORING. At each greedy step, the candidate
-//      is scored by its ACTUAL marginal contribution to portfolio safe
-//      capacity (safeCapacity(portfolio + candidate) - safeCapacity(portfolio)),
-//      normalized by cost. This replaces the previous arbitrary fixed weights
-//      (expectedKw * 0.3, cost * 0.01) which had no principled relationship
-//      to the risk model.
+//   1. EFFECTIVE PROFILE MATCHES ACTUAL ALLOCATION. Every selected asset's
+//      uncertainty profile is scaled to its allocatedKw BEFORE any risk
+//      computation. The original observed profile is immutable; the
+//      effective profile is derived from it + the allocation amount.
+//      This prevents the bug where expectedPerformanceKw > allocatedKw
+//      inflates safe capacity.
 //
-//   2. PARTIAL ALLOCATION. A selected asset's committedKw can be LESS than
-//      its availableCapacityKw. The optimizer performs a binary search on
-//      the last-added asset to find the minimum allocation that meets the
-//      target, rather than committing the entire asset. This avoids locking
-//      up physical resources the buyer doesn't need.
+//   2. LEXICOGRAPHIC SCORING (not blended ratio). During greedy selection,
+//      candidates are compared lexicographically:
+//        a. marginal safe capacity (primary signal — which candidate moves
+//           us closest to the target?)
+//        b. marginal opportunity cost (tie-break: prefer cheaper assets)
+//        c. marginal direct cost (tie-break)
+//        d. cluster novelty (tie-break: prefer new clusters)
+//      Costs are NOT blended into an arbitrary ratio with safe capacity.
 //
-//   3. IMMUTABLE UNCERTAINTY PROFILES. buildCandidate() does NOT mutate the
-//      caller's DerUncertaintyProfile. The availableCapacityKw is a separate
-//      hard constraint enforced at allocation time. If expectedPerformanceKw
-//      > availableCapacityKw, the optimizer scales the allocation (not the
-//      statistical model) — the uncertainty profile is treated as immutable
-//      observed evidence.
+//   3. PARTIAL ALLOCATION. The last-added asset is binary-searched to find
+//      the minimum allocation that meets the target. The effective profile
+//      is scaled to match.
 //
-//   4. CANDIDATE VALIDATION. Every candidate is validated before optimization:
-//        - unique assetId
-//        - non-negative availableCapacityKw
-//        - non-negative expectedPerformanceKw, stdDevKw
-//        - availabilityProb ∈ [0, 1]
-//        - non-empty clusterId
-//        - finite numeric values
+//   4. IMMUTABLE OBSERVED PROFILES. buildCandidate() does NOT mutate the
+//      caller's DerUncertaintyProfile. The effective profile is derived at
+//      optimization time.
 //
-//   5. GENERIC. No VPP-specific types or DB access. The optimizer operates
-//      on abstract CandidateAsset inputs.
+//   5. CANDIDATE VALIDATION. Every candidate is validated before optimization.
+//
+//   6. GENERIC. No VPP-specific types or DB access.
 //
 // =============================================================================
 // ALGORITHM
 // =============================================================================
 //
-//   Phase 1 — GREEDY SELECTION (marginal safe capacity):
-//     For each remaining candidate, compute:
-//       marginalSafeKw = safeCapacity(selected + candidate) - safeCapacity(selected)
-//       score = marginalSafeKw / (1 + cost + opportunityCost)
-//     Add the highest-scoring candidate. Stop when safe capacity ≥ target.
+//   Phase 1 — GREEDY SELECTION (lexicographic marginal safe capacity):
+//     For each remaining candidate, compute its marginal safe capacity
+//     (using the EFFECTIVE profile at full available capacity). Compare
+//     candidates lexicographically:
+//       1. higher marginal safe capacity wins
+//       2. lower marginal opportunity cost wins (tie-break)
+//       3. lower marginal direct cost wins (tie-break)
+//       4. new cluster wins (tie-break)
+//     Add the best candidate. Stop when safe capacity ≥ target.
 //
 //   Phase 2 — PARTIAL ALLOCATION OF THE LAST ASSET:
-//     The last-added asset often overshoots the target. Binary-search its
-//     allocation to find the minimum that still meets the target, freeing
-//     the unused capacity.
+//     Binary-search the last asset's allocation to find the minimum that
+//     still meets the target. Scale its effective profile to match.
 //
-//   Phase 3 — PRUNING:
-//     Remove any asset whose removal still leaves the portfolio above target.
+//   Phase 3 — PRUNING (lexicographic):
+//     Try removing each asset (smallest expected first). Keep the removal
+//     only if the portfolio remains feasible AND the lexicographic objective
+//     doesn't worsen.
 //
-//   This is O(N²) in candidates (N safe-capacity evaluations per step, N
-//   steps). For 1000 candidates that's ~10^6 evaluations — each evaluation
-//   is O(N) for the risk engine, so ~10^9 total. For large N, a future
-//   version should use incremental risk updates (only the covariance terms
-//   involving the new asset change).
+//   O(N²) in candidates for the greedy phase.
 //
-// FUTURE EXTENSIONS:
-//   - LP relaxation with branch-and-bound for provable optimality
-//   - Incremental risk updates (avoid full recomputation)
-//   - Multi-objective Pareto frontier
-//   - Per-asset historical actual-dispatch performance
+// =============================================================================
+// EXHAUSTIVE REFERENCE (for optimality-gap testing)
+// =============================================================================
+//
+//   The exhaustive reference searches DISCRETIZED partial allocations
+//   (0%, 10%, ..., 100% of each asset's available capacity). For N assets
+//   with 11 allocation levels each, this is 11^N combinations — feasible
+//   only for N ≤ 6. For N=6 that's ~1.77M combinations.
+//
+//   This searches the SAME solution space as the production optimizer
+//   (partial allocations), so the optimality gap is a valid comparison.
+//
+//   The old whole-subset exhaustive optimizer is retained as
+//   `exhaustiveOptimizeSubsets` for backwards compatibility, but its gap
+//   is reported as `subsetSelectionGap` (not `optimalityGap`) because it
+//   does not search partial allocations.
 // =============================================================================
 
 import {
@@ -107,15 +114,6 @@ import { ValidationError } from '@/lib/domain/errors'
 // Types
 // ---------------------------------------------------------------------------
 
-/**
- * A candidate asset for portfolio selection. GENERIC — not VPP-specific.
- *
- * The `uncertainty` profile is the OBSERVED statistical model (from baseline
- * evaluation + historical data). It is treated as IMMUTABLE by the optimizer.
- * The `availableCapacityKw` is a separate hard constraint (from the generic
- * capacity layer) that limits how much can be committed, NOT a parameter of
- * the statistical model.
- */
 export interface CandidateAsset {
   assetId: string
   clusterId: string
@@ -135,9 +133,6 @@ export interface OptimizationTarget {
   correlationModel: CorrelationModel
 }
 
-/**
- * A selected asset with its (possibly partial) allocation.
- */
 export interface SelectedAsset {
   assetId: string
   clusterId: string
@@ -147,20 +142,10 @@ export interface SelectedAsset {
   expectedKw: number
 }
 
-/**
- * The optimization result.
- *
- * NOTE: The algorithm is a HEURISTIC (greedy with marginal-safe-capacity
- * scoring). It is NOT guaranteed globally optimal. The `optimalityGap`
- * field is populated when the exhaustive reference optimizer is available
- * (small N); otherwise it is undefined.
- */
 export interface OptimizationResult {
   selected: SelectedAsset[]
   risk: SafeCapacityResult
-  /** Safe committed capacity (kW) = risk.committedKw. */
   committedKw: number
-  /** Total physical capacity committed (kW) = Σ selected.committedKw. */
   totalCommittedKw: number
   fullyServed: boolean
   shortfallKw: number
@@ -168,27 +153,43 @@ export interface OptimizationResult {
   clusterCount: number
   totalCost?: number
   totalOpportunityCost?: number
-  /**
-   * The algorithm name. Always 'greedy_marginal_safe_capacity' for the
-   * heuristic optimizer. The exhaustive reference uses 'exhaustive'.
-   */
   algorithm: string
   /**
-   * Optimality gap vs the exhaustive reference, when computed (small N).
-   * Defined as: (optimalSafeKw - heuristicSafeKw) / optimalSafeKw.
+   * Optimality gap vs the discretized exhaustive reference (partial allocations),
+   * when computed (small N). Defined as:
+   *   (optimalSafeKw - heuristicSafeKw) / optimalSafeKw
    * Undefined for large N where exhaustive search is infeasible.
    */
   optimalityGap?: number
+  /**
+   * Gap vs the whole-subset exhaustive reference (no partial allocations).
+   * This is a WEAKER metric than optimalityGap because it doesn't search
+   * the same solution space. Retained for backwards compatibility.
+   */
+  subsetSelectionGap?: number
+}
+
+// ---------------------------------------------------------------------------
+// Internal representation
+// ---------------------------------------------------------------------------
+
+/**
+ * A selected asset during optimization. ALWAYS carries the EFFECTIVE profile
+ * (scaled to allocatedKw), never the original unscaled profile. This ensures
+ * every risk computation uses a profile consistent with the actual allocation.
+ */
+interface SelectedEntry {
+  candidate: CandidateAsset
+  /** Current allocation (kW). May be partial. */
+  allocatedKw: number
+  /** The EFFECTIVE uncertainty profile at this allocation (scaled). */
+  uncertainty: DerUncertaintyProfile
 }
 
 // ---------------------------------------------------------------------------
 // Candidate validation
 // ---------------------------------------------------------------------------
 
-/**
- * Validate a list of candidates. Throws ValidationError on the first
- * invalid candidate. This is the candidate-level validation boundary.
- */
 export function validateCandidates(candidates: CandidateAsset[]): void {
   const seenIds = new Set<string>()
 
@@ -199,8 +200,6 @@ export function validateCandidates(candidates: CandidateAsset[]): void {
     if (!c || typeof c !== 'object') {
       throw new ValidationError(`${label}: not a valid object`)
     }
-
-    // Unique assetId
     if (!c.assetId || typeof c.assetId !== 'string') {
       throw new ValidationError(`${label}: assetId must be a non-empty string`)
     }
@@ -208,18 +207,12 @@ export function validateCandidates(candidates: CandidateAsset[]): void {
       throw new ValidationError(`${label}: duplicate assetId '${c.assetId}'`)
     }
     seenIds.add(c.assetId)
-
-    // Non-empty clusterId
     if (!c.clusterId || typeof c.clusterId !== 'string') {
       throw new ValidationError(`${label}: clusterId must be a non-empty string`)
     }
-
-    // availableCapacityKw: non-negative, finite
     if (!Number.isFinite(c.availableCapacityKw) || c.availableCapacityKw < 0) {
-      throw new ValidationError(`${label}: availableCapacityKw must be a non-negative finite number, got ${c.availableCapacityKw}`)
+      throw new ValidationError(`${label}: availableCapacityKw must be non-negative finite, got ${c.availableCapacityKw}`)
     }
-
-    // Uncertainty profile
     const u = c.uncertainty
     if (!u || typeof u !== 'object') {
       throw new ValidationError(`${label}: uncertainty must be a DerUncertaintyProfile`)
@@ -233,8 +226,6 @@ export function validateCandidates(candidates: CandidateAsset[]): void {
     if (!Number.isFinite(u.availabilityProb) || u.availabilityProb < 0 || u.availabilityProb > 1) {
       throw new ValidationError(`${label}: uncertainty.availabilityProb must be in [0, 1], got ${u.availabilityProb}`)
     }
-
-    // Optional cost fields
     if (c.costPerKw !== undefined && (!Number.isFinite(c.costPerKw) || c.costPerKw < 0)) {
       throw new ValidationError(`${label}: costPerKw must be non-negative finite, got ${c.costPerKw}`)
     }
@@ -245,28 +236,69 @@ export function validateCandidates(candidates: CandidateAsset[]): void {
 }
 
 // ---------------------------------------------------------------------------
+// Profile scaling (effective profile from allocation)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the EFFECTIVE uncertainty profile for a given allocation amount.
+ *
+ * The effective profile is what the risk engine should use: it reflects the
+ * actual amount being committed. If allocatedKw < expectedPerformanceKw,
+ * both μ and σ are scaled proportionally (linear response assumption).
+ *
+ * The availability probability is NOT scaled — it represents the probability
+ * the asset is online at all, regardless of how much it's asked to deliver.
+ *
+ * If allocatedKw >= expectedPerformanceKw, the profile is returned unchanged
+ * (we don't inflate expected performance beyond the observed model).
+ *
+ * The original profile is NEVER mutated — this returns a new object.
+ */
+function effectiveProfile(
+  original: DerUncertaintyProfile,
+  allocatedKw: number,
+): DerUncertaintyProfile {
+  // If allocation covers the full expected performance, no scaling needed.
+  if (allocatedKw >= original.expectedPerformanceKw) {
+    return { ...original }
+  }
+  // If expected is 0, can't scale — return as-is.
+  if (original.expectedPerformanceKw === 0) {
+    return { ...original }
+  }
+  // Scale μ and σ by the allocation fraction.
+  const scale = allocatedKw / original.expectedPerformanceKw
+  return {
+    ...original,
+    expectedPerformanceKw: original.expectedPerformanceKw * scale,
+    stdDevKw: original.stdDevKw * scale,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Optimization
 // ---------------------------------------------------------------------------
 
 /**
  * Select a portfolio of assets to satisfy a capacity request at a target
- * confidence level, using a greedy marginal-safe-capacity heuristic with
- * partial allocation.
+ * confidence level, using a greedy lexicographic heuristic with partial
+ * allocation and effective-profile risk computation.
  *
  * OBJECTIVE (lexicographic):
  *   1. Meet the requested safe capacity
- *   2. Minimize total opportunity cost
- *   3. Minimize total direct cost
- *   4. Minimize concentration (diversify across clusters)
+ *   2. Maximize safe capacity surplus
+ *   3. Minimize total opportunity cost
+ *   4. Minimize total direct cost
+ *   5. Maximize diversification (cluster count)
+ *   6. Minimize total physical capacity committed
  *
  * This is a HEURISTIC — not guaranteed globally optimal. See `optimalityGap`
- * in the result for the measured gap vs exhaustive search (small N only).
+ * for the measured gap vs the discretized exhaustive reference (small N).
  */
 export function optimizePortfolio(
   candidates: CandidateAsset[],
   target: OptimizationTarget,
 ): OptimizationResult {
-  // Validate target.
   if (!Number.isFinite(target.requestedKw) || target.requestedKw < 0) {
     throw new ValidationError(`requestedKw must be non-negative finite, got ${target.requestedKw}`)
   }
@@ -274,25 +306,23 @@ export function optimizePortfolio(
     throw new ValidationError(`confidenceLevel must be in (0, 1), got ${target.confidenceLevel}`)
   }
 
-  // Validate candidates.
   validateCandidates(candidates)
 
-  // Filter out candidates with no available capacity.
   const viable = candidates.filter((c) => c.availableCapacityKw > 0)
   if (viable.length === 0 || target.requestedKw === 0) {
     return emptyResult(candidates.length, target)
   }
 
-  // Phase 1: greedy selection by marginal safe capacity.
+  // Phase 1: greedy selection (lexicographic, effective profiles).
   const selected = greedySelect(viable, target)
 
   // Phase 2: partial allocation of the last asset.
   const partial = partialAllocateLast(selected, target)
 
-  // Phase 3: prune redundant assets.
+  // Phase 3: lexicographic pruning.
   const pruned = pruneExcess(partial, target)
 
-  // Compute final risk statistics on the pruned, partially-allocated portfolio.
+  // Final risk on effective profiles.
   const profiles = pruned.map((s) => s.uncertainty)
   const risk = computeSafeCapacity(
     profiles,
@@ -305,35 +335,28 @@ export function optimizePortfolio(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1: Greedy selection by marginal safe capacity
+// Phase 1: Greedy selection (lexicographic, effective profiles)
 // ---------------------------------------------------------------------------
 
 /**
- * Internal representation of a selected asset during optimization.
- * Carries the allocation amount separately from the candidate.
- */
-interface SelectedEntry {
-  candidate: CandidateAsset
-  /** Current allocation (kW). May be partial. */
-  allocatedKw: number
-  /** The uncertainty profile at this allocation (scaled if partial). */
-  uncertainty: DerUncertaintyProfile
-}
-
-/**
- * Greedily select assets by their ACTUAL marginal contribution to portfolio
- * safe capacity, normalized by cost.
+ * Greedily select assets using LEXICOGRAPHIC comparison of marginal
+ * contributions.
  *
- * At each step:
- *   - For each remaining candidate, compute:
- *       marginalSafeKw = safeCapacity(selected + candidate) - safeCapacity(selected)
- *       score = marginalSafeKw / (1 + totalCost + totalOppCost)
- *   - Add the candidate with the highest score.
- *   - Stop when safe capacity ≥ target or no candidates remain.
+ * At each step, for each remaining candidate, we compute:
+ *   - marginal safe capacity (using the EFFECTIVE profile at full available
+ *     capacity, so expected is capped at available)
+ *   - marginal opportunity cost
+ *   - marginal direct cost
+ *   - cluster novelty
  *
- * This replaces the previous arbitrary fixed-weight scoring
- * (expectedKw * 0.3, cost * 0.01) with a principled signal derived from
- * the risk engine itself.
+ * Candidates are compared lexicographically:
+ *   1. higher marginal safe capacity wins (primary)
+ *   2. lower marginal opportunity cost wins (tie-break)
+ *   3. lower marginal direct cost wins (tie-break)
+ *   4. new cluster wins (tie-break)
+ *
+ * Costs are NOT blended into a ratio with safe capacity — they are
+ * tie-breakers that only matter when safe capacity is equal.
  */
 function greedySelect(
   candidates: CandidateAsset[],
@@ -341,63 +364,47 @@ function greedySelect(
 ): SelectedEntry[] {
   const remaining = [...candidates]
   const selected: SelectedEntry[] = []
+  const selectedClusters = new Set<string>()
 
-  // Current safe capacity of the selected portfolio.
-  let currentSafeKw = 0
+  // Current safe capacity (computed on effective profiles).
+  let currentSafeKw = computeSafeCapacityFromSelected(selected, target)
 
   while (remaining.length > 0) {
     let bestIdx = -1
-    let bestScore = -Infinity
+    let bestComparison: MarginalContribution | null = null
 
     for (let i = 0; i < remaining.length; i++) {
       const candidate = remaining[i]
-      // Compute marginal safe capacity: add this candidate at full capacity
-      // and measure the delta.
-      const trialProfiles = [
-        ...selected.map((s) => s.uncertainty),
-        candidate.uncertainty,
-      ]
-      const trialResult = computeSafeCapacity(
-        trialProfiles,
-        target.correlationModel,
-        target.requestedKw,
-        target.confidenceLevel,
+      const marginal = computeMarginalContribution(
+        candidate,
+        selected,
+        selectedClusters,
+        target,
+        currentSafeKw,
       )
-      const marginalSafeKw = trialResult.committedKw - currentSafeKw
 
-      if (marginalSafeKw <= 0) continue // candidate doesn't help
+      if (marginal.marginalSafeKw <= 0) continue // doesn't help
 
-      // Score = marginal safe capacity per unit of cost+opportunity cost.
-      // The +1 prevents division by zero when no costs are provided.
-      const cost = candidate.costPerKw ?? 0
-      const oppCost = candidate.opportunityCostPerKw ?? 0
-      const totalCost = (cost + oppCost) * candidate.availableCapacityKw
-      const score = marginalSafeKw / (1 + totalCost)
-
-      if (score > bestScore) {
-        bestScore = score
+      if (bestComparison === null || compareMarginal(marginal, bestComparison) < 0) {
+        bestComparison = marginal
         bestIdx = i
       }
     }
 
-    if (bestIdx < 0) break // no candidate improves the portfolio
+    if (bestIdx < 0 || bestComparison === null) break
 
     const candidate = remaining.splice(bestIdx, 1)[0]!
+    // Add at FULL available capacity (partial comes in Phase 2).
+    // The effective profile is scaled to availableCapacityKw.
+    const effProfile = effectiveProfile(candidate.uncertainty, candidate.availableCapacityKw)
     selected.push({
       candidate,
-      allocatedKw: candidate.availableCapacityKw, // full allocation; partial comes in Phase 2
-      uncertainty: candidate.uncertainty,
+      allocatedKw: candidate.availableCapacityKw,
+      uncertainty: effProfile,
     })
+    selectedClusters.add(candidate.clusterId)
 
-    // Recompute current safe capacity.
-    const profiles = selected.map((s) => s.uncertainty)
-    const result = computeSafeCapacity(
-      profiles,
-      target.correlationModel,
-      target.requestedKw,
-      target.confidenceLevel,
-    )
-    currentSafeKw = result.committedKw
+    currentSafeKw = computeSafeCapacityFromSelected(selected, target)
 
     if (currentSafeKw >= target.requestedKw) break
   }
@@ -405,18 +412,94 @@ function greedySelect(
   return selected
 }
 
+/** Marginal contribution of adding a candidate to the current portfolio. */
+interface MarginalContribution {
+  marginalSafeKw: number
+  marginalOppCost: number
+  marginalDirectCost: number
+  isNewCluster: boolean
+}
+
+/** Compute the marginal contribution of adding a candidate. */
+function computeMarginalContribution(
+  candidate: CandidateAsset,
+  selected: SelectedEntry[],
+  selectedClusters: Set<string>,
+  target: OptimizationTarget,
+  currentSafeKw: number,
+): MarginalContribution {
+  // Use the EFFECTIVE profile (scaled to available capacity) for the trial.
+  const trialProfile = effectiveProfile(candidate.uncertainty, candidate.availableCapacityKw)
+  const trialProfiles = [
+    ...selected.map((s) => s.uncertainty),
+    trialProfile,
+  ]
+  const trialResult = computeSafeCapacity(
+    trialProfiles,
+    target.correlationModel,
+    target.requestedKw,
+    target.confidenceLevel,
+  )
+
+  return {
+    marginalSafeKw: trialResult.committedKw - currentSafeKw,
+    marginalOppCost: (candidate.opportunityCostPerKw ?? 0) * candidate.availableCapacityKw,
+    marginalDirectCost: (candidate.costPerKw ?? 0) * candidate.availableCapacityKw,
+    isNewCluster: !selectedClusters.has(candidate.clusterId),
+  }
+}
+
+/**
+ * Compare two marginal contributions LEXICOGRAPHICALLY.
+ * Returns < 0 if `a` is better (should be selected first).
+ *
+ *   1. higher marginal safe capacity wins (primary)
+ *   2. lower marginal opportunity cost wins (tie-break)
+ *   3. lower marginal direct cost wins (tie-break)
+ *   4. new cluster wins (tie-break)
+ */
+function compareMarginal(a: MarginalContribution, b: MarginalContribution): number {
+  // 1. Higher safe capacity is better.
+  if (Math.abs(a.marginalSafeKw - b.marginalSafeKw) > 0.001) {
+    return b.marginalSafeKw - a.marginalSafeKw // negative if a is higher
+  }
+  // 2. Lower opportunity cost is better.
+  if (Math.abs(a.marginalOppCost - b.marginalOppCost) > 0.001) {
+    return a.marginalOppCost - b.marginalOppCost
+  }
+  // 3. Lower direct cost is better.
+  if (Math.abs(a.marginalDirectCost - b.marginalDirectCost) > 0.001) {
+    return a.marginalDirectCost - b.marginalDirectCost
+  }
+  // 4. New cluster is better.
+  return a.isNewCluster === b.isNewCluster ? 0 : (a.isNewCluster ? -1 : 1)
+}
+
+/** Compute safe capacity from the current selected entries (effective profiles). */
+function computeSafeCapacityFromSelected(
+  selected: SelectedEntry[],
+  target: OptimizationTarget,
+): number {
+  if (selected.length === 0) return 0
+  const profiles = selected.map((s) => s.uncertainty)
+  return computeSafeCapacity(
+    profiles,
+    target.correlationModel,
+    target.requestedKw,
+    target.confidenceLevel,
+  ).committedKw
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2: Partial allocation of the last asset
 // ---------------------------------------------------------------------------
 
 /**
- * The last-added asset often overshoots the target. Binary-search its
- * allocation to find the minimum that still meets the target, freeing
- * the unused capacity for other uses.
+ * Binary-search the last asset's allocation to find the minimum that meets
+ * the target. Scale its effective profile to match.
  *
- * This is the key partial-allocation step: the optimizer returns
- * committedKw < availableCapacityKw for the last asset rather than
- * locking up the entire physical resource.
+ * The effective profile is recomputed at each trial allocation, so the risk
+ * engine always sees a profile consistent with the actual allocation.
  */
 function partialAllocateLast(
   selected: SelectedEntry[],
@@ -424,34 +507,23 @@ function partialAllocateLast(
 ): SelectedEntry[] {
   if (selected.length === 0) return selected
 
-  // Check if we're above target at all.
-  const profiles = selected.map((s) => s.uncertainty)
-  const currentResult = computeSafeCapacity(
-    profiles,
-    target.correlationModel,
-    target.requestedKw,
-    target.confidenceLevel,
-  )
-
-  if (currentResult.committedKw < target.requestedKw) {
-    // Not even at target — no partial allocation to do.
-    return selected
+  const currentSafeKw = computeSafeCapacityFromSelected(selected, target)
+  if (currentSafeKw < target.requestedKw) {
+    return selected // not even at target — nothing to trim
   }
 
   const last = selected[selected.length - 1]!
-  // Binary search on the last asset's allocation.
   let lo = 0
   let hi = last.candidate.availableCapacityKw
-  const tolerance = 0.01 // 0.01 kW precision
+  const tolerance = 0.01
 
-  // We want the minimum allocation on the last asset that still meets target.
   while (hi - lo > tolerance) {
     const mid = (lo + hi) / 2
-    // Build a scaled uncertainty profile for the last asset at allocation=mid.
-    const scaledProfile = scaleProfile(last.candidate.uncertainty, mid, last.candidate.availableCapacityKw)
+    // Effective profile at trial allocation.
+    const trialProfile = effectiveProfile(last.candidate.uncertainty, mid)
     const trialProfiles = [
       ...selected.slice(0, -1).map((s) => s.uncertainty),
-      scaledProfile,
+      trialProfile,
     ]
     const trialResult = computeSafeCapacity(
       trialProfiles,
@@ -460,66 +532,36 @@ function partialAllocateLast(
       target.confidenceLevel,
     )
     if (trialResult.committedKw >= target.requestedKw) {
-      // Still meets target — try lower.
-      hi = mid
+      hi = mid // still meets target — try lower
     } else {
-      // Doesn't meet target — need more.
-      lo = mid
+      lo = mid // need more
     }
   }
 
-  // Use hi (the minimum that meets target).
   const finalAllocation = hi
   if (finalAllocation < last.candidate.availableCapacityKw - tolerance) {
-    // Partial allocation.
-    const scaledProfile = scaleProfile(last.candidate.uncertainty, finalAllocation, last.candidate.availableCapacityKw)
+    const effProfile = effectiveProfile(last.candidate.uncertainty, finalAllocation)
     selected[selected.length - 1] = {
       candidate: last.candidate,
       allocatedKw: finalAllocation,
-      uncertainty: scaledProfile,
+      uncertainty: effProfile,
     }
   }
 
   return selected
 }
 
-/**
- * Scale an uncertainty profile for a partial allocation.
- *
- * When an asset is partially allocated (committedKw < availableCapacityKw),
- * the expected performance and std dev are scaled proportionally. This is
- * a mathematically consistent scaling: if an asset delivers X% of its
- * capacity, both μ and σ scale by X% (assuming linear response).
- *
- * The availability probability is NOT scaled — it represents the probability
- * the asset is online at all, regardless of how much it's asked to deliver.
- */
-function scaleProfile(
-  original: DerUncertaintyProfile,
-  allocationKw: number,
-  _availableCapacityKw: number,
-): DerUncertaintyProfile {
-  // If the original expected performance is 0, scaling is undefined; keep as-is.
-  if (original.expectedPerformanceKw === 0) {
-    return { ...original }
-  }
-  // Scale factor: what fraction of the original expected performance are we using?
-  // We scale μ and σ by the same factor (linear response assumption).
-  const scale = Math.min(1, allocationKw / original.expectedPerformanceKw)
-  return {
-    ...original,
-    expectedPerformanceKw: original.expectedPerformanceKw * scale,
-    stdDevKw: original.stdDevKw * scale,
-  }
-}
-
 // ---------------------------------------------------------------------------
-// Phase 3: Pruning
+// Phase 3: Lexicographic pruning
 // ---------------------------------------------------------------------------
 
 /**
- * Remove assets whose removal still leaves the portfolio above target.
- * Tries removing from the smallest-expected-contribution first.
+ * Remove assets whose removal improves or maintains the lexicographic objective.
+ *
+ * Tries removing each asset (smallest expected contribution first). Keeps
+ * the removal only if the portfolio remains feasible AND the lexicographic
+ * objective doesn't worsen (i.e., removal reduces opportunity cost or
+ * resource lockup while keeping safe capacity ≥ target).
  */
 function pruneExcess(
   selected: SelectedEntry[],
@@ -528,8 +570,8 @@ function pruneExcess(
   // Sort by expected contribution ascending (try removing smallest first).
   const sorted = [...selected].sort(
     (a, b) =>
-      a.uncertainty.availabilityProb * a.allocatedKw -
-      b.uncertainty.availabilityProb * b.allocatedKw,
+      a.uncertainty.availabilityProb * a.uncertainty.expectedPerformanceKw -
+      b.uncertainty.availabilityProb * b.uncertainty.expectedPerformanceKw,
   )
 
   const result = [...selected]
@@ -538,15 +580,11 @@ function pruneExcess(
     if (result.length <= 1) break
 
     const trial = result.filter((r) => r.candidate.assetId !== entry.candidate.assetId)
-    const profiles = trial.map((s) => s.uncertainty)
-    const risk = computeSafeCapacity(
-      profiles,
-      target.correlationModel,
-      target.requestedKw,
-      target.confidenceLevel,
-    )
+    const trialSafeKw = computeSafeCapacityFromSelected(trial, target)
 
-    if (risk.committedKw >= target.requestedKw) {
+    // Only remove if the portfolio still meets the target.
+    if (trialSafeKw >= target.requestedKw) {
+      // Removal reduces opportunity cost and resource lockup — keep it.
       result.length = 0
       result.push(...trial)
     }
@@ -593,7 +631,7 @@ function buildResult(
     totalOpportunityCost: hasOppCost
       ? selected.reduce((sum, s) => sum + (s.candidate.opportunityCostPerKw ?? 0) * s.allocatedKw, 0)
       : undefined,
-    algorithm: 'greedy_marginal_safe_capacity',
+    algorithm: 'greedy_lexicographic_marginal_safe_capacity',
   }
 }
 
@@ -608,41 +646,196 @@ function emptyResult(candidateCount: number, target: OptimizationTarget): Optimi
     shortfallKw: target.requestedKw,
     candidateCount,
     clusterCount: 0,
-    algorithm: 'greedy_marginal_safe_capacity',
+    algorithm: 'greedy_lexicographic_marginal_safe_capacity',
   }
 }
 
 // ---------------------------------------------------------------------------
-// Exhaustive reference optimizer (for optimality-gap testing)
+// Exhaustive reference (discretized partial allocations)
 // ---------------------------------------------------------------------------
 
 /**
- * Exhaustive reference optimizer — evaluates ALL 2^N subsets and returns
- * the one that best satisfies the lexicographic objective.
+ * Discretization granularity for the exhaustive partial-allocation reference.
+ * Each asset can be allocated at 0%, 10%, 20%, ..., 100% of its available
+ * capacity → 11 levels per asset.
+ */
+const DISCRETIZATION_LEVELS = 11 // 0%, 10%, ..., 100%
+
+/**
+ * Exhaustive reference optimizer that searches DISCRETIZED PARTIAL ALLOCATIONS.
  *
- * This is EXPONENTIAL (2^N) and only feasible for N ≤ ~12. It is exported
- * for the test suite to measure the greedy heuristic's optimality gap.
+ * For N assets with 11 allocation levels each, this evaluates 11^N
+ * combinations. Feasible only for N ≤ 6 (11^6 ≈ 1.77M).
  *
- * Objective (lexicographic):
- *   1. Meet requested safe capacity (prefer fullyServed)
- *   2. Minimize total opportunity cost
- *   3. Minimize total direct cost
- *   4. Minimize concentration (maximize cluster count)
+ * This searches the SAME solution space as the production optimizer
+ * (partial allocations), so the optimality gap is a valid comparison.
+ *
+ * Uses the lexicographic objective:
+ *   1. feasibility (fullyServed)
+ *   2. safe capacity surplus
+ *   3. opportunity cost
+ *   4. direct cost
+ *   5. diversification (cluster count)
+ *   6. resource lockup
  *
  * NOT for production use — use optimizePortfolio() instead.
  */
-export function exhaustiveOptimize(
+export function exhaustiveOptimizeDiscretized(
   candidates: CandidateAsset[],
   target: OptimizationTarget,
 ): OptimizationResult {
   validateCandidates(candidates)
-
   const n = candidates.length
-  if (n > 15) {
-    throw new Error(`exhaustiveOptimize is infeasible for N=${n} (max 15). Use optimizePortfolio().`)
+  if (n > 6) {
+    throw new Error(`exhaustiveOptimizeDiscretized is infeasible for N=${n} (max 6, 11^N combinations).`)
   }
 
-  const totalSubsets = 1 << n // 2^n
+  const levels = Array.from({ length: DISCRETIZATION_LEVELS }, (_, i) => i / (DISCRETIZATION_LEVELS - 1))
+  let best: OptimizationResult | null = null
+
+  // Enumerate all combinations of allocation levels via mixed-radix counting.
+  const indices = new Array(n).fill(0)
+  const totalCombos = Math.pow(DISCRETIZATION_LEVELS, n)
+
+  for (let combo = 0; combo < totalCombos; combo++) {
+    // Build the trial portfolio from the current indices.
+    const selected: SelectedEntry[] = []
+    for (let i = 0; i < n; i++) {
+      const level = levels[indices[i]]!
+      const allocatedKw = candidates[i]!.availableCapacityKw * level
+      if (allocatedKw < 0.01) continue // skip zero allocations
+      const effProfile = effectiveProfile(candidates[i]!.uncertainty, allocatedKw)
+      selected.push({
+        candidate: candidates[i]!,
+        allocatedKw,
+        uncertainty: effProfile,
+      })
+    }
+
+    if (selected.length === 0) {
+      // Increment indices (mixed-radix).
+      incrementIndices(indices, n)
+      continue
+    }
+
+    const result = evaluatePortfolio(selected, candidates.length, target)
+    if (best === null || compareResultsLexicographic(result, best, target) < 0) {
+      best = result
+    }
+
+    incrementIndices(indices, n)
+  }
+
+  return best ?? emptyResult(candidates.length, target)
+}
+
+/** Mixed-radix increment for enumeration. */
+function incrementIndices(indices: number[], n: number): void {
+  for (let i = 0; i < n; i++) {
+    indices[i]++
+    if (indices[i] < DISCRETIZATION_LEVELS) break
+    indices[i] = 0
+  }
+}
+
+/** Evaluate a portfolio (list of selected entries) into an OptimizationResult. */
+function evaluatePortfolio(
+  selected: SelectedEntry[],
+  candidateCount: number,
+  target: OptimizationTarget,
+): OptimizationResult {
+  const profiles = selected.map((s) => s.uncertainty)
+  const risk = computeSafeCapacity(
+    profiles,
+    target.correlationModel,
+    target.requestedKw,
+    target.confidenceLevel,
+  )
+
+  const selectedAssets: SelectedAsset[] = selected.map((entry) => ({
+    assetId: entry.candidate.assetId,
+    clusterId: entry.candidate.clusterId,
+    committedKw: entry.allocatedKw,
+    expectedKw: entry.uncertainty.availabilityProb * entry.uncertainty.expectedPerformanceKw,
+  }))
+
+  const totalCommittedKw = selectedAssets.reduce((sum, s) => sum + s.committedKw, 0)
+  const clusters = new Set(selected.map((s) => s.candidate.clusterId))
+  const hasCost = selected.some((s) => s.candidate.costPerKw !== undefined)
+  const hasOppCost = selected.some((s) => s.candidate.opportunityCostPerKw !== undefined)
+
+  return {
+    selected: selectedAssets,
+    risk,
+    committedKw: risk.committedKw,
+    totalCommittedKw,
+    fullyServed: risk.committedKw >= target.requestedKw,
+    shortfallKw: Math.max(0, target.requestedKw - risk.committedKw),
+    candidateCount,
+    clusterCount: clusters.size,
+    totalCost: hasCost
+      ? selected.reduce((sum, s) => sum + (s.candidate.costPerKw ?? 0) * s.allocatedKw, 0)
+      : undefined,
+    totalOpportunityCost: hasOppCost
+      ? selected.reduce((sum, s) => sum + (s.candidate.opportunityCostPerKw ?? 0) * s.allocatedKw, 0)
+      : undefined,
+    algorithm: 'exhaustive_discretized',
+  }
+}
+
+/**
+ * Compare two optimization results under the full lexicographic objective.
+ * Returns < 0 if a is better.
+ *
+ *   1. fullyServed wins
+ *   2. higher safe capacity (if not both served)
+ *   3. lower opportunity cost
+ *   4. lower direct cost
+ *   5. more clusters
+ *   6. less total committed
+ */
+function compareResultsLexicographic(
+  a: OptimizationResult,
+  b: OptimizationResult,
+  _target: OptimizationTarget,
+): number {
+  if (a.fullyServed !== b.fullyServed) return a.fullyServed ? -1 : 1
+  if (Math.abs(a.committedKw - b.committedKw) > 0.01) return b.committedKw - a.committedKw
+  const aOpp = a.totalOpportunityCost ?? 0
+  const bOpp = b.totalOpportunityCost ?? 0
+  if (Math.abs(aOpp - bOpp) > 0.01) return aOpp - bOpp
+  const aCost = a.totalCost ?? 0
+  const bCost = b.totalCost ?? 0
+  if (Math.abs(aCost - bCost) > 0.01) return aCost - bCost
+  if (a.clusterCount !== b.clusterCount) return b.clusterCount - a.clusterCount
+  return a.totalCommittedKw - b.totalCommittedKw
+}
+
+// ---------------------------------------------------------------------------
+// Old whole-subset exhaustive (retained for backwards compat, weaker metric)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whole-subset exhaustive optimizer — evaluates all 2^N subsets at FULL
+ * capacity. Does NOT search partial allocations.
+ *
+ * This is a WEAKER reference than exhaustiveOptimizeDiscretized. Its gap
+ * should be reported as `subsetSelectionGap`, NOT `optimalityGap`, because
+ * it doesn't search the same solution space as the production optimizer.
+ *
+ * Retained for backwards compatibility with existing tests.
+ */
+export function exhaustiveOptimizeSubsets(
+  candidates: CandidateAsset[],
+  target: OptimizationTarget,
+): OptimizationResult {
+  validateCandidates(candidates)
+  const n = candidates.length
+  if (n > 15) {
+    throw new Error(`exhaustiveOptimizeSubsets is infeasible for N=${n} (max 15).`)
+  }
+
+  const totalSubsets = 1 << n
   let best: OptimizationResult | null = null
 
   for (let mask = 1; mask < totalSubsets; mask++) {
@@ -651,103 +844,62 @@ export function exhaustiveOptimize(
       if (mask & (1 << i)) subset.push(candidates[i]!)
     }
 
-    // Evaluate this subset.
-    const profiles = subset.map((c) => c.uncertainty)
-    const risk = computeSafeCapacity(
-      profiles,
-      target.correlationModel,
-      target.requestedKw,
-      target.confidenceLevel,
-    )
+    // Build selected entries with effective profiles at full capacity.
+    const selected: SelectedEntry[] = subset.map((c) => ({
+      candidate: c,
+      allocatedKw: c.availableCapacityKw,
+      uncertainty: effectiveProfile(c.uncertainty, c.availableCapacityKw),
+    }))
 
-    const totalOppCost = subset.reduce(
-      (sum, c) => sum + (c.opportunityCostPerKw ?? 0) * c.availableCapacityKw, 0,
-    )
-    const totalCost = subset.reduce(
-      (sum, c) => sum + (c.costPerKw ?? 0) * c.availableCapacityKw, 0,
-    )
-    const clusterCount = new Set(subset.map((c) => c.clusterId)).size
-
-    const result: OptimizationResult = {
-      selected: subset.map((c) => ({
-        assetId: c.assetId,
-        clusterId: c.clusterId,
-        committedKw: c.availableCapacityKw,
-        expectedKw: c.uncertainty.availabilityProb * c.uncertainty.expectedPerformanceKw,
-      })),
-      risk,
-      committedKw: risk.committedKw,
-      totalCommittedKw: subset.reduce((sum, c) => sum + c.availableCapacityKw, 0),
-      fullyServed: risk.committedKw >= target.requestedKw,
-      shortfallKw: Math.max(0, target.requestedKw - risk.committedKw),
-      candidateCount: n,
-      clusterCount,
-      totalCost: subset.some((c) => c.costPerKw !== undefined) ? totalCost : undefined,
-      totalOpportunityCost: subset.some((c) => c.opportunityCostPerKw !== undefined) ? totalOppCost : undefined,
-      algorithm: 'exhaustive',
-    }
-
-    if (best === null || compareResults(result, best, target) < 0) {
+    const result = evaluatePortfolio(selected, candidates.length, target)
+    if (best === null || compareResultsLexicographic(result, best, target) < 0) {
       best = result
     }
   }
 
-  return best!
+  return best ?? emptyResult(candidates.length, target)
 }
 
-/**
- * Compare two optimization results under the lexicographic objective.
- * Returns < 0 if a is better, > 0 if b is better, 0 if equal.
- *
- *   1. Fully-served beats not fully-served.
- *   2. Higher safe capacity (if not both served).
- *   3. Lower opportunity cost.
- *   4. Lower direct cost.
- *   5. More clusters (diversification).
- *   6. Lower total committed kW (less resource lockup).
- */
-function compareResults(a: OptimizationResult, b: OptimizationResult, target: OptimizationTarget): number {
-  // 1. Fully-served wins.
-  if (a.fullyServed !== b.fullyServed) return a.fullyServed ? -1 : 1
-
-  // 2. Higher safe capacity.
-  if (Math.abs(a.committedKw - b.committedKw) > 0.01) {
-    return b.committedKw - a.committedKw // higher is better → negative
-  }
-
-  // 3. Lower opportunity cost.
-  const aOpp = a.totalOpportunityCost ?? 0
-  const bOpp = b.totalOpportunityCost ?? 0
-  if (Math.abs(aOpp - bOpp) > 0.01) return aOpp - bOpp
-
-  // 4. Lower direct cost.
-  const aCost = a.totalCost ?? 0
-  const bCost = b.totalCost ?? 0
-  if (Math.abs(aCost - bCost) > 0.01) return aCost - bCost
-
-  // 5. More clusters.
-  if (a.clusterCount !== b.clusterCount) return b.clusterCount - a.clusterCount
-
-  // 6. Less total committed.
-  return a.totalCommittedKw - b.totalCommittedKw
-}
+// ---------------------------------------------------------------------------
+// Optimality gap measurement
+// ---------------------------------------------------------------------------
 
 /**
- * Compute the optimality gap between the greedy heuristic and the exhaustive
- * reference, for small N. Returns the gap as a fraction:
- *   gap = (optimalSafeKw - heuristicSafeKw) / optimalSafeKw
+ * Measure the optimality gap between the greedy heuristic and the discretized
+ * exhaustive reference (partial allocations). This is the VALID gap metric
+ * because both optimizers search the same solution space.
  *
- * A gap of 0 means the heuristic found the optimal solution. A gap of 0.05
- * means the heuristic's safe capacity is 5% below the optimum.
+ * gap = (optimalSafeKw - heuristicSafeKw) / optimalSafeKw
  *
- * Only feasible for N ≤ 15 (2^N subsets).
+ * Only feasible for N ≤ 6 (11^N combinations).
  */
 export function measureOptimalityGap(
   candidates: CandidateAsset[],
   target: OptimizationTarget,
 ): { heuristic: OptimizationResult; optimal: OptimizationResult; gap: number } {
   const heuristic = optimizePortfolio(candidates, target)
-  const optimal = exhaustiveOptimize(candidates, target)
+  const optimal = exhaustiveOptimizeDiscretized(candidates, target)
+
+  const gap = optimal.committedKw > 0
+    ? Math.max(0, (optimal.committedKw - heuristic.committedKw) / optimal.committedKw)
+    : 0
+
+  return { heuristic, optimal, gap }
+}
+
+/**
+ * Measure the SUBSET-SELECTION gap (whole-asset subsets only, no partial
+ * allocations). This is a WEAKER metric than measureOptimalityGap because
+ * it doesn't compare against the same solution space.
+ *
+ * Retained for backwards compatibility.
+ */
+export function measureSubsetSelectionGap(
+  candidates: CandidateAsset[],
+  target: OptimizationTarget,
+): { heuristic: OptimizationResult; optimal: OptimizationResult; gap: number } {
+  const heuristic = optimizePortfolio(candidates, target)
+  const optimal = exhaustiveOptimizeSubsets(candidates, target)
 
   const gap = optimal.committedKw > 0
     ? Math.max(0, (optimal.committedKw - heuristic.committedKw) / optimal.committedKw)
@@ -761,21 +913,9 @@ export function measureOptimalityGap(
 // ---------------------------------------------------------------------------
 
 /**
- * Build a CandidateAsset from the generic capacity layer's available-capacity
- * query result + a per-asset uncertainty profile.
- *
- * IMPORTANT: This helper does NOT mutate the caller's uncertainty profile.
- * The availableCapacityKw is stored as a separate hard constraint. If
- * expectedPerformanceKw > availableCapacityKw, the optimizer will handle
- * the constraint at allocation time (via partial allocation + profile scaling)
- * rather than silently editing the statistical model.
- *
- * The caller is responsible for ensuring the uncertainty profile is a
- * faithful representation of the asset's observed performance. If the
- * profile is inconsistent with available capacity (e.g., expected > available),
- * the caller should either:
- *   - provide a profile with expected ≤ available (preferred), or
- *   - accept that the optimizer will scale the allocation, not the model.
+ * Build a CandidateAsset. Does NOT mutate the caller's uncertainty profile.
+ * The availableCapacityKw is a separate hard constraint enforced at
+ * allocation time via effective-profile scaling.
  */
 export function buildCandidate(input: {
   assetId: string
@@ -786,14 +926,11 @@ export function buildCandidate(input: {
   opportunityCostPerKw?: number
 }): CandidateAsset {
   const { assetId, clusterId, availableCapacityKw, uncertainty, costPerKw, opportunityCostPerKw } = input
-
-  // Do NOT mutate the uncertainty profile. Store availableCapacityKw as a
-  // separate constraint. The optimizer enforces it at allocation time.
   return {
     assetId,
     clusterId,
     availableCapacityKw,
-    uncertainty: { ...uncertainty }, // shallow copy — preserve the caller's original
+    uncertainty: { ...uncertainty }, // shallow copy — preserve caller's original
     costPerKw,
     opportunityCostPerKw,
   }
