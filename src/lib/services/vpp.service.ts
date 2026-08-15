@@ -971,7 +971,7 @@ async function maybeFinalizeDispatch(
   // final/delivery_complete state. This prevents redundant updates when
   // multiple assignments complete concurrently.
   await db.vppDispatch.updateMany({
-    where: { id: dispatchId, status: { notIn: ['delivery_complete', 'reconciliation_required', 'completed'] } },
+    where: { id: dispatchId, status: { notIn: ['delivery_complete', 'buyer_settlement_pending', 'reconciliation_required', 'completed'] } },
     data: { status: dispatchStatus },
   })
 
@@ -1010,22 +1010,35 @@ async function maybeFinalizeDispatch(
   const isFinal = evaluationResult?.evaluationOutcome === 'final' || evaluationResult?.evaluationOutcome === 'already_final'
 
   if (isFinal && reconciliationCount === 0) {
+    // VPP-3B: Separate delivery finality from buyer financial settlement.
+    // Transition to 'buyer_settlement_pending' — NOT 'completed' yet.
+    // The dispatch only reaches 'completed' after buyer settlement is charged.
     await db.vppDispatch.updateMany({
       where: { id: dispatchId, status: 'delivery_complete' },
-      data: { status: 'completed' },
+      data: { status: 'buyer_settlement_pending' },
     })
 
     // VPP-3: automatically create the buyer settlement when the portfolio
     // commitment reaches a final state. The actual ledger charge is
     // performed by processBuyerSettlement (which uses claim/lease/fencing).
-    // The buyer settlement worker picks up pending settlements.
+    //
+    // ERROR HANDLING: Only NotFoundError (no commitment — legacy dispatch)
+    // is silently ignored. All other errors PROPAGATE — buyer settlement
+    // creation is an explicit lifecycle step, not best-effort.
     try {
       const { createBuyerSettlement } = await import('./buyer-settlement.service')
       await createBuyerSettlement(tenantId, dispatchId, actorId)
-    } catch {
-      // If buyer settlement creation fails (e.g., commitment not final —
-      // shouldn't happen here, but defensive), the dispatch is still
-      // completed. The buyer settlement can be created manually later.
+    } catch (err) {
+      if (err instanceof NotFoundError) {
+        // Legacy dispatch — no portfolio commitment, no buyer settlement.
+        // Mark as completed directly.
+        await db.vppDispatch.updateMany({
+          where: { id: dispatchId, status: 'buyer_settlement_pending' },
+          data: { status: 'completed' },
+        })
+        return
+      }
+      throw err
     }
   }
   // If reconciliationCount > 0, the dispatch stays 'reconciliation_required'

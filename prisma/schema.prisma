@@ -998,20 +998,19 @@ model VppDispatch {
   requestedKwh    String   // decimal as string — total energy to deliver
   startTime       DateTime // when discharge should begin
   endTime         DateTime // when discharge should end
-  // Dispatch status lifecycle (VPP-2D-4 separated delivery from economic finality):
-  //   created → assigned → dispatching → delivery_complete → completed
+  // Dispatch status lifecycle (VPP-2D-4 + VPP-3B separated delivery, buyer settlement, and economic finality):
+  //   created → assigned → dispatching → delivery_complete → buyer_settlement_pending → completed
   //   dispatching → delivery_complete (all assignments terminal, some failed/reconciliation_required)
   //   delivery_complete → reconciliation_required (if any assignment is reconciliation_required)
-  //   delivery_complete → completed (all assignments completed, portfolio evaluated)
-  //   reconciliation_required → completed (after all financial reconciliations succeed + portfolio evaluated)
-  //   delivery_complete → completed (all assignments completed or failed, portfolio evaluated)
+  //   delivery_complete → buyer_settlement_pending (all assignments completed/failed, portfolio evaluated)
+  //   buyer_settlement_pending → completed (buyer settlement charged or failed with zero charge)
+  //   reconciliation_required → buyer_settlement_pending → completed (after all financial reconciliations succeed)
   //
-  // "delivery_complete" = all assignments are performance-terminal (completed|failed|reconciliation_required).
-  //   The portfolio commitment can be evaluated at this point.
-  // "reconciliation_required" = delivery complete, but one or more assignments
-  //   have unresolved financial recovery (reconciliation_required).
-  // "completed" = portfolio obligation finalized + all financial recovery done.
-  status          String   @default("created") // created | assigned | dispatching | delivery_complete | reconciliation_required | completed | cancelled | failed
+  // "delivery_complete" = all assignments are performance-terminal.
+  // "buyer_settlement_pending" = delivery complete + portfolio evaluated, buyer charge pending.
+  // "reconciliation_required" = delivery complete, but one+ assignments have unresolved financial recovery.
+  // "completed" = portfolio obligation finalized + buyer settlement processed + all financial recovery done.
+  status          String   @default("created") // created | assigned | dispatching | delivery_complete | buyer_settlement_pending | reconciliation_required | completed | cancelled | failed
   // Dispatch metadata
   reason          String?  // e.g. "grid_frequency_event", "price_peak", "manual"
   metadataJson    String   @default("{}")
@@ -1265,8 +1264,11 @@ model VppBuyerSettlement {
   commitmentId    String   // FK to VppPortfolioCommitment
 
   // Charge breakdown (computed from portfolio fulfillment + contract terms).
+  // These fields are a SNAPSHOT of the pricing policy at settlement creation
+  // time. They never change — even if VppBuyerProgram.pricePerKwh is later
+  // updated, historical settlements use the original pricing.
   buyerDeliveredKwh String   // decimal as string
-  pricePerKwh     String   // decimal as string — from VppBuyerProgram
+  pricePerKwh     String   // decimal as string — snapshot from VppBuyerProgram
   deliveredCharge String   // decimal as string — buyerDeliveredKwh × pricePerKwh
   capacityCeiling String   // decimal as string — ceiling based on measurementMethod
   cappedCharge    String   // decimal as string — min(deliveredCharge, capacityCeiling)

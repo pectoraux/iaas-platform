@@ -53,21 +53,23 @@ export interface BuyerSettlementResult {
   commitmentId: string
   status: BuyerSettlementStatus
   charge: {
-    buyerDeliveredKwh: number
-    pricePerKwh: number
-    deliveredCharge: number
-    capacityCeiling: number
-    cappedCharge: number
-    fulfillmentPct: number
-    toleranceThresholdPct: number
+    // All monetary values returned as STRING (decimal-as-string).
+    // Do NOT parseFloat — the caller receives exact decimal representations.
+    buyerDeliveredKwh: string
+    pricePerKwh: string
+    deliveredCharge: string
+    capacityCeiling: string
+    cappedCharge: string
+    fulfillmentPct: string
+    toleranceThresholdPct: string
     metTolerance: boolean
-    buyerCharge: number
+    buyerCharge: string
     currency: string
-    shortfall: number
+    shortfall: string
     measurementMethod: MeasurementMethod
   }
   ledgerPostingId: string | null
-  buyerFundsBalanceAfter: number
+  buyerFundsBalanceAfter: string
   failureReason?: string
 }
 
@@ -447,35 +449,54 @@ export async function processBuyerSettlement(
       },
     })
 
+    // VPP-3B: advance the dispatch from 'buyer_settlement_pending' to
+    // 'completed' now that the buyer settlement is charged (or failed
+    // with zero charge — no money moved, but the obligation is finalized).
+    await db.vppDispatch.updateMany({
+      where: { id: settlement.dispatchId, status: 'buyer_settlement_pending' },
+      data: { status: 'completed' },
+    })
+
     return toResult(await db.vppBuyerSettlement.findUnique({ where: { id: settlementId } })!)
   } catch (err) {
-    // Processing failed — revert to pending with fencing, emit retry event.
-    await db.vppBuyerSettlement.updateMany({
-      where: { id: settlementId, status: 'charging', claimId },
-      data: {
-        status: 'pending',
-        claimedAt: null,
-        leaseExpiresAt: null,
-        claimId: null,
-        failureReason: err instanceof Error ? err.message : 'Processing failed',
-      },
-    }).catch(() => {})
-
-    // Emit retry event (best-effort).
+    // Processing failed — revert charging → pending AND emit retry event
+    // in ONE transaction (atomic coupling). If the transaction commits,
+    // both the revert and the event exist. If it rolls back, the settlement
+    // stays in 'charging' — recoverable via the repair sweep.
+    const reason = err instanceof Error ? err.message : 'Processing failed'
     try {
-      const { emit, DomainEventTypes } = await import('@/lib/domain/events')
-      await emit({
-        event_type: 'BuyerSettlementRetryRequested',
-        aggregate_id: settlementId,
-        tenant_id: tenantId,
-        version: 1,
-        payload: {
-          settlementId,
-          dispatchId: settlement.dispatchId,
-          reason: err instanceof Error ? err.message : 'Processing failed',
-        },
+      const { emit } = await import('@/lib/domain/events')
+      await db.$transaction(async (tx) => {
+        // FENCING: revert only if we still own the claim.
+        await tx.vppBuyerSettlement.updateMany({
+          where: { id: settlementId, status: 'charging', claimId },
+          data: {
+            status: 'pending',
+            claimedAt: null,
+            leaseExpiresAt: null,
+            claimId: null,
+            failureReason: reason,
+          },
+        })
+        await emit(
+          {
+            event_type: 'BuyerSettlementRetryRequested',
+            aggregate_id: settlementId,
+            tenant_id: tenantId,
+            version: 1,
+            payload: {
+              settlementId,
+              dispatchId: settlement.dispatchId,
+              reason,
+            },
+          },
+          tx,
+        )
       })
-    } catch { /* best-effort */ }
+    } catch {
+      // If the transaction itself fails, the commitment may stay in
+      // 'charging'. The repair sweep will reclaim it.
+    }
 
     throw err
   }
@@ -543,21 +564,22 @@ function toResult(s: any): BuyerSettlementResult {
     commitmentId: s.commitmentId,
     status: s.status,
     charge: {
-      buyerDeliveredKwh: parseFloat(s.buyerDeliveredKwh),
-      pricePerKwh: parseFloat(s.pricePerKwh),
-      deliveredCharge: parseFloat(s.deliveredCharge),
-      capacityCeiling: parseFloat(s.capacityCeiling),
-      cappedCharge: parseFloat(s.cappedCharge),
-      fulfillmentPct: parseFloat(s.fulfillmentPct),
-      toleranceThresholdPct: parseFloat(s.toleranceThresholdPct),
+      // Return as STRING (decimal-as-string) — do NOT parseFloat.
+      buyerDeliveredKwh: s.buyerDeliveredKwh,
+      pricePerKwh: s.pricePerKwh,
+      deliveredCharge: s.deliveredCharge,
+      capacityCeiling: s.capacityCeiling,
+      cappedCharge: s.cappedCharge,
+      fulfillmentPct: s.fulfillmentPct,
+      toleranceThresholdPct: s.toleranceThresholdPct,
       metTolerance: s.metTolerance,
-      buyerCharge: parseFloat(s.buyerCharge),
+      buyerCharge: s.buyerCharge,
       currency: s.currency,
-      shortfall: parseFloat(s.shortfall),
+      shortfall: s.shortfall,
       measurementMethod: s.measurementMethod as MeasurementMethod,
     },
     ledgerPostingId: s.ledgerPostingId ?? null,
-    buyerFundsBalanceAfter: s.buyerFundsBalanceAfter ? parseFloat(s.buyerFundsBalanceAfter) : 0,
+    buyerFundsBalanceAfter: s.buyerFundsBalanceAfter ?? '0',
     failureReason: s.failureReason ?? undefined,
   }
 }
