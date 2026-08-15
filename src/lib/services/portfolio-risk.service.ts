@@ -302,10 +302,21 @@ export function validateCorrelationMatrix(
     }
   }
 
-  // Positive semidefinite via Cholesky decomposition.
-  // A matrix is PSD iff its Cholesky decomposition exists (no negative
-  // pivot during the algorithm). We attempt the decomposition and throw
-  // if we encounter a negative pivot.
+  // Positive semidefinite via eigenvalue decomposition.
+  // A symmetric matrix is PSD iff all its eigenvalues are ≥ 0 (within
+  // numerical tolerance). We compute the eigenvalues using the Jacobi
+  // rotation algorithm (which converges for symmetric matrices) and check
+  // the smallest.
+  //
+  // WHY EIGENVALUES, NOT CHOLESKY:
+  // A previous implementation used Cholesky decomposition, which fails
+  // (negative pivot) iff the matrix is not positive *definite*. But
+  // correlation matrices can be positive *semidefinite* (singular — e.g.,
+  // when assets are perfectly correlated). A naive Cholesky that silently
+  // sets zero-pivot entries to zero can accept non-PSD matrices, because it
+  // doesn't verify that the residual row/column is also zero at a zero
+  // pivot. The eigenvalue test is unambiguous: smallest eigenvalue < -ε
+  // ⟺ not PSD.
   if (!isPositiveSemidefinite(matrix, expectedSize)) {
     throw new ValidationError(
       'Correlation matrix is not positive semidefinite. ' +
@@ -317,42 +328,115 @@ export function validateCorrelationMatrix(
 }
 
 /**
- * Check if a symmetric matrix is positive semidefinite via Cholesky
- * decomposition. Returns false if a negative pivot is encountered.
+ * Check if a symmetric matrix is positive semidefinite by computing its
+ * eigenvalues via the classical Jacobi rotation algorithm and verifying
+ * that the smallest is ≥ -ε.
  *
- * Cholesky: A = L·Lᵀ where L is lower-triangular. The algorithm fails
- * (negative pivot) iff A is not PSD.
+ * The Jacobi algorithm iteratively applies Givens rotations to zero out
+ * off-diagonal entries, converging to a diagonal matrix whose entries are
+ * the eigenvalues. It is guaranteed to converge for symmetric matrices
+ * and is numerically robust.
+ *
+ * This is preferred over Cholesky for PSD testing because:
+ *   - Cholesky distinguishes positive-definite (succeeds) from indefinite
+ *     (fails), but mishandles the semidefinite (singular) case: a zero
+ *     pivot requires checking that the entire residual row/column is also
+ *     zero, which naive implementations skip.
+ *   - The eigenvalue test is unambiguous: λ_min < -ε ⟺ not PSD.
  */
 function isPositiveSemidefinite(matrix: number[][], n: number): boolean {
-  // Work on a copy to avoid mutating the input.
+  // Trivial cases.
+  if (n === 0) return true
+  if (n === 1) return matrix[0][0] >= -EPSILON
+
+  // Work on a copy (Jacobi mutates the matrix in place).
   const a = matrix.map((row) => [...row])
 
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j <= i; j++) {
-      let sum = a[i][j]
-      for (let k = 0; k < j; k++) {
-        sum -= a[i][k] * a[j][k]
-      }
-      if (i === j) {
-        // Diagonal pivot — must be non-negative for PSD.
-        if (sum < -EPSILON) {
-          return false
-        }
-        // Avoid sqrt of tiny negative from floating-point.
-        a[i][j] = Math.sqrt(Math.max(0, sum))
-      } else {
-        const pivot = a[j][j]
-        if (Math.abs(pivot) < EPSILON) {
-          // Zero pivot — the matrix is PSD but singular. Continue with 0.
-          a[i][j] = 0
-        } else {
-          a[i][j] = sum / pivot
+  // Jacobi eigenvalue algorithm: iterate until off-diagonal mass is negligible.
+  const MAX_ITERATIONS = 100
+  for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+    // Find the largest off-diagonal element (by absolute value).
+    let maxOffDiag = 0
+    let p = 0, q = 0
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const absVal = Math.abs(a[i][j])
+        if (absVal > maxOffDiag) {
+          maxOffDiag = absVal
+          p = i
+          q = j
         }
       }
     }
+
+    // Convergence: all off-diagonal entries are negligible.
+    if (maxOffDiag < EPSILON) break
+
+    // Compute the rotation angle that zeros a[p][q].
+    // We need (c²-s²)·apq + sc·(app-aqq) = 0, i.e.:
+    //   cos(2θ)·apq + 0.5·sin(2θ)·(app-aqq) = 0
+    //   tan(2θ) = -2·apq / (app - aqq) = 2·apq / (aqq - app)
+    // So 2θ = atan2(2·apq, aqq - app).
+    const app = a[p][p]
+    const aqq = a[q][q]
+    const apq = a[p][q]
+
+    let theta: number
+    if (Math.abs(app - aqq) < EPSILON) {
+      // app ≈ aqq → tan(2θ) → ±∞ → θ = ±π/4.
+      // Sign chosen so that apq is zeroed: θ = π/4 if apq > 0, -π/4 if apq < 0.
+      theta = Math.PI / 4 * (apq >= 0 ? 1 : -1)
+    } else {
+      theta = 0.5 * Math.atan2(2 * apq, aqq - app)
+    }
+    const c = Math.cos(theta)
+    const s = Math.sin(theta)
+
+    // Apply the rotation: A' = Jᵀ A J, where J is the Givens rotation
+    // [[c, s], [-s, c]] on the (p,q) plane. Only rows/columns p and q change.
+    for (let i = 0; i < n; i++) {
+      if (i !== p && i !== q) {
+        // MUST read original values before writing — both updates use the
+        // pre-rotation a[i][p] and a[i][q].
+        const aip = a[i][p]
+        const aiq = a[i][q]
+        a[i][p] = c * aip - s * aiq
+        a[p][i] = a[i][p]
+        a[i][q] = s * aip + c * aiq
+        a[q][i] = a[i][q]
+      }
+    }
+    // Diagonal update — full c², s² formulas (always correct).
+    a[p][p] = c * c * app - 2 * s * c * apq + s * s * aqq
+    a[q][q] = s * s * app + 2 * s * c * apq + c * c * aqq
+    // The (p,q) entry is zero by construction of θ (verified algebraically
+    // above). Set explicitly to avoid floating-point residue.
+    a[p][q] = 0
+    a[q][p] = 0
   }
-  return true
+
+  // The diagonal now holds the eigenvalues. Check the smallest.
+  let minEigenvalue = Infinity
+  for (let i = 0; i < n; i++) {
+    if (a[i][i] < minEigenvalue) {
+      minEigenvalue = a[i][i]
+    }
+  }
+
+  // PSD iff the smallest eigenvalue is ≥ -ε (tolerance for floating-point).
+  return minEigenvalue >= -PSD_TOLERANCE
 }
+
+/**
+ * Tolerance for the PSD eigenvalue check. Correlation matrices that are
+ * genuinely PSD may have a smallest eigenvalue that is a tiny negative
+ * due to floating-point rounding (e.g., -1e-15). We accept eigenvalues
+ * down to -PSD_TOLERANCE.
+ *
+ * A materially negative eigenvalue (e.g., -0.01) indicates a genuinely
+ * non-PSD matrix and is rejected.
+ */
+const PSD_TOLERANCE = 1e-9
 
 // ---------------------------------------------------------------------------
 // Core computation

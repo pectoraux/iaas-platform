@@ -224,6 +224,104 @@ describe('Portfolio Risk: correlation matrix validation', () => {
     ]
     expect(() => computePortfolioRiskWithMatrix(profiles, nonPsd)).toThrow(ValidationError)
   })
+
+  // -------------------------------------------------------------------------
+  // PSD validator regression tests (eigenvalue-based, replaces buggy Cholesky).
+  // The previous Cholesky implementation accepted certain non-PSD matrices
+  // because it silently set zero-pivot entries to zero without checking the
+  // residual row/column. These tests lock in the corrected eigenvalue-based
+  // check.
+  // -------------------------------------------------------------------------
+
+  it('REGRESSION: rejects [[1,1,0],[1,1,1],[0,1,1]] (the matrix the old Cholesky accepted)', () => {
+    // This matrix is symmetric, unit-diagonal, in-range — but NOT PSD.
+    // Eigenvalues: 1, 1+√2 ≈ 2.414, 1-√2 ≈ -0.414 → one materially
+    // negative → not PSD.
+    //
+    // The old Cholesky implementation accepted this because after the first
+    // pivot elimination, the [1][1] pivot became ~0, and the code silently
+    // set the [2][1] entry to 0 without checking that its residual was also
+    // zero (it wasn't). The eigenvalue-based check correctly rejects it.
+    const m = [
+      [1.0, 1.0, 0.0],
+      [1.0, 1.0, 1.0],
+      [0.0, 1.0, 1.0],
+    ]
+    expect(() => validateCorrelationMatrix(m, 3)).toThrow(ValidationError)
+    expect(() => validateCorrelationMatrix(m, 3)).toThrow(/positive semidefinite/i)
+  })
+
+  it('accepts a valid positive-definite matrix', () => {
+    // [[1, 0.5, 0.3], [0.5, 1, 0.4], [0.3, 0.4, 1]]
+    // All eigenvalues positive (PD).
+    const m = [
+      [1.0, 0.5, 0.3],
+      [0.5, 1.0, 0.4],
+      [0.3, 0.4, 1.0],
+    ]
+    expect(() => validateCorrelationMatrix(m, 3)).not.toThrow()
+  })
+
+  it('accepts a valid singular PSD matrix (perfectly correlated pair)', () => {
+    // [[1, 1, 0], [1, 1, 0], [0, 0, 1]]
+    // Eigenvalues: 2, 0, 1 → smallest is 0 (semidefinite, not definite).
+    // This is a valid correlation matrix where assets 0 and 1 are perfectly
+    // correlated. It's singular but PSD — must be accepted.
+    const m = [
+      [1.0, 1.0, 0.0],
+      [1.0, 1.0, 0.0],
+      [0.0, 0.0, 1.0],
+    ]
+    expect(() => validateCorrelationMatrix(m, 3)).not.toThrow()
+  })
+
+  it('accepts the identity matrix (uncorrelated, PD)', () => {
+    const m = [
+      [1.0, 0.0, 0.0],
+      [0.0, 1.0, 0.0],
+      [0.0, 0.0, 1.0],
+    ]
+    expect(() => validateCorrelationMatrix(m, 3)).not.toThrow()
+  })
+
+  it('rejects a matrix with a slightly negative eigenvalue', () => {
+    // [[1, 0.8, 0.8], [0.8, 1, 0.2], [0.8, 0.2, 1]]
+    // Eigenvalues: ~2.0, ~0.96, ~-0.16 → materially negative → not PSD.
+    const m = [
+      [1.0, 0.8, 0.8],
+      [0.8, 1.0, 0.2],
+      [0.8, 0.2, 1.0],
+    ]
+    expect(() => validateCorrelationMatrix(m, 3)).toThrow(ValidationError)
+  })
+
+  it('rejects a 4x4 non-PSD matrix (symmetric, unit diagonal, in-range)', () => {
+    // A 4x4 matrix that is symmetric, unit-diagonal, in-range, but not PSD.
+    // Constructed to have a negative eigenvalue.
+    //   [[1.0, 0.9, 0.9, 0.9],
+    //    [0.9, 1.0, 0.1, 0.1],
+    //    [0.9, 0.1, 1.0, 0.1],
+    //    [0.9, 0.1, 0.1, 1.0]]
+    const m = [
+      [1.0, 0.9, 0.9, 0.9],
+      [0.9, 1.0, 0.1, 0.1],
+      [0.9, 0.1, 1.0, 0.1],
+      [0.9, 0.1, 0.1, 1.0],
+    ]
+    expect(() => validateCorrelationMatrix(m, 4)).toThrow(ValidationError)
+  })
+
+  it('accepts a large valid PSD matrix (100x100 block-correlation)', () => {
+    // Build a 100x100 block-correlation matrix (same cluster, ρ=0.5).
+    // This is always PSD (it's a valid correlation structure).
+    const n = 100
+    const m: number[][] = Array.from({ length: n }, (_, i) =>
+      Array.from({ length: n }, (_, j) =>
+        i === j ? 1.0 : 0.5,
+      ),
+    )
+    expect(() => validateCorrelationMatrix(m, n)).not.toThrow()
+  })
 })
 
 describe('Portfolio Risk: uncorrelated portfolio', () => {
