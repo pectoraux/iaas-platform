@@ -205,24 +205,40 @@ export async function publishNetworkVersion(
       },
     })
 
+    // ATOMIC OUTBOX (VPP-2C final atomicity fix):
+    // The publication audit record and the NetworkPublished outbox event are
+    // written INSIDE the same transaction as the publication itself. This
+    // guarantees that if the transaction commits, the audit + outbox row
+    // commit too — no orphaned/missing events if the process crashes between
+    // the publish commit and the emit. If the transaction rolls back (e.g.
+    // validation failure), neither the publication nor the event/audit
+    // persists.
+    //
+    // This is the same atomic-outbox principle applied to ingestion and
+    // settlement. Publication is a critical immutable policy transition, so
+    // its event/audit MUST be part of the atomic operation.
+    await appendAudit({
+      tenantId,
+      actorId,
+      eventType: AuditEvents.NetworkPublished,
+      resourceType: 'network_version',
+      resourceId: versionId,
+      metadata: { networkId, version: version.version, vertical: network.vertical },
+      tx, // ← commits/rolls back with the publication
+    })
+    await emit(
+      {
+        event_type: 'NetworkPublished',
+        aggregate_id: versionId,
+        tenant_id: tenantId,
+        version: version.version,
+        payload: { networkId, version: version.version },
+      },
+      tx, // ← commits/rolls back with the publication
+    )
+
     return version
   }, { timeout: 30000 })
-
-  await appendAudit({
-    tenantId,
-    actorId,
-    eventType: AuditEvents.NetworkPublished,
-    resourceType: 'network_version',
-    resourceId: versionId,
-    metadata: { networkId, version: publishedVersion.version, vertical: network.vertical },
-  })
-  await emit({
-    event_type: 'NetworkPublished',
-    aggregate_id: versionId,
-    tenant_id: tenantId,
-    version: publishedVersion.version,
-    payload: { networkId, version: publishedVersion.version },
-  })
 
   return db.networkVersion.findUnique({ where: { id: versionId } })
 }
