@@ -490,21 +490,25 @@ export async function executeDispatchAssignment(
     const attestation = event.attestations[0]
 
     // --- Baseline calculation (VPP-2: real baseline engine via HistoricalTelemetryProvider) ---
-    // Uses the HistoricalTelemetryProvider abstraction (not inline simulator).
-    // In production, this would query real telemetry from TimescaleDB.
-    // For the MVP, the SimulatedHistoricalTelemetryProvider generates synthetic data.
     const actualKwh = new Prisma.Decimal(dischargeResult.actualKwh)
 
     const { SimulatedHistoricalTelemetryProvider } = await import('./historical-telemetry-provider.service')
     const { WeekdayWeekendAverageBaseline } = await import('./baseline-engine.service')
-    const telemetryProvider = new SimulatedHistoricalTelemetryProvider(42)
+    const telemetryProvider = new SimulatedHistoricalTelemetryProvider()
 
     // Get historical telemetry (training data — strictly before dispatch).
     const historicalDays = await telemetryProvider.getHistory(
       assignment.assetId,
       assignment.dispatch.startTime,
-      14, // 14 days of history
+      14,
     )
+
+    // If no historical data is available, the baseline is UNAVAILABLE.
+    // Do NOT silently fall back to baseline=0. The assignment enters
+    // PERFORMANCE_REVIEW_REQUIRED — no performance reward is settled.
+    if (!historicalDays || historicalDays.length < 3) {
+      throw new Error('BASELINE_UNAVAILABLE: insufficient historical telemetry for baseline calculation')
+    }
 
     // Get dispatch day ground truth (for metadata/auditability).
     const dispatchDurationHours = Math.ceil(
@@ -520,12 +524,11 @@ export async function executeDispatchAssignment(
     // Run the baseline strategy.
     const baselineStrategy = new WeekdayWeekendAverageBaseline()
 
-    // Build a minimal DispatchDayGroundTruth for the baseline strategy
-    // (it needs the dispatch window indices + the dispatch day's profile).
     const dispatchHour = assignment.dispatch.startTime.getHours()
     const dispatchStartIndex = dispatchHour * 4
     const dispatchEndIndex = Math.min(95, dispatchStartIndex + dispatchDurationHours * 4)
 
+    // Build dispatch day context for the baseline strategy.
     const baselineInput = groundTruth ?? {
       date: assignment.dispatch.startTime.toISOString().split('T')[0],
       dispatchStartIndex,
@@ -533,7 +536,7 @@ export async function executeDispatchAssignment(
       trueCounterfactualKwh: 0,
       actualWithDispatchKwh: parseFloat(actualKwh.toString()),
       trueIncrementalKwh: 0,
-      dayProfile: { date: '', dayOfWeek: 0, isWeekend: false, temperatureC: 20, points: [], totalEnergyKwh: 0, peakPowerKw: 0 },
+      dayProfile: { date: '', dayOfWeek: assignment.dispatch.startTime.getDay(), isWeekend: [0, 6].includes(assignment.dispatch.startTime.getDay()), temperatureC: 20, points: [], totalEnergyKwh: 0, peakPowerKw: 0 },
       counterfactualProfile: { date: '', dayOfWeek: 0, isWeekend: false, temperatureC: 20, points: [], totalEnergyKwh: 0, peakPowerKw: 0 },
     }
 

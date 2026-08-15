@@ -1,13 +1,13 @@
 // =============================================================================
 // Historical Telemetry Provider — abstraction for loading asset telemetry history.
 //
-// This is the seam between the VPP baseline engine and the actual data source.
-// In production, this would query TimescaleDB or the event history table.
-// For the MVP, the SimulatedHistoricalTelemetryProvider generates synthetic
-// data using the DERHistorySimulator.
+// FIX: The provider now honors assetId and dispatchStartTime:
+// - Different assets get different (but deterministic) histories via per-asset seeds
+// - The dispatch date is the supplied dispatchStartTime (not new Date())
+// - Training data is strictly before dispatchStartTime
+// - Repeated calls with same asset/date are deterministic
 //
-// CRITICAL: the provider returns ONLY data strictly before the dispatch event.
-// Dispatch-day actual data is never included in baseline training data.
+// If required historical data is unavailable, returns null (BASELINE_UNAVAILABLE).
 // =============================================================================
 
 import type { DayProfile, DispatchDayGroundTruth } from './der-simulator.service'
@@ -16,28 +16,17 @@ import { DERHistorySimulator } from './der-simulator.service'
 export interface HistoricalTelemetryProvider {
   /**
    * Get historical day profiles for an asset, strictly before the dispatch event.
-   * This data is used for baseline TRAINING only — never includes dispatch-day actuals.
-   *
-   * @param assetId The asset to get history for
-   * @param dispatchStartTime The start of the dispatch event (cutoff for training data)
-   * @param numDays Number of historical days to retrieve
-   * @returns Array of DayProfile objects, each strictly before dispatchStartTime
+   * Returns null if insufficient historical data is available.
    */
   getHistory(
     assetId: string,
     dispatchStartTime: Date,
     numDays: number,
-  ): Promise<DayProfile[]>
+  ): Promise<DayProfile[] | null>
 
   /**
-   * Get the dispatch day's ground truth (for evaluation purposes).
-   * In production, this would be the verified telemetry from the dispatch day.
-   * For the simulator, it returns the known ground truth.
-   *
-   * @param assetId The asset
-   * @param dispatchStartTime Start of dispatch
-   * @param dispatchDurationHours Duration
-   * @param dispatchPowerKw Power
+   * Get the dispatch day's ground truth (for evaluation/auditability).
+   * Returns null if unavailable.
    */
   getDispatchDayGroundTruth?(
     assetId: string,
@@ -48,40 +37,57 @@ export interface HistoricalTelemetryProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Simulated provider — uses DERHistorySimulator with a fixed seed per asset.
+// Simulated provider — per-asset deterministic histories.
 // ---------------------------------------------------------------------------
 
 export class SimulatedHistoricalTelemetryProvider implements HistoricalTelemetryProvider {
-  private simulator: DERHistorySimulator
-
-  constructor(seed = 42) {
-    this.simulator = new DERHistorySimulator(seed)
-  }
-
   async getHistory(
-    _assetId: string,
-    _dispatchStartTime: Date,
+    assetId: string,
+    dispatchStartTime: Date,
     numDays: number,
-  ): Promise<DayProfile[]> {
-    // Generate a full history (including dispatch day), then return only
-    // the historical days (excluding the dispatch day).
-    const history = this.simulator.generateHistory(numDays, 17, 2, 5)
-    return history.days // days[] excludes the dispatch day
+  ): Promise<DayProfile[] | null> {
+    if (numDays < 3) return null // minimum history requirement
+
+    // Derive a per-asset seed so different assets get uncorrelated histories.
+    const seed = DERHistorySimulator.deriveSeed(assetId, dispatchStartTime)
+    const simulator = new DERHistorySimulator(seed)
+
+    const dispatchHour = dispatchStartTime.getHours()
+    const history = simulator.generateHistory(
+      numDays,
+      dispatchHour,
+      2, // duration hours (not used for history, only for dispatch day)
+      5, // power (not used for history)
+      dispatchStartTime, // explicit dispatch date
+    )
+
+    // Verify no training sample is >= dispatchStartTime.
+    const dispatchDateStr = dispatchStartTime.toISOString().split('T')[0]
+    const validDays = history.days.filter(d => d.date < dispatchDateStr)
+
+    if (validDays.length < 3) return null
+
+    return validDays
   }
 
   async getDispatchDayGroundTruth(
-    _assetId: string,
+    assetId: string,
     dispatchStartTime: Date,
     dispatchDurationHours: number,
     dispatchPowerKw: number,
   ): Promise<DispatchDayGroundTruth | null> {
+    const seed = DERHistorySimulator.deriveSeed(assetId, dispatchStartTime)
+    const simulator = new DERHistorySimulator(seed)
+
     const dispatchHour = dispatchStartTime.getHours()
-    const history = this.simulator.generateHistory(
-      14, // numDays (must match what getHistory would use)
+    const history = simulator.generateHistory(
+      14,
       dispatchHour,
       dispatchDurationHours,
       dispatchPowerKw,
+      dispatchStartTime, // explicit dispatch date
     )
+
     return history.dispatchDay
   }
 }
