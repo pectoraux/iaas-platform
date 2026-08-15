@@ -684,3 +684,22 @@ Stage Summary:
 - Historical dispatches reference the exact version's policy.
 - Production verified on iaas-ivory.vercel.app.
 - GitHub: pectoraux/iaas-platform (commit 74e3de1)
+
+---
+Task ID: VPP-2C-historical-reproducibility
+Agent: orchestrator
+Task: Fix historical reproducibility — bind VPP program to concrete NetworkVersion.
+
+Work Log:
+1. VppBuyerProgram.networkVersionId: program binds to the concrete version under which it was created. VPP execution resolves baseline policy from dispatch.program.networkVersionId — NEVER from network.currentVersionId.
+2. createBuyerProgram accepts optional networkVersionId (defaults to current).
+3. Evaluation + policy persistence is ATOMIC (one db.$transaction): BaselineEvaluation record + NetworkVersion.baselinePolicyJson both succeed or both fail.
+4. Scenario dataset hash now uses SHA-256 of canonical input including simulator version.
+5. Historical reproducibility test: V12 with strategy A, V13 with strategy B. V12 dispatch uses strategy A even after V13 is current. V13 dispatch uses strategy B.
+
+Stage Summary:
+- VPP programs are bound to concrete NetworkVersions.
+- Historical dispatches use the exact version's baseline policy.
+- Evaluation + policy persistence is atomic.
+- Production verified on iaas-ivory.vercel.app.
+- GitHub: pectoraux/iaas-platform (commit 77c8d2b)
