@@ -1158,3 +1158,36 @@ Stage Summary:
 - The three mandatory safety properties remain intact: never over-reserve, optimizer is not the concurrency authority, all-or-nothing.
 - VPP-2D-3 is now FROZEN. The architecture has a clean boundary: optimizer proposes, capacity decides.
 - NEXT (VPP-2D-4): economic integration — connect the reserved portfolio to the actual buyer obligation: dispatch event → actual DER response → aggregate portfolio performance → buyer commitment fulfilled? → portfolio-level settlement.
+
+---
+Task ID: VPP-2D-3-insufficient-capacity-error
+Agent: orchestrator
+Task: Fix the classification gap — ValidationError is too broad to mean "insufficient capacity." Introduce a specific InsufficientCapacityError so only genuine capacity contention maps to insufficient_capacity.
+
+Work Log:
+1. ADDED InsufficientCapacityError to src/lib/domain/errors.ts: A specific domain error with code 'CAPACITY_UNAVAILABLE' and HTTP 409. Only this error maps to status='insufficient_capacity' in the reservation layer. Generic ValidationError (negative amount, unit mismatch) and NotFoundError (missing asset) are re-thrown, NOT disguised as capacity shortages.
+2. UPDATED capacity.service.ts: Changed 3 throw sites from ValidationError to InsufficientCapacityError:
+   - "Requested X exceeds verified physical capacity Y" (line 129)
+   - "Insufficient capacity: requested X, available Y" (line 175)
+   - "Insufficient remaining capacity: requested X, remaining Y" (line 276, in createCapacityCommitment)
+   The "Requested amount must be positive" check (line 120) STAYS as ValidationError — it's an input/programming error, not a capacity conflict.
+3. UPDATED classifyReservationError: Only InsufficientCapacityError → insufficient_capacity. ValidationError, NotFoundError, and all other non-retryable errors are RE-THROWN. Updated the JSDoc to document the precise contract: "Only InsufficientCapacityError (code: CAPACITY_UNAVAILABLE) maps to insufficient_capacity."
+4. REGRESSION TESTS (direct unit tests for classifyReservationError):
+   - InsufficientCapacityError → insufficient_capacity ✓
+   - ValidationError("Requested amount must be positive") → RE-THROWN ✓ (key regression test)
+   - ValidationError("Unit mismatch") → RE-THROWN ✓
+   - NotFoundError (missing asset) → RE-THROWN ✓
+   - Prisma P2034 (serialization) → retryable_conflict ✓
+   - Prisma P2024 (timeout) → retryable_conflict ✓
+   - generic "transaction timeout" → retryable_conflict ✓
+   - UNEXPECTED generic Error → RE-THROWN ✓
+   - UNEXPECTED Prisma error (unknown code) → RE-THROWN ✓
+   - non-Error value → RE-THROWN ✓
+5. INTEGRATION TEST UPDATED: The old "simulated unexpected DB error" test used a nonexistent assetId and expected NotFoundError → insufficient_capacity. With the fix, NotFoundError is re-thrown. Updated the test to verify the NotFoundError PROPAGATES (rejects.toThrow(NotFoundError)) rather than being disguised as insufficient_capacity.
+6. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (only pre-existing bun:test). Dev server: / route HTTP 200, VPP API compiles capacity.service + portfolio-reservation cleanly. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The reservation layer now has a precise error contract: only InsufficientCapacityError (CAPACITY_UNAVAILABLE) maps to insufficient_capacity. Generic ValidationError (negative amount, unit mismatch) and NotFoundError (missing asset) are re-thrown as input/programming errors, NOT disguised as capacity shortages.
+- This closes the remaining semantic gap: a malformed optimizer allocation (e.g., requestedAmount = -3) will never be presented to a buyer as "insufficient capacity; retry with a fresh pool."
+- VPP-2D-3 is now FROZEN. The architecture has a clean, precise error boundary.
+- NEXT (VPP-2D-4): economic integration — connect the reserved portfolio to the actual buyer obligation: dispatch → actual DER response → aggregate portfolio performance → commitment fulfillment → portfolio-level settlement.
