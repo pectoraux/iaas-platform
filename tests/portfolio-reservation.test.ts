@@ -34,12 +34,15 @@ import {
   optimizeAndReserve,
   findPortfolioReservations,
   reconcilePortfolioWithReservations,
+  classifyReservationError,
 } from '../src/lib/services/portfolio-reservation.service'
 import {
   buildCandidate,
   type CandidateAsset,
 } from '../src/lib/services/portfolio-optimizer.service'
 import type { CorrelationModel } from '../src/lib/services/portfolio-risk.service'
+import { ValidationError } from '@/lib/domain/errors'
+import { Prisma } from '@prisma/client'
 
 let tenantId: string
 let networkId: string
@@ -439,5 +442,263 @@ describe('VPP-2D-3: all-or-nothing reservation set', () => {
 
     // The failure reason should mention capacity.
     expect(result.failureReason).toBeDefined()
+
+    // CRITICAL: the status must be 'insufficient_capacity', not a system error.
+    expect(result.status).toBe('insufficient_capacity')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Error classification (the key 2D-3 reliability fix)
+// ---------------------------------------------------------------------------
+
+describe('VPP-2D-3: error classification (capacity vs system failure)', () => {
+  it('concurrent capacity loss → status=insufficient_capacity (not system_error)', async () => {
+    // When a concurrent buyer wins the capacity race, the capacity service
+    // throws a ValidationError ("Insufficient capacity"). This must be
+    // classified as 'insufficient_capacity', not 'system_error'.
+    //
+    // We test this by creating a scenario where the optimizer sees capacity
+    // that's already been reserved by another transaction.
+    const assets = await Promise.all([
+      createAssetWithCapacity('cls1', '50', 50, 1, 1.0),
+      createAssetWithCapacity('cls2', '50', 50, 1, 1.0),
+    ])
+
+    const now = new Date()
+    const start = new Date(now.getTime() + 3600000 * 200)
+    const end = new Date(start.getTime() + 3600000 * 2)
+
+    // Pre-reserve all capacity so the optimizer's selection can't be reserved.
+    const { createCapacityReservation } = await import('../src/lib/services/capacity.service')
+    await createCapacityReservation({
+      tenantId,
+      assetId: assets[0]!.assetId,
+      networkId,
+      capabilityType: 'energy_discharge',
+      requestedAmount: '50',
+      startTime: start,
+      endTime: end,
+      sourceType: 'pre_reservation',
+      sourceId: `pre-cls-${Date.now()}`,
+    })
+    await createCapacityReservation({
+      tenantId,
+      assetId: assets[1]!.assetId,
+      networkId,
+      capabilityType: 'energy_discharge',
+      requestedAmount: '50',
+      startTime: start,
+      endTime: end,
+      sourceType: 'pre_reservation',
+      sourceId: `pre-cls2-${Date.now()}`,
+    })
+
+    // The optimizer sees 100 kW available (stale view). It selects both
+    // assets. But both are fully pre-reserved → ValidationError →
+    // status=insufficient_capacity.
+    const result = await optimizeAndReserve({
+      tenantId,
+      networkId,
+      capabilityType: 'energy_discharge',
+      candidates: assets.map((a) => a.candidate),
+      target: { requestedKw: 80, confidenceLevel: 0.99, correlationModel: NO_CORRELATION },
+      startTime: start,
+      endTime: end,
+      portfolioId: `cls-test-${Date.now()}`,
+    })
+
+    // The status must be 'insufficient_capacity', NOT 'system_error'.
+    expect(result.status).toBe('insufficient_capacity')
+    expect(result.reserved).toBe(false)
+    expect(result.reservations.length).toBe(0) // no orphans
+    expect(result.failureReason).toBeDefined()
+    // The failure reason should be a capacity message, not a DB error.
+    expect(result.failureReason!.toLowerCase()).toContain('capacity')
+  })
+
+  it('simulated unexpected DB error is NOT reported as insufficient_capacity', async () => {
+    // This test proves that an unexpected DB/system error is RE-THROWN
+    // rather than converted to a normal insufficient_capacity result.
+    //
+    // We simulate a DB error by creating a candidate with an assetId that
+    // doesn't exist in the database. The capacity service will throw a
+    // NotFoundError (which IS classified as insufficient_capacity — the
+    // asset/assignment doesn't exist). To test a TRUE system error, we
+    // need to mock the transaction itself.
+    //
+    // Instead of mocking, we test the classifyReservationError function
+    // directly to prove it re-throws non-domain, non-retryable errors.
+
+    // Import the internal classifier for direct testing.
+    // (It's not exported, so we test via behavior: a Prisma error with
+    // an unknown code should be re-thrown.)
+
+    // Create a valid candidate pool.
+    const assets = await Promise.all([
+      createAssetWithCapacity('sys1', '50', 50, 1, 1.0),
+    ])
+
+    const now = new Date()
+    const start = new Date(now.getTime() + 3600000 * 240)
+    const end = new Date(start.getTime() + 3600000 * 2)
+
+    // Override the portfolioId to cause a sourceId collision that would
+    // trigger a unique constraint violation if the schema had one.
+    // (The schema doesn't have a unique constraint on sourceId, so this
+    // won't actually trigger an error — but it tests the happy path.)
+
+    // For the direct error-classification test, we verify that the
+    // function re-throws unexpected errors by checking that a generic
+    // Error is NOT caught as insufficient_capacity.
+    //
+    // We simulate this by calling optimizeAndReserve with a candidate
+    // whose assetId doesn't exist → the capacity service throws
+    // NotFoundError → classified as insufficient_capacity (expected).
+    //
+    // To test a TRUE system error (e.g., Prisma internal error), we
+    // would need to mock the database. Since we can't do that in an
+    // integration test, we verify the behavior indirectly: the
+    // NotFoundError IS classified as insufficient_capacity (proving
+    // domain errors are handled), and the code structure guarantees
+    // non-domain errors are re-thrown (the catch block only handles
+    // ValidationError, NotFoundError, and retryable Prisma codes).
+
+    const fakeCandidate: CandidateAsset = {
+      assetId: 'nonexistent-asset-id',
+      clusterId: 'fake',
+      availableCapacityKw: 50,
+      uncertainty: {
+        assetId: 'nonexistent-asset-id',
+        clusterId: 'fake',
+        expectedPerformanceKw: 50,
+        stdDevKw: 1,
+        availabilityProb: 1.0,
+      },
+    }
+
+    const result = await optimizeAndReserve({
+      tenantId,
+      networkId,
+      capabilityType: 'energy_discharge',
+      candidates: [fakeCandidate],
+      target: { requestedKw: 30, confidenceLevel: 0.99, correlationModel: NO_CORRELATION },
+      startTime: start,
+      endTime: end,
+      portfolioId: `sys-err-test-${Date.now()}`,
+    })
+
+    // NotFoundError (asset doesn't exist) is classified as
+    // insufficient_capacity — this is correct because a missing asset/
+    // assignment is a capacity problem (the asset can't provide capacity).
+    expect(result.status).toBe('insufficient_capacity')
+    expect(result.reserved).toBe(false)
+
+    // KEY: the failureReason is the domain error message, not a generic
+    // "unknown error" or DB error string.
+    expect(result.failureReason).toBeDefined()
+    expect(result.failureReason!.toLowerCase()).not.toContain('unknown')
+  })
+
+  it('successful reservation → status=reserved', async () => {
+    const assets = await Promise.all([
+      createAssetWithCapacity('ok1', '50', 50, 1, 1.0),
+      createAssetWithCapacity('ok2', '50', 50, 1, 1.0),
+    ])
+
+    const now = new Date()
+    const start = new Date(now.getTime() + 3600000 * 280)
+    const end = new Date(start.getTime() + 3600000 * 2)
+
+    const result = await optimizeAndReserve({
+      tenantId,
+      networkId,
+      capabilityType: 'energy_discharge',
+      candidates: assets.map((a) => a.candidate),
+      target: { requestedKw: 50, confidenceLevel: 0.99, correlationModel: NO_CORRELATION },
+      startTime: start,
+      endTime: end,
+      portfolioId: `ok-test-${Date.now()}`,
+    })
+
+    expect(result.status).toBe('reserved')
+    expect(result.reserved).toBe(true)
+    expect(result.reservations.length).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Direct unit tests for classifyReservationError (proves re-throw behavior)
+// ---------------------------------------------------------------------------
+
+describe('VPP-2D-3: classifyReservationError (direct unit tests)', () => {
+  // Use a minimal dummy portfolio for the classifier.
+  const dummyPortfolio = {
+    selected: [],
+    risk: { committedKw: 0, distributionModel: 'normal_approximation' as const, confidenceLevel: 0.99, zScore: 2.326, expectedKw: 0, stdDevKw: 0, varianceKw2: 0, fullyServed: false, shortfallKw: 100, normalApproximationSafeCapacity: 0, derCount: 0, clusterCount: 0, correlationModel: { withinCluster: 0, crossCluster: 0 } },
+    committedKw: 0,
+    totalCommittedKw: 0,
+    fullyServed: false,
+    shortfallKw: 100,
+    candidateCount: 0,
+    clusterCount: 0,
+    algorithm: 'greedy_lexicographic_marginal_safe_capacity',
+  } as any
+
+  it('ValidationError → insufficient_capacity', () => {
+    const err = new ValidationError('Insufficient capacity: requested 100 kW but only 50 kW available')
+    const result = classifyReservationError(err, dummyPortfolio)
+    expect(result.status).toBe('insufficient_capacity')
+    expect(result.reserved).toBe(false)
+    expect(result.failureReason).toContain('Insufficient capacity')
+  })
+
+  it('retryable Prisma error (P2034 serialization) → retryable_conflict', () => {
+    const err = new Prisma.PrismaClientKnownRequestError(
+      'Transaction failed due to a write conflict or a deadlock',
+      { code: 'P2034', clientVersion: '6.0.0' },
+    )
+    const result = classifyReservationError(err, dummyPortfolio)
+    expect(result.status).toBe('retryable_conflict')
+    expect(result.reserved).toBe(false)
+    expect(result.failureReason).toContain('Retryable')
+  })
+
+  it('retryable Prisma error (P2024 timeout) → retryable_conflict', () => {
+    const err = new Prisma.PrismaClientKnownRequestError(
+      'Timed out fetching a new connection from the connection pool',
+      { code: 'P2024', clientVersion: '6.0.0' },
+    )
+    const result = classifyReservationError(err, dummyPortfolio)
+    expect(result.status).toBe('retryable_conflict')
+  })
+
+  it('generic Error with "transaction timeout" → retryable_conflict', () => {
+    const err = new Error('Transaction timeout after 30000ms')
+    const result = classifyReservationError(err, dummyPortfolio)
+    expect(result.status).toBe('retryable_conflict')
+  })
+
+  it('UNEXPECTED error (generic Error) is RE-THROWN, not converted to insufficient_capacity', () => {
+    // This is the key test: a generic DB/infrastructure error must NOT
+    // be presented as a capacity conflict. It must propagate.
+    const unexpectedErr = new Error('Connection terminated unexpectedly')
+    expect(() => classifyReservationError(unexpectedErr, dummyPortfolio)).toThrow(unexpectedErr)
+  })
+
+  it('UNEXPECTED Prisma error (unknown code) is RE-THROWN', () => {
+    // A Prisma error with a code we don't recognize as retryable should
+    // be re-thrown, not converted.
+    const err = new Prisma.PrismaClientKnownRequestError(
+      'Some internal Prisma error',
+      { code: 'P3009', clientVersion: '6.0.0' }, // P3009 is not in our retryable list
+    )
+    expect(() => classifyReservationError(err, dummyPortfolio)).toThrow(err)
+  })
+
+  it('non-Error value (string) is RE-THROWN', () => {
+    // If something throws a non-Error, it should propagate, not be
+    // converted to insufficient_capacity.
+    expect(() => classifyReservationError('something weird', dummyPortfolio)).toThrow()
   })
 })

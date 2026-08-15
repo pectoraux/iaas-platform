@@ -85,6 +85,8 @@
 // =============================================================================
 
 import { db } from '@/lib/db'
+import { Prisma } from '@prisma/client'
+import { ValidationError, NotFoundError, DomainError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import {
   createCapacityReservation as allocateReservation,
@@ -136,6 +138,20 @@ export interface AssetReservation {
 }
 
 /**
+ * The typed status of a reservation attempt.
+ *
+ * This distinguishes expected capacity conflicts (which are normal market
+ * behavior — the caller can retry with a fresh candidate pool) from
+ * system failures (which are infrastructure problems that must NOT be
+ * presented to the caller as "insufficient capacity").
+ */
+export type ReservationStatus =
+  | 'reserved'
+  | 'insufficient_capacity'
+  | 'retryable_conflict'
+  | 'system_error'
+
+/**
  * The result of optimizeAndReserve.
  */
 export interface OptimizeAndReserveResult {
@@ -143,9 +159,30 @@ export interface OptimizeAndReserveResult {
   portfolio: OptimizationResult
   /** The created reservations (one per selected asset). */
   reservations: AssetReservation[]
-  /** Whether all reservations were created successfully. */
+  /**
+   * The typed reservation status. Callers MUST check this field to
+   * distinguish expected capacity conflicts from system failures.
+   *
+   *   reserved                — all reservations created successfully
+   *   insufficient_capacity   — the pool couldn't meet the target, or a
+   *                             concurrent buyer won the capacity race.
+   *                             This is EXPECTED market behavior; the
+   *                             caller can retry with a fresh pool.
+   *   retryable_conflict      — a serialization/timeout conflict. The
+   *                             caller should retry with backoff.
+   *   system_error            — an unexpected DB/infrastructure failure.
+   *                             NOT a capacity problem. Must be surfaced
+   *                             as an infrastructure error, not a buyer
+   *                             capacity result.
+   */
+  status: ReservationStatus
+  /** Whether all reservations were created successfully (status === 'reserved'). */
   reserved: boolean
-  /** If reservation failed, the error reason. */
+  /**
+   * Human-readable explanation. For insufficient_capacity, this is the
+   * capacity service's error message. For system_error, this is the
+   * underlying error message (for diagnostics).
+   */
   failureReason?: string
   /**
    * The algorithm used. Always 'greedy_lexicographic_marginal_safe_capacity'
@@ -194,6 +231,7 @@ export async function optimizeAndReserve(
     return {
       portfolio,
       reservations: [],
+      status: 'insufficient_capacity',
       reserved: false,
       failureReason: portfolio.shortfallKw > 0
         ? `Insufficient candidate pool: safe capacity ${portfolio.committedKw.toFixed(1)} kW < requested ${target.requestedKw} kW`
@@ -271,24 +309,122 @@ export async function optimizeAndReserve(
     return {
       portfolio,
       reservations,
+      status: 'reserved',
       reserved: true,
       algorithm: portfolio.algorithm,
       optimalityGuarantee: 'heuristic',
     }
   } catch (err) {
     // The transaction rolled back — NO reservations were persisted.
-    // Return a clean failure result so the caller can retry.
-    const reason = err instanceof Error ? err.message : 'Unknown reservation failure'
+    //
+    // ERROR CLASSIFICATION (critical for operational correctness):
+    //
+    // We must distinguish:
+    //   1. EXPECTED capacity conflicts (ValidationError from the capacity
+    //      service — insufficient capacity, stale optimizer view). These
+    //      are normal market behavior; the caller can retry with a fresh
+    //      candidate pool.
+    //   2. RETRYABLE transaction conflicts (serialization failures,
+    //      deadlocks, timeouts). The caller should retry with backoff.
+    //   3. UNEXPECTED system errors (DB connection failures, Prisma
+    //      internal errors, etc.). These must NOT be presented to the
+    //      caller as "insufficient capacity" — they are infrastructure
+    //      problems that need operator attention.
+    //
+    // The old code caught every error and converted it to
+    // `reserved=false, failureReason=err.message`, which made DB outages
+    // look like capacity conflicts. That's operationally dangerous.
+    return classifyReservationError(err, portfolio)
+  }
+}
 
+// ---------------------------------------------------------------------------
+// Error classification
+// ---------------------------------------------------------------------------
+
+/**
+ * Classify a reservation error into one of three categories.
+ *
+ * Exported for direct unit testing — proves that unexpected DB/system
+ * errors are re-thrown rather than converted to insufficient_capacity.
+ */
+export function classifyReservationError(
+  err: unknown,
+  portfolio: OptimizationResult,
+): OptimizeAndReserveResult {
+  // 1. Domain errors from the capacity service (ValidationError, NotFoundError).
+  //    These are EXPECTED — the capacity layer rejected the reservation
+  //    because the optimizer's view was stale or the pool is insufficient.
+  if (err instanceof ValidationError || err instanceof NotFoundError) {
     return {
       portfolio,
-      reservations: [], // empty — transaction rolled back
+      reservations: [], // transaction rolled back
+      status: 'insufficient_capacity',
       reserved: false,
-      failureReason: reason,
+      failureReason: err.message,
       algorithm: portfolio.algorithm,
       optimalityGuarantee: 'heuristic',
     }
   }
+
+  // 2. Retryable transaction conflicts (Prisma serialization/deadlock/timeout).
+  //    These are transient — the caller should retry with backoff.
+  if (isRetryableTransactionError(err)) {
+    return {
+      portfolio,
+      reservations: [], // transaction rolled back
+      status: 'retryable_conflict',
+      reserved: false,
+      failureReason: `Retryable transaction conflict: ${err instanceof Error ? err.message : String(err)}. Retry with backoff.`,
+      algorithm: portfolio.algorithm,
+      optimalityGuarantee: 'heuristic',
+    }
+  }
+
+  // 3. Unexpected system errors — RE-THROW.
+  //    These are NOT capacity problems. They are infrastructure failures
+  //    (DB connection lost, Prisma internal error, etc.) that need operator
+  //    attention. Converting them to "insufficient_capacity" would be
+  //    operationally dangerous — it would hide real failures behind a
+  //    normal buyer-facing result.
+  //
+  //    Domain errors that aren't ValidationError/NotFoundError (e.g.,
+  //    ConflictError, ImmutableResourceError) also fall through here — they
+  //    indicate something unexpected that the caller should handle explicitly.
+  throw err
+}
+
+/**
+ * Check if an error is a retryable transaction conflict (serialization
+ * failure, deadlock, or timeout).
+ *
+ * Prisma error codes:
+ *   P2034 — too many connections / serialization failure
+ *   P2031 — transaction timeout
+ *   P2024 — operation timeout
+ *   P2033 — connection error
+ *   P1001 — connection lost
+ *   P1002 — connection timed out
+ */
+function isRetryableTransactionError(err: unknown): boolean {
+  // PrismaKnownRequestError carries a `code` field.
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    const retryableCodes = ['P2034', 'P2031', 'P2024', 'P2033', 'P1001', 'P1002']
+    if (retryableCodes.includes(err.code)) return true
+  }
+
+  // Check for transaction timeout (our 30s timeout throws a generic Error).
+  if (err instanceof Error) {
+    const msg = err.message.toLowerCase()
+    if (msg.includes('transaction') && (msg.includes('timeout') || msg.includes('expired'))) {
+      return true
+    }
+    if (msg.includes('serialization') || msg.includes('deadlock')) {
+      return true
+    }
+  }
+
+  return false
 }
 
 // ---------------------------------------------------------------------------
