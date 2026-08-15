@@ -823,12 +823,17 @@ model DomainEvent {
   // VPP-2D-4: Event processing lease for retry workers.
   // Lifecycle: pending → processing → processed (or dead_letter).
   // A worker claims an event by setting processingStatus='processing' +
-  // claimedAt + leaseExpiresAt atomically. If the worker crashes, the
-  // lease expires and another worker can reclaim it.
+  // claimedAt + leaseExpiresAt + processingClaimId atomically.
+  // FENCING: processingClaimId is a unique token per claim. Every
+  // worker-owned write must check processingClaimId matches — this
+  // prevents a stale (expired-lease) worker from overwriting a newer
+  // worker's result. If the write affects 0 rows, the worker lost its
+  // lease and must not overwrite the current state.
   // 'dead_letter' is for malformed/unprocessable events.
   processingStatus  String   @default("pending") // pending | processing | processed | dead_letter
   claimedAt         DateTime?
   leaseExpiresAt    DateTime?
+  processingClaimId String?  // fencing token — unique per claim
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
@@ -1210,9 +1215,15 @@ model VppPortfolioCommitment {
   // LEASE: when status='evaluating', evaluationClaimedAt + evaluationLeaseExpiresAt
   // track the evaluator's lease. If the evaluator crashes, the lease expires
   // and recoverStuckPortfolioEvaluations() can reclaim it (revert to 'pending').
+  // FENCING: evaluationClaimId is a unique token per claim. Every
+  // evaluator-owned write must check evaluationClaimId matches — this
+  // prevents a stale (expired-lease) evaluator from overwriting a newer
+  // evaluator's result. If the write affects 0 rows, the evaluator lost
+  // its lease and must not overwrite the current state.
   status          String   @default("pending") // pending | evaluating | fulfilled | partial | failed
   evaluationClaimedAt     DateTime?
   evaluationLeaseExpiresAt DateTime?
+  evaluationClaimId       String?  // fencing token — unique per claim
   evaluatedAt     DateTime?
 
   // Reconciliation metadata.

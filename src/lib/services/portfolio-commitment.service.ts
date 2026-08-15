@@ -50,6 +50,7 @@
 
 import { db } from '@/lib/db'
 import { Prisma } from '@prisma/client'
+import { randomUUID } from 'crypto'
 import { NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 
@@ -350,14 +351,14 @@ export async function evaluatePortfolioCommitment(
     }
   }
 
-  // Atomic claim: pending → evaluating with lease. If another evaluator
-  // already claimed it, this returns count=0 and we skip. On failure, we
-  // revert to 'pending' so the next caller can retry. If the evaluator
-  // crashes, the lease expires and recoverStuckPortfolioEvaluations()
-  // can reclaim it.
+  // Atomic claim: pending → evaluating with lease + fencing token.
+  // The fencing token (evaluationClaimId) is unique per claim. Every
+  // evaluator-owned write checks this token — preventing a stale
+  // (expired-lease) evaluator from overwriting a newer evaluator's result.
   const LEASE_DURATION_MS = 60000 // 60 seconds — evaluation should be fast
   const now = new Date()
   const leaseExpiry = new Date(now.getTime() + LEASE_DURATION_MS)
+  const claimId = randomUUID() // fencing token
 
   const claimed = await db.vppPortfolioCommitment.updateMany({
     where: { id: commitment.id, status: 'pending' },
@@ -365,6 +366,7 @@ export async function evaluatePortfolioCommitment(
       status: 'evaluating',
       evaluationClaimedAt: now,
       evaluationLeaseExpiresAt: leaseExpiry,
+      evaluationClaimId: claimId,
     },
   })
 
@@ -373,14 +375,12 @@ export async function evaluatePortfolioCommitment(
     // or a previous evaluator crashed and left the commitment in
     // 'evaluating' with an expired lease.
 
-    // Check if the lease has expired. If so, reclaim it.
+    // Check if the lease has expired. If so, reclaim it with a NEW token.
     const leaseExpired = commitment.evaluationLeaseExpiresAt
       && commitment.evaluationLeaseExpiresAt < now
 
     if (leaseExpired) {
-      // Reclaim: evaluating (expired lease) → evaluating (new lease).
-      // This uses a CAS on evaluationLeaseExpiresAt to prevent races
-      // between two reclaimers.
+      // Reclaim: evaluating (expired lease) → evaluating (new lease + new token).
       const reclaimed = await db.vppPortfolioCommitment.updateMany({
         where: {
           id: commitment.id,
@@ -390,6 +390,7 @@ export async function evaluatePortfolioCommitment(
         data: {
           evaluationClaimedAt: now,
           evaluationLeaseExpiresAt: leaseExpiry,
+          evaluationClaimId: claimId,
         },
       })
 
@@ -514,8 +515,16 @@ export async function evaluatePortfolioCommitment(
   }
 
   // Update the commitment record with final results.
-  await db.vppPortfolioCommitment.update({
-    where: { id: commitment.id },
+  // FENCING: the update is conditioned on evaluationClaimId matching our
+  // claim token. If another evaluator reclaimed the lease while we were
+  // computing, this update affects 0 rows — we lost our lease and must
+  // NOT overwrite the newer evaluator's result.
+  const fencedUpdate = await db.vppPortfolioCommitment.updateMany({
+    where: {
+      id: commitment.id,
+      status: 'evaluating',
+      evaluationClaimId: claimId, // fencing token
+    },
     data: {
       deliveredKw: buyerDeliveredKw.toString(),
       deliveredKwh: aggregate.buyerDeliveredKwh.toString(),
@@ -526,6 +535,9 @@ export async function evaluatePortfolioCommitment(
       buyerDeliveredKwh: aggregate.buyerDeliveredKwh.toString(),
       fulfillmentPct: fulfillmentPct.toString(),
       status,
+      evaluationClaimedAt: null,
+      evaluationLeaseExpiresAt: null,
+      evaluationClaimId: null,
       completedAssignments: assignments.filter((a) => a.status === 'completed').length,
       failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
       evaluatedAt: new Date(),
@@ -537,6 +549,39 @@ export async function evaluatePortfolioCommitment(
       }),
     },
   })
+
+  if (fencedUpdate.count === 0) {
+    // We lost our lease — another evaluator reclaimed and may have already
+    // produced a result. We must NOT overwrite it. Return the current state
+    // (the caller can re-read if needed).
+    const current = await db.vppPortfolioCommitment.findUnique({
+      where: { id: commitment.id },
+      select: { status: true, deliveredKw: true, buyerDeliveredKwh: true,
+        operatorContributionKwh: true, rawSignedPortfolioPerformanceKwh: true,
+        totalActualKwh: true, totalBaselineKwh: true, fulfillmentPct: true },
+    })
+    return {
+      commitmentId: commitment.id,
+      dispatchId,
+      status: current ? asCommitmentStatus(current.status) : 'pending',
+      committedKw,
+      buyerDeliveredKw: current?.deliveredKw ? parseFloat(current.deliveredKw) : 0,
+      buyerDeliveredKwh: current?.buyerDeliveredKwh ? parseFloat(current.buyerDeliveredKwh) : 0,
+      operatorContributionKwh: current?.operatorContributionKwh ? parseFloat(current.operatorContributionKwh) : 0,
+      rawSignedPortfolioPerformanceKwh: current?.rawSignedPortfolioPerformanceKwh ? parseFloat(current.rawSignedPortfolioPerformanceKwh) : 0,
+      totalActualKwh: current?.totalActualKwh ? parseFloat(current.totalActualKwh) : 0,
+      totalBaselineKwh: current?.totalBaselineKwh ? parseFloat(current.totalBaselineKwh) : 0,
+      fulfillmentPct: current?.fulfillmentPct ? parseFloat(current.fulfillmentPct) : 0,
+      toleranceThresholdPct: tolerance,
+      measurementMethod: commitment.measurementMethod as MeasurementMethod,
+      fulfillmentBasis: commitment.fulfillmentBasis as FulfillmentBasis,
+      assignmentCount: assignments.length,
+      completedAssignments: assignments.filter((a) => a.status === 'completed').length,
+      failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
+      perAsset: aggregate.perAsset,
+      evaluationOutcome: 'already_evaluating', // we lost the lease
+    }
+  }
 
   await appendAudit({
     tenantId,
@@ -592,13 +637,20 @@ export async function evaluatePortfolioCommitment(
     try {
       const { emit, DomainEventTypes } = await import('@/lib/domain/events')
       await db.$transaction(async (tx) => {
-        // Revert evaluating → pending inside the transaction, clearing lease.
+        // FENCING: revert only if we still own the lease (evaluationClaimId matches).
+        // If another evaluator reclaimed, this affects 0 rows — we lost our lease
+        // and must not interfere with the newer evaluator's state.
         await tx.vppPortfolioCommitment.updateMany({
-          where: { id: commitment.id, status: 'evaluating' },
+          where: {
+            id: commitment.id,
+            status: 'evaluating',
+            evaluationClaimId: claimId, // fencing token
+          },
           data: {
             status: 'pending',
             evaluationClaimedAt: null,
             evaluationLeaseExpiresAt: null,
+            evaluationClaimId: null,
           },
         })
         // Emit the retry event in the SAME transaction.

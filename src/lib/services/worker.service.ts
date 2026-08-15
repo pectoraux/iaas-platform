@@ -453,6 +453,7 @@ export async function processPortfolioEvaluationRetries(
 ): Promise<{ processed: number; completed: number; failed: number }> {
   const EVENT_LEASE_MS = 60000 // 60 seconds — same as commitment evaluation lease
   const now = new Date()
+  const { randomUUID } = await import('crypto')
 
   // Find claimable events: pending OR (processing with expired lease).
   const events = await db.domainEvent.findMany({
@@ -476,9 +477,10 @@ export async function processPortfolioEvaluationRetries(
 
   for (const event of events) {
     const leaseExpiry = new Date(Date.now() + EVENT_LEASE_MS)
+    const eventClaimId = randomUUID() // fencing token
 
     // Claim this specific event (atomic CAS: pending→processing OR
-    // processing(expired)→processing(new lease)).
+    // processing(expired)→processing(new lease + new fencing token)).
     const claimed = await db.domainEvent.updateMany({
       where: {
         id: event.id,
@@ -491,6 +493,7 @@ export async function processPortfolioEvaluationRetries(
         processingStatus: 'processing',
         claimedAt: now,
         leaseExpiresAt: leaseExpiry,
+        processingClaimId: eventClaimId,
       },
     })
 
@@ -504,9 +507,9 @@ export async function processPortfolioEvaluationRetries(
     try {
       payload = JSON.parse(event.payloadJson) as { commitmentId?: string; dispatchId?: string }
     } catch {
-      // Malformed JSON — mark as dead_letter (not silently processed).
-      await db.domainEvent.update({
-        where: { id: event.id },
+      // Malformed JSON — mark as dead_letter with fencing.
+      await db.domainEvent.updateMany({
+        where: { id: event.id, processingStatus: 'processing', processingClaimId: eventClaimId },
         data: { processingStatus: 'dead_letter', processed: true },
       }).catch(() => {})
       failed++
@@ -514,10 +517,9 @@ export async function processPortfolioEvaluationRetries(
     }
 
     if (!payload.dispatchId) {
-      // Malformed event — can't retry without a dispatchId.
-      // Mark as dead_letter (not silently processed).
-      await db.domainEvent.update({
-        where: { id: event.id },
+      // Malformed event — mark as dead_letter with fencing.
+      await db.domainEvent.updateMany({
+        where: { id: event.id, processingStatus: 'processing', processingClaimId: eventClaimId },
         data: { processingStatus: 'dead_letter', processed: true },
       }).catch(() => {})
       failed++
@@ -529,28 +531,24 @@ export async function processPortfolioEvaluationRetries(
       const result = await evaluatePortfolioCommitment(event.tenantId, payload.dispatchId)
 
       if (result.evaluationOutcome === 'final' || result.evaluationOutcome === 'already_final') {
-        // Success — mark the event as processed.
-        await db.domainEvent.update({
-          where: { id: event.id },
+        // Success — mark the event as processed with fencing.
+        await db.domainEvent.updateMany({
+          where: { id: event.id, processingStatus: 'processing', processingClaimId: eventClaimId },
           data: { processingStatus: 'processed', processed: true },
-        }).catch(() => {}) // best-effort — the commitment is final regardless
+        }).catch(() => {})
         completed++
       } else {
-        // Still pending or evaluating — the event is consumed but the
-        // commitment isn't final yet. The fallback sweep will handle it.
-        await db.domainEvent.update({
-          where: { id: event.id },
+        // Still pending or evaluating — consumed but not final.
+        await db.domainEvent.updateMany({
+          where: { id: event.id, processingStatus: 'processing', processingClaimId: eventClaimId },
           data: { processingStatus: 'processed', processed: true },
         }).catch(() => {})
         failed++
       }
     } catch {
-      // Evaluation failed again. evaluatePortfolioCommitment's catch block
-      // has already emitted a NEW retry event (atomically coupled with the
-      // pending revert). Mark THIS event as processed (it's been handled —
-      // the new event will drive the next retry).
-      await db.domainEvent.update({
-        where: { id: event.id },
+      // Evaluation failed again. Mark THIS event as processed with fencing.
+      await db.domainEvent.updateMany({
+        where: { id: event.id, processingStatus: 'processing', processingClaimId: eventClaimId },
         data: { processingStatus: 'processed', processed: true },
       }).catch(() => {})
       failed++
