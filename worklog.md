@@ -1249,3 +1249,36 @@ Stage Summary:
 - The per-asset clipping rule is the key mathematical property: an asset that underperforms its baseline contributes 0 to the portfolio, not a negative offset. This prevents one bad asset from reducing the contributions of good assets.
 - The architectural rule is preserved: no new economic objects. The generic kernel (Contribution → Reward → Ledger → Settlement) remains the source of truth for operator payments. The portfolio commitment is a buyer-facing assessment layer above it.
 - The same primitive is reusable for storage, compute, and wireless — any vertical that needs to assess aggregate obligation fulfillment against individual verified performance.
+
+---
+Task ID: VPP-2D-4-integration-pass
+Agent: orchestrator
+Task: Fix all 7 issues from the reviewer — wire portfolio commitment into the lifecycle, add completion gating, separate buyer fulfillment from operator contribution, add measurement method, bind to reservation set, idempotency, atomic reservation+commitment.
+
+Work Log:
+1. LIFECYCLE INTEGRATION: The portfolio commitment is now created atomically with the reservations inside optimizeAndReserve() (when dispatchId is provided). It is evaluated automatically when all assignments reach terminal state — executeDispatchAssignment() calls evaluatePortfolioCommitment() when pendingAssignments === 0. No manual caller is required.
+2. COMPLETION GATING: evaluatePortfolioCommitment() now requires ALL assignments to be terminal (completed | failed | reconciliation_required) before producing a final result. If any assignment is non-terminal, status stays 'pending'. This prevents premature evaluation where incomplete assignments are treated as zero.
+3. SEPARATED PERFORMANCE MEASURES: The service records THREE distinct quantities:
+   - operatorContributionKwh = Σ max(0, actual_i - baseline_i) [per-asset clipped — what operators are paid for]
+   - rawSignedPortfolioPerformanceKwh = Σ actual - Σ baseline [true aggregate incremental, can be negative]
+   - buyerDeliveredKwh = depends on fulfillmentBasis policy [per_asset_clipped OR aggregate_counterfactual]
+   The buyer fulfillment does NOT silently conflate with operator contribution.
+4. MEASUREMENT METHOD: The commitment carries an explicit measurementMethod field: average_power (deliveredKw = deliveredKwh / durationHours), energy (deliveredKwh directly), interval_power (future-ready). Persisted on the commitment record.
+5. RESERVATION BINDING: The commitment stores portfolioReservationId, binding it to the actual reservation set. createPortfolioCommitment verifies sum(reserved) == committedKw inside the transaction.
+6. IDEMPOTENCY: Concurrent createPortfolioCommitment() calls use upsert-with-conflict-handling: findUnique → create → catch P2002 → re-fetch. No raw unique constraint errors.
+7. ATOMIC RESERVATION + COMMITMENT: optimizeAndReserve creates both the reservations AND the commitment inside one db.$transaction. A crash between them is impossible — they commit or roll back together. Invariant: commitment exists ⇔ reservations exist.
+8. SCHEMA: Added fields to VppPortfolioCommitment: portfolioReservationId, measurementMethod, fulfillmentBasis, operatorContributionKwh, rawSignedPortfolioPerformanceKwh, buyerDeliveredKwh, failedAssignments.
+9. TESTS: 30+ cases across 7 describe blocks:
+   - Separated performance measures (operatorContribution, rawSigned, buyerDelivered)
+   - Fulfillment basis (per_asset_clipped vs aggregate_counterfactual — the key distinction: overperformance CAN offset underperformance in aggregate mode)
+   - Measurement method (average_power vs energy, duration effect, default)
+   - Basic fulfillment + tolerance
+   - Aggregate reconciliation
+   - Edge cases (committedKw=0, empty, zero duration, all-underperform with negative raw signed)
+10. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (15 before = 15 after in vpp.service.ts — all pre-existing). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- VPP-2D-4 is now economically integrated: the portfolio commitment is wired into the actual lifecycle (create with reservations → evaluate when all assignments terminal). No manual caller required.
+- The key conceptual correction: buyer fulfillment is separated from operator contribution. The service records both measures and lets the fulfillmentBasis policy decide which one represents the buyer obligation. per_asset_clipped (default) matches operator contribution; aggregate_counterfactual allows overperformance to offset underperformance at the portfolio level.
+- The measurement method is explicit: average_power (default) vs energy vs interval_power (future). The architecture can now express the distinction between "500 kW average over 2 hours" and "1000 kWh total energy."
+- The reservation+commitment are atomic: they commit or roll back together. No orphaned economic state.
