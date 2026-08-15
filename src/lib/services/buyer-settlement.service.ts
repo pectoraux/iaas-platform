@@ -29,7 +29,7 @@ import { ensureBuyerFundsAccount, ensurePlatformAccount, postBalancedPosting, co
 // Types
 // ---------------------------------------------------------------------------
 
-export type BuyerSettlementStatus = 'pending' | 'charging' | 'charged' | 'failed'
+export type BuyerSettlementStatus = 'pending' | 'charging' | 'charged' | 'failed' | 'reconciliation_required'
 export type MeasurementMethod = 'average_power' | 'energy' | 'interval_power'
 
 export interface BuyerChargeBreakdown {
@@ -237,6 +237,15 @@ export async function createBuyerSettlement(
         shortfall: charge.shortfall.toString(),
         currency: charge.currency,
         measurementMethod: charge.measurementMethod,
+        pricingPolicyJson: JSON.stringify({
+          version: 'v1',
+          pricePerKwh: charge.pricePerKwh.toString(),
+          toleranceThresholdPct: charge.toleranceThresholdPct.toString(),
+          measurementMethod: charge.measurementMethod,
+          fulfillmentBasis: commitment.fulfillmentBasis,
+          chargeFormula: 'performance_based_with_cap',
+          // Future: capacityPayment, energyPayment, penaltyRate, etc.
+        }),
         status: 'pending',
       },
     })
@@ -345,6 +354,7 @@ export async function processBuyerSettlement(
   }
 
   // We hold the claim. Process the settlement.
+  let ledgerPostingId: string | null = null
   try {
     const buyerCharge = new Prisma.Decimal(settlement.buyerCharge)
     const currency = settlement.currency
@@ -357,7 +367,6 @@ export async function processBuyerSettlement(
       where: { tenantId_idempotencyKey: { tenantId, idempotencyKey } },
     })
 
-    let ledgerPostingId: string | null = null
     let buyerFundsBalanceAfter = new Prisma.Decimal(0)
 
     if (existingPosting) {
@@ -459,11 +468,21 @@ export async function processBuyerSettlement(
 
     return toResult(await db.vppBuyerSettlement.findUnique({ where: { id: settlementId } })!)
   } catch (err) {
-    // Processing failed — revert charging → pending AND emit retry event
-    // in ONE transaction (atomic coupling). If the transaction commits,
-    // both the revert and the event exist. If it rolls back, the settlement
-    // stays in 'charging' — recoverable via the repair sweep.
+    // Processing failed. The correct recovery state depends on WHETHER
+    // the ledger posting was attempted:
+    //
+    // If ledgerPostingId is set (posting succeeded but crash before
+    // status update): → reconciliation_required (unknown financial state,
+    //   must NOT retry — the money may have moved).
+    //
+    // If ledgerPostingId is null (pre-posting failure — insufficient
+    // funds, DB timeout before posting): → pending (safe to retry,
+    //   no money moved).
+    //
+    // Both transitions + retry event are in ONE transaction with fencing.
     const reason = err instanceof Error ? err.message : 'Processing failed'
+    const recoveryStatus = ledgerPostingId ? 'reconciliation_required' : 'pending'
+
     try {
       const { emit } = await import('@/lib/domain/events')
       await db.$transaction(async (tx) => {
@@ -471,31 +490,38 @@ export async function processBuyerSettlement(
         await tx.vppBuyerSettlement.updateMany({
           where: { id: settlementId, status: 'charging', claimId },
           data: {
-            status: 'pending',
+            status: recoveryStatus,
+            ledgerPostingId, // preserve if set (for reconciliation)
             claimedAt: null,
             leaseExpiresAt: null,
             claimId: null,
             failureReason: reason,
+            reconciledAt: recoveryStatus === 'reconciliation_required' ? null : undefined,
           },
         })
-        await emit(
-          {
-            event_type: 'BuyerSettlementRetryRequested',
-            aggregate_id: settlementId,
-            tenant_id: tenantId,
-            version: 1,
-            payload: {
-              settlementId,
-              dispatchId: settlement.dispatchId,
-              reason,
+        // Only emit retry event for pending (safe retry). For
+        // reconciliation_required, a separate reconciliation process
+        // inspects the ledger state.
+        if (recoveryStatus === 'pending') {
+          await emit(
+            {
+              event_type: 'BuyerSettlementRetryRequested',
+              aggregate_id: settlementId,
+              tenant_id: tenantId,
+              version: 1,
+              payload: {
+                settlementId,
+                dispatchId: settlement.dispatchId,
+                reason,
+              },
             },
-          },
-          tx,
-        )
+            tx,
+          )
+        }
       })
     } catch {
-      // If the transaction itself fails, the commitment may stay in
-      // 'charging'. The repair sweep will reclaim it.
+      // If the transaction itself fails, the settlement stays in 'charging'.
+      // The repair sweep will reclaim it.
     }
 
     throw err
@@ -540,6 +566,174 @@ export async function processPendingBuyerSettlements(
   }
 
   return { processed: pending.length, charged, failed }
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile buyer settlement (reconciliation_required → charged | failed)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reconcile a buyer settlement in 'reconciliation_required' state.
+ *
+ * This is called when a settlement may have a partial ledger posting
+ * (e.g., crash after posting but before status update). The reconciliation
+ * process inspects the durable ledger state by idempotency key:
+ *
+ *   - If a balanced ledger posting exists: mark as 'charged' (the money
+ *     moved correctly, just the status wasn't updated).
+ *   - If no posting exists: mark as 'pending' (safe to retry — no money
+ *     moved, the failure was pre-posting).
+ *
+ * This ensures the settlement invariant:
+ *   buyer charge exists ⟺ ledger posting is balanced
+ */
+export async function reconcileBuyerSettlement(
+  tenantId: string,
+  settlementId: string,
+  actorId?: string,
+): Promise<BuyerSettlementResult> {
+  const settlement = await db.vppBuyerSettlement.findUnique({
+    where: { id: settlementId },
+  })
+  if (!settlement) throw new NotFoundError('vpp_buyer_settlement', settlementId)
+  if (settlement.tenantId !== tenantId) throw new NotFoundError('vpp_buyer_settlement', settlementId)
+
+  if (settlement.status !== 'reconciliation_required') {
+    return toResult(settlement) // already resolved
+  }
+
+  // Inspect the durable ledger state by idempotency key.
+  const idempotencyKey = `buyer-settlement-${settlementId}`
+  const existingPosting = await db.ledgerPosting.findUnique({
+    where: { tenantId_idempotencyKey: { tenantId, idempotencyKey } },
+    include: { entries: true },
+  })
+
+  if (existingPosting) {
+    // Ledger posting exists — verify it's balanced.
+    const sum = existingPosting.entries.reduce(
+      (acc, e) => acc.plus(e.amount),
+      new Prisma.Decimal(0),
+    )
+
+    if (sum.equals(0)) {
+      // Balanced posting exists — mark as charged.
+      await db.vppBuyerSettlement.update({
+        where: { id: settlementId },
+        data: {
+          status: 'charged',
+          ledgerPostingId: existingPosting.id,
+          reconciledAt: new Date(),
+          claimId: null,
+          claimedAt: null,
+          leaseExpiresAt: null,
+        },
+      })
+
+      // Advance dispatch to completed.
+      await db.vppDispatch.updateMany({
+        where: { id: settlement.dispatchId, status: 'buyer_settlement_pending' },
+        data: { status: 'completed' },
+      })
+
+      await appendAudit({
+        tenantId,
+        actorId,
+        eventType: AuditEvents.BuyerSettlementCharged,
+        resourceType: 'vpp_buyer_settlement',
+        resourceId: settlementId,
+        metadata: {
+          dispatchId: settlement.dispatchId,
+          status: 'charged',
+          action: 'reconciled',
+          ledgerPostingId: existingPosting.id,
+        },
+      })
+    } else {
+      // Unbalanced posting — this should never happen (postBalancedPosting
+      // validates balance). Mark as failed with a critical warning.
+      await db.vppBuyerSettlement.update({
+        where: { id: settlementId },
+        data: {
+          status: 'failed',
+          failureReason: `CRITICAL: unbalanced ledger posting ${existingPosting.id} (sum=${sum.toString()})`,
+          reconciledAt: new Date(),
+        },
+      })
+    }
+  } else {
+    // No posting exists — safe to retry. Mark as pending.
+    await db.vppBuyerSettlement.update({
+      where: { id: settlementId },
+      data: {
+        status: 'pending',
+        failureReason: `Reconciled: no ledger posting found, safe to retry`,
+        reconciledAt: new Date(),
+        claimId: null,
+        claimedAt: null,
+        leaseExpiresAt: null,
+      },
+    })
+  }
+
+  return toResult(await db.vppBuyerSettlement.findUnique({ where: { id: settlementId } })!)
+}
+
+/**
+ * Repair sweep: find settlements in 'reconciliation_required' or stuck
+ * in 'charging' (expired lease) and reconcile/process them.
+ *
+ * This is the safety net — the primary retry path is the outbox event.
+ */
+export async function recoverStuckBuyerSettlements(
+  tenantId?: string,
+): Promise<{ recovered: number; charged: number; failed: number }> {
+  const now = new Date()
+
+  // Find settlements that need recovery.
+  const stuck = await db.vppBuyerSettlement.findMany({
+    where: {
+      ...(tenantId ? { tenantId } : {}),
+      OR: [
+        { status: 'reconciliation_required' },
+        { status: 'charging', leaseExpiresAt: { lt: now } },
+      ],
+    },
+    select: { id: true, tenantId: true, status: true },
+    take: 50,
+  })
+
+  let charged = 0
+  let failed = 0
+
+  for (const { id, tenantId: stTenantId, status } of stuck) {
+    try {
+      if (status === 'reconciliation_required') {
+        const result = await reconcileBuyerSettlement(stTenantId, id)
+        if (result.status === 'charged') charged++
+        else failed++
+      } else {
+        // Expired charging lease — revert to pending and retry.
+        await db.vppBuyerSettlement.updateMany({
+          where: { id, status: 'charging', leaseExpiresAt: { lt: now } },
+          data: {
+            status: 'pending',
+            claimId: null,
+            claimedAt: null,
+            leaseExpiresAt: null,
+          },
+        }).catch(() => {})
+
+        const result = await processBuyerSettlement(stTenantId, id)
+        if (result.status === 'charged') charged++
+        else failed++
+      }
+    } catch {
+      failed++
+    }
+  }
+
+  return { recovered: stuck.length, charged, failed }
 }
 
 // ---------------------------------------------------------------------------

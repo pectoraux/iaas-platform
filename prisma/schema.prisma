@@ -1282,9 +1282,23 @@ model VppBuyerSettlement {
   // Measurement method from the commitment (average_power | energy).
   measurementMethod String @default("average_power")
 
-  // Settlement state with claim/lease/fencing (same pattern as portfolio evaluation).
-  // pending → charging → charged | failed
-  status          String   @default("pending") // pending | charging | charged | failed
+  // Versioned pricing policy snapshot (JSON). Contains the full pricing
+  // policy used to compute the charge: pricePerKwh, toleranceThresholdPct,
+  // measurementMethod, fulfillmentBasis, chargeFormula version.
+  // This makes the charge formula explicit and reproducible — historical
+  // settlements can be audited without re-reading VppBuyerProgram.
+  pricingPolicyJson String  @default("{}")
+
+  // Settlement state with claim/lease/fencing.
+  // pending → charging → charged | failed | reconciliation_required
+  //
+  // 'reconciliation_required': the ledger posting may have partially
+  // succeeded (e.g., buyer_funds debit posted but revenue credit failed,
+  // or crash after posting but before status update). The settlement
+  // must NOT be treated as 'failed' (unknown financial state). A
+  // reconciliation process inspects the durable ledger state by
+  // idempotency key and resolves the settlement to 'charged' or 'failed'.
+  status          String   @default("pending") // pending | charging | charged | failed | reconciliation_required
   claimId         String?  // fencing token — unique per processing attempt
   claimedAt       DateTime?
   leaseExpiresAt  DateTime?
@@ -1292,6 +1306,7 @@ model VppBuyerSettlement {
   buyerFundsBalanceAfter String? // decimal as string
   failureReason   String?
   chargedAt       DateTime?
+  reconciledAt    DateTime?
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
