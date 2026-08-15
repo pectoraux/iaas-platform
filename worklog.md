@@ -914,3 +914,38 @@ Stage Summary:
 - The portfolio risk engine is now dimensionally correct (kW throughout), honest about its distributional assumptions (normal_approximation label, not "99% guarantee"), and fails closed on invalid correlation matrices (PSD validation via Cholesky).
 - The engine remains PURE (no DB access) — ready for VPP-2D-2 integration once the μ = reservedKw placeholder is replaced with historical actual-dispatch performance.
 - NEXT (VPP-2D-2): portfolio optimizer — not just "compute safe capacity for the whole portfolio" but "which subset of N DERs should we commit to this buyer request while minimizing risk, cost, operator burden, and opportunity cost?" That is the DePIN allocation problem.
+
+---
+Task ID: VPP-2D-1-psd-validator-fix
+Agent: orchestrator
+Task: Fix the Cholesky PSD validator bug — the zero-pivot handling could accept non-PSD matrices like [[1,1,0],[1,1,1],[0,1,1]].
+
+Work Log:
+1. ROOT CAUSE: The Cholesky-based isPositiveSemidefinite() silently set a[i][j]=0 when a pivot was near zero, without checking that the corresponding residual was also zero. This accepted certain symmetric, unit-diagonal, in-range matrices that were NOT PSD.
+2. REPLACED WITH EIGENVALUE-BASED CHECK: Implemented the Jacobi eigenvalue algorithm (classical Givens rotations) to compute all eigenvalues, then check λ_min ≥ -ε. A symmetric matrix is PSD iff all eigenvalues ≥ 0 — unambiguous, no zero-pivot edge cases.
+3. DEBUGGING THE JACOBI ALGORITHM: The first implementation had a sign error in the rotation angle formula. The correct formula is θ = 0.5·atan2(2·apq, aqq - app) (NOT app - aqq). Verified algebraically: we need (c²-s²)·apq + sc·(app-aqq) = 0, which gives tan(2θ) = 2·apq/(aqq-app). Used a runtime verification script with 9 test matrices to confirm all pass before committing.
+4. RUNTIME VERIFICATION (9 cases, all pass):
+   - REGRESSION [[1,1,0],[1,1,1],[0,1,1]] → rejected ✓ (eigenvalues: 1, 2.414, -0.414)
+   - valid PD [[1,0.5,0.3],[0.5,1,0.4],[0.3,0.4,1]] → accepted ✓
+   - singular PSD [[1,1,0],[1,1,0],[0,0,1]] → accepted ✓ (eigenvalues: 2, 1, 0)
+   - identity → accepted ✓
+   - non-PSD [[1,0.8,0.8],[0.8,1,0.2],[0.8,0.2,1]] → rejected ✓
+   - non-PSD 4x4 → rejected ✓
+   - large valid 100x100 block → accepted ✓
+   - 2x2 ρ=0.5 → accepted ✓
+   - 2x2 ρ=1.0 (singular PSD) → accepted ✓
+5. REGRESSION TESTS ADDED (7 new cases in tests/portfolio-risk.test.ts):
+   - REGRESSION: rejects [[1,1,0],[1,1,1],[0,1,1]] (the matrix the old Cholesky accepted)
+   - accepts valid PD matrix
+   - accepts valid singular PSD matrix (perfectly correlated pair — eigenvalues 2, 0, 1)
+   - accepts identity matrix
+   - rejects slightly negative eigenvalue
+   - rejects 4x4 non-PSD
+   - accepts large 100x100 block-correlation
+6. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors in portfolio-risk.service.ts (only pre-existing bun:test test-file error). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors. Runtime script confirms all 9 PSD cases pass.
+
+Stage Summary:
+- The PSD validator is now correct: it uses eigenvalue decomposition (Jacobi algorithm) instead of the buggy Cholesky approach. Zero-pivot edge cases are eliminated — the eigenvalue test is unambiguous (λ_min < -ε ⟺ not PSD).
+- The Jacobi algorithm correctly handles both positive-definite and positive-semidefinite (singular) matrices, which is essential for correlation matrices (perfectly correlated assets produce singular matrices).
+- VPP-2D-1 is now FROZEN. The portfolio risk engine is dimensionally correct (kW), honest about distributional assumptions (normal_approximation label), and rigorously validates correlation matrices (eigenvalue-based PSD check).
+- NEXT (VPP-2D-2): portfolio optimizer — "which subset of N available DERs should we commit to this buyer request while minimizing risk, cost, operator burden, and opportunity cost?" That is the DePIN allocation problem.
