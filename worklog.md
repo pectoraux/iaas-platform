@@ -1373,3 +1373,23 @@ Stage Summary:
 - The state transition (evaluating→pending) and the retry event are atomically coupled in one transaction — no orphaned state.
 - The fallback sweep is a separate repair mechanism, not the primary retry path.
 - VPP-2D-4 now has correct outbox semantics, atomic state coupling, and proper event-to-work correspondence.
+
+---
+Task ID: VPP-2D-4-lease-semantics
+Agent: orchestrator
+Task: Add proper lease/claim semantics to event processing + commitment evaluation. Malformed events → dead_letter. Lease-aware fallback sweep.
+
+Work Log:
+1. SCHEMA: Added processingStatus (pending|processing|processed|dead_letter), claimedAt, leaseExpiresAt to DomainEvent. Added evaluationClaimedAt + evaluationLeaseExpiresAt to VppPortfolioCommitment.
+2. EVENT LEASE SEMANTICS: processPortfolioEvaluationRetries now claims events via CAS (pending→processing OR processing(expired)→processing(new lease)). Sets claimedAt + leaseExpiresAt. Only sets processingStatus=processed AFTER successful handling. If worker crashes, the expired lease is reclaimable by another worker.
+3. COMMITMENT LEASE SEMANTICS: evaluatePortfolioCommitment sets evaluationClaimedAt + evaluationLeaseExpiresAt when claiming (pending→evaluating). On failure, clears lease fields when reverting to pending. If the evaluator crashes, the expired lease is reclaimable — either by another evaluator (CAS on evaluationLeaseExpiresAt < now) or by the fallback sweep.
+4. LEASE-AWARE FALLBACK SWEEP: recoverStuckPortfolioEvaluations only reclaims 'evaluating' commitments whose lease has expired (evaluationLeaseExpiresAt < now). Does NOT reclaim active evaluations. Uses CAS on lease expiry to prevent races between reclaimers.
+5. DEAD LETTER: Malformed retry events (bad JSON, missing dispatchId) are marked processingStatus='dead_letter' rather than silently processed=true. They're visible for operator inspection.
+6. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (only pre-existing bun:test + vpp.service.ts). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- Event processing now has proper lease semantics: pending → processing (with lease) → processed. Crashed workers' expired leases are reclaimable.
+- Commitment evaluation has proper lease semantics: pending → evaluating (with lease) → final. Crashed evaluators' expired leases are reclaimable.
+- The fallback sweep is lease-aware — it only reclaims expired evaluations, not active ones.
+- Malformed events go to dead_letter, not silently consumed.
+- VPP-2D-4 is now complete with safety, liveness, lease-based crash recovery, and dead-letter handling.
