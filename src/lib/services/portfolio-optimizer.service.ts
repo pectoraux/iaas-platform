@@ -101,13 +101,15 @@
 //   with 11 allocation levels each, this is 11^N combinations — feasible
 //   only for N ≤ 6. For N=6 that's ~1.77M combinations.
 //
-//   This searches the SAME solution space as the production optimizer
-//   (partial allocations), so the optimality gap is a valid comparison.
+//   This searches a 10%-GRID APPROXIMATION of the production optimizer's
+//   solution space (continuous partial allocations). The grid optimum
+//   may differ from the true continuous optimum — a gridOptimalityGap of
+//   0% means "matches the best 10%-grid solution," not "globally optimal."
 //
 //   The old whole-subset exhaustive optimizer is retained as
 //   `exhaustiveOptimizeSubsets` for backwards compatibility, but its gap
-//   is reported as `subsetSelectionGap` (not `optimalityGap`) because it
-//   does not search partial allocations.
+//   is reported as `subsetSelectionGap` (not `gridOptimalityGap`) because
+//   it does not search partial allocations.
 // =============================================================================
 
 import {
@@ -162,32 +164,55 @@ export interface OptimizationResult {
   totalCost?: number
   totalOpportunityCost?: number
   algorithm: string
+  // NOTE: matchesGridObjective and the per-dimension deltas below are NOT
+  // populated by optimizePortfolio() itself. They are populated by
+  // measureOptimalityGap() when the grid reference is computed (small N).
   /**
-   * Grid optimality gap vs the 10%-discretized exhaustive reference
-   * (partial allocations at 0%, 10%, ..., 100%), when computed (small N).
+   * Whether the heuristic matches the grid reference under the full
+   * lexicographic objective (not just safe capacity). True when
+   * compareResultsLexicographic(heuristic, gridOptimal) == 0.
    *
-   * Defined as:
-   *   (gridOptimalSafeKw - heuristicSafeKw) / gridOptimalSafeKw
-   *
-   * IMPORTANT: This is a GRID APPROXIMATION gap, NOT an exact
-   * continuous-optimum gap. The production optimizer supports continuous
-   * partial allocation (any kW value), while the reference only searches
-   * 10% increments. The true continuous optimum may differ from the grid
-   * optimum. A gridOptimalityGap of 0% means "matches the best 10%-grid
-   * solution," not "globally optimal."
-   *
-   * Undefined for large N where grid search is infeasible (N > 6).
+   * This is the honest "is the heuristic optimal?" signal. A heuristic can
+   * have a lower committedKw but higher opportunity cost — in that case
+   * matchesGridObjective is false because the grid reference is better
+   * under the declared objective.
    */
-  gridOptimalityGap?: number
+  matchesGridObjective?: boolean
+  /**
+   * Safe capacity difference: heuristic.committedKw - gridOptimal.committedKw.
+   * Positive = heuristic has MORE safe capacity. Negative = heuristic has less.
+   */
+  safeCapacityDeltaKw?: number
+  /**
+   * Opportunity cost difference: heuristic - gridOptimal.
+   * Positive = heuristic has HIGHER opportunity cost (worse). Negative = better.
+   */
+  opportunityCostDelta?: number
+  /**
+   * Direct cost difference: heuristic - gridOptimal.
+   * Positive = heuristic has HIGHER direct cost (worse). Negative = better.
+   */
+  directCostDelta?: number
+  /**
+   * Physical lockup difference: heuristic.totalCommittedKw - gridOptimal.totalCommittedKw.
+   * Positive = heuristic locks MORE capacity (worse). Negative = better.
+   */
+  lockupDeltaKw?: number
+  /**
+   * Diversification difference: heuristic.clusterCount - gridOptimal.clusterCount.
+   * Positive = heuristic has MORE clusters (better). Negative = worse.
+   */
+  diversificationDelta?: number
   /**
    * The grid step used by the reference optimizer (e.g., 0.10 = 10%).
-   * Present when gridOptimalityGap is computed.
+   * Present when matchesGridObjective is computed.
    */
   allocationGridStep?: number
   /**
    * Gap vs the whole-subset exhaustive reference (no partial allocations).
-   * This is a WEAKER metric than gridOptimalityGap because it doesn't
-   * search partial allocations at all. Retained for backwards compatibility.
+   * This is a WEAKER metric than the lexicographic comparison above because
+   * it doesn't search partial allocations at all. Retained for backwards
+   * compatibility.
    */
   subsetSelectionGap?: number
 }
@@ -307,16 +332,22 @@ function effectiveProfile(
  * confidence level, using a greedy lexicographic heuristic with partial
  * allocation and effective-profile risk computation.
  *
- * OBJECTIVE (lexicographic):
- *   1. Meet the requested safe capacity
- *   2. Maximize safe capacity surplus
- *   3. Minimize total opportunity cost
- *   4. Minimize total direct cost
- *   5. Maximize diversification (cluster count)
- *   6. Minimize total physical capacity committed
+ * OBJECTIVE (lexicographic — the authoritative definition):
+ *   1. Feasibility:      meet the requested safe capacity (fullyServed)
+ *   2. Opportunity cost: minimize (don't tie up high-value assets)
+ *   3. Direct cost:      minimize
+ *   4. Resource lockup:  minimize total physical capacity committed
+ *   5. Diversification:  maximize cluster count
  *
- * This is a HEURISTIC — not guaranteed globally optimal. See `optimalityGap`
- * for the measured gap vs the discretized exhaustive reference (small N).
+ * This objective does NOT maximize safe-capacity surplus. A buyer requesting
+ * 500 kW does not want the platform to commit 700 kW. The binary-search
+ * partial allocation and pruning pass both serve the "minimize lockup"
+ * objective.
+ *
+ * This is a HEURISTIC — not guaranteed globally optimal. See
+ * `measureOptimalityGap()` for the grid reference comparison (10%-grid
+ * approximation, small N). The comparison uses the full lexicographic
+ * objective, not just safe capacity.
  */
 export function optimizePortfolio(
   candidates: CandidateAsset[],
@@ -863,7 +894,7 @@ function compareResultsLexicographic(
  * capacity. Does NOT search partial allocations.
  *
  * This is a WEAKER reference than exhaustiveOptimizeDiscretized. Its gap
- * should be reported as `subsetSelectionGap`, NOT `optimalityGap`, because
+ * should be reported as `subsetSelectionGap`, NOT `gridOptimalityGap`, because
  * it doesn't search the same solution space as the production optimizer.
  *
  * Retained for backwards compatibility with existing tests.
@@ -908,20 +939,25 @@ export function exhaustiveOptimizeSubsets(
 // ---------------------------------------------------------------------------
 
 /**
- * Measure the grid optimality gap between the greedy heuristic and the
- * 10%-discretized exhaustive reference (partial allocations at 0%, 10%,
- * ..., 100%).
+ * Measure the gap between the greedy heuristic and the 10%-discretized
+ * exhaustive reference, using the FULL LEXICOGRAPHIC objective (not just
+ * safe capacity).
  *
- * IMPORTANT: This is a GRID APPROXIMATION gap, NOT an exact
- * continuous-optimum gap. The production optimizer supports continuous
- * partial allocation (any kW value via binary search), while the reference
- * only searches 10% increments. The true continuous optimum may differ
- * from the grid optimum.
+ * Returns:
+ *   - matchesGridObjective: true if compareResultsLexicographic(heuristic,
+ *     gridOptimal) == 0 (the heuristic is as good as the grid reference
+ *     under the full objective). This is the honest "is the heuristic
+ *     optimal?" signal.
+ *   - Per-dimension deltas (safeCapacityDeltaKw, opportunityCostDelta, etc.)
+ *     showing how the heuristic differs from the grid reference on each
+ *     objective level.
+ *   - gridStep: the discretization step (0.10 = 10%).
  *
- * A gridOptimalityGap of 0% means "matches the best 10%-grid solution,"
- * not "globally optimal."
- *
- * gap = (gridOptimalSafeKw - heuristicSafeKw) / gridOptimalSafeKw
+ * IMPORTANT: This is a GRID APPROXIMATION comparison, NOT an exact
+ * continuous-optimum comparison. The production optimizer supports
+ * continuous partial allocation (any kW via binary search), while the
+ * reference only searches 10% increments. The true continuous optimum
+ * may differ from the grid optimum.
  *
  * Only feasible for N ≤ 6 (11^N combinations).
  */
@@ -931,19 +967,51 @@ export function measureOptimalityGap(
 ): {
   heuristic: OptimizationResult
   optimal: OptimizationResult
-  /** Grid approximation gap (10% grid). NOT an exact continuous-optimum gap. */
-  gap: number
+  /**
+   * Whether the heuristic matches the grid reference under the full
+   * lexicographic objective. This replaces the old scalar "gap" which
+   * only compared committedKw and could report 0% for a strictly worse
+   * heuristic.
+   */
+  matchesGridObjective: boolean
+  safeCapacityDeltaKw: number
+  opportunityCostDelta: number
+  directCostDelta: number
+  lockupDeltaKw: number
+  diversificationDelta: number
   /** The grid step used by the reference (0.10 = 10%). */
   gridStep: number
 } {
   const heuristic = optimizePortfolio(candidates, target)
   const optimal = exhaustiveOptimizeDiscretized(candidates, target)
 
-  const gap = optimal.committedKw > 0
-    ? Math.max(0, (optimal.committedKw - heuristic.committedKw) / optimal.committedKw)
-    : 0
+  // Use the FULL lexicographic comparator. If it returns 0, the heuristic
+  // matches the grid reference under the declared objective.
+  const comparison = compareResultsLexicographic(heuristic, optimal, target)
+  const matchesGridObjective = Math.abs(comparison) < 0.001
 
-  return { heuristic, optimal, gap, gridStep: 0.10 }
+  // Per-dimension deltas: heuristic - gridOptimal.
+  // Positive opportunityCostDelta = heuristic has HIGHER opp cost (worse).
+  // Positive lockupDeltaKw = heuristic locks MORE (worse).
+  // Positive safeCapacityDeltaKw = heuristic has MORE safe capacity.
+  // Positive diversificationDelta = heuristic has MORE clusters (better).
+  const safeCapacityDeltaKw = heuristic.committedKw - optimal.committedKw
+  const opportunityCostDelta = (heuristic.totalOpportunityCost ?? 0) - (optimal.totalOpportunityCost ?? 0)
+  const directCostDelta = (heuristic.totalCost ?? 0) - (optimal.totalCost ?? 0)
+  const lockupDeltaKw = heuristic.totalCommittedKw - optimal.totalCommittedKw
+  const diversificationDelta = heuristic.clusterCount - optimal.clusterCount
+
+  return {
+    heuristic,
+    optimal,
+    matchesGridObjective,
+    safeCapacityDeltaKw,
+    opportunityCostDelta,
+    directCostDelta,
+    lockupDeltaKw,
+    diversificationDelta,
+    gridStep: 0.10,
+  }
 }
 
 /**
