@@ -836,27 +836,10 @@ export async function executeDispatchAssignment(
       data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
     })
 
-    // Update dispatch status if all assignments completed.
-    const pendingAssignments = await db.vppDispatchAssignment.count({
-      where: { dispatchId: assignment.dispatchId, status: { not: 'completed' } },
-    })
-    if (pendingAssignments === 0) {
-      await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
-
-      // VPP-2D-4: evaluate the portfolio commitment now that all assignments
-      // are terminal. This is the automatic lifecycle integration — no manual
-      // caller is required. The commitment was created atomically with the
-      // reservations; now it is evaluated atomically when the dispatch completes.
-      // If no commitment exists (e.g., dispatch created before 2D-4), this
-      // is a no-op (the function throws NotFoundError which we catch).
-      try {
-        const { evaluatePortfolioCommitment } = await import('./portfolio-commitment.service')
-        await evaluatePortfolioCommitment(tenantId, assignment.dispatchId, actorId)
-      } catch {
-        // No portfolio commitment for this dispatch — skip evaluation.
-        // This is expected for dispatches created before VPP-2D-4.
-      }
-    }
+    // VPP-2D-4: canonical finalization. Checks if ALL assignments are
+    // terminal (completed | failed | reconciliation_required). If so,
+    // marks the dispatch completed and evaluates the portfolio commitment.
+    await maybeFinalizeDispatch(tenantId, assignment.dispatchId, actorId)
 
     await appendAudit({
       tenantId, actorId,
@@ -899,7 +882,99 @@ export async function executeDispatchAssignment(
     } else {
       await failAssignment()
     }
+    // VPP-2D-4: even on failure, the assignment is now terminal (failed or
+    // reconciliation_required). Try to finalize the dispatch — if all other
+    // assignments are also terminal, the portfolio commitment can be evaluated.
+    await maybeFinalizeDispatch(tenantId, assignment.dispatchId, actorId)
     throw err
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Canonical dispatch finalization (VPP-2D-4)
+// ---------------------------------------------------------------------------
+
+/**
+ * The canonical set of terminal assignment states.
+ *
+ * An assignment is terminal for portfolio-level purposes when it has
+ * reached a state where no further performance data will change:
+ *   - completed: delivered successfully, fully settled.
+ *   - failed: failed before usage; capacity released, no money moved.
+ *   - reconciliation_required: failed after usage; capacity consumed,
+ *     financial liability exists. Terminal for PERFORMANCE measurement
+ *     (the actuals/baseline are known), but the financial reconciliation
+ *     may still be in progress independently.
+ *
+ * NOTE: 'reconciling' is NOT terminal — it's a transient claim state.
+ */
+const TERMINAL_ASSIGNMENT_STATUSES = ['completed', 'failed', 'reconciliation_required'] as const
+
+/**
+ * Canonical dispatch finalization. Called after any assignment state
+ * transition that could make the portfolio complete:
+ *   - after successful assignment completion
+ *   - after pre-usage failure (→ failed)
+ *   - after post-usage failure (→ reconciliation_required)
+ *   - after successful reconciliation (→ completed)
+ *
+ * Checks if ALL assignments are terminal (completed | failed |
+ * reconciliation_required). If so:
+ *   1. Marks the dispatch as completed.
+ *   2. Evaluates the portfolio commitment (which has its own completion
+ *      gating — it will produce a final result now that all assignments
+ *      are terminal).
+ *
+ * This replaces the old `pendingAssignments === count where status != 'completed'`
+ * pattern, which incorrectly excluded failed/reconciliation_required
+ * assignments and prevented portfolio finalization when any assignment
+ * failed.
+ *
+ * PERFORMANCE TERMINAL vs FINANCIAL FINALITY:
+ * A reconciliation_required assignment is terminal for buyer-performance
+ * evaluation (its actuals/baseline are known), but the financial
+ * reconciliation may still be in progress. The portfolio commitment
+ * evaluates the buyer obligation independently; the assignment-level
+ * financial recovery continues separately via reconcileAssignment().
+ */
+async function maybeFinalizeDispatch(
+  tenantId: string,
+  dispatchId: string,
+  actorId?: string,
+): Promise<void> {
+  // Count non-terminal assignments (anything not in the terminal set).
+  const nonTerminalCount = await db.vppDispatchAssignment.count({
+    where: {
+      dispatchId,
+      status: { notIn: [...TERMINAL_ASSIGNMENT_STATUSES] },
+    },
+  })
+
+  if (nonTerminalCount > 0) {
+    // Some assignments are still in progress (assigned | dispatching |
+    // reconciling). Do not finalize yet.
+    return
+  }
+
+  // All assignments are terminal — finalize the dispatch.
+  await db.vppDispatch.update({
+    where: { id: dispatchId },
+    data: { status: 'completed' },
+  })
+
+  // VPP-2D-4: evaluate the portfolio commitment now that all assignments
+  // are terminal. This is the automatic lifecycle integration — no manual
+  // caller is required. The commitment was created atomically with the
+  // reservations; now it is evaluated when the dispatch completes.
+  //
+  // If no commitment exists (e.g., dispatch created before VPP-2D-4), this
+  // is a no-op (the function throws NotFoundError which we catch).
+  try {
+    const { evaluatePortfolioCommitment } = await import('./portfolio-commitment.service')
+    await evaluatePortfolioCommitment(tenantId, dispatchId, actorId)
+  } catch {
+    // No portfolio commitment for this dispatch — skip evaluation.
+    // This is expected for dispatches created before VPP-2D-4.
   }
 }
 
@@ -992,12 +1067,8 @@ export async function reconcileAssignment(
         where: { id: assignmentId },
         data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
       })
-      const pending = await db.vppDispatchAssignment.count({
-        where: { dispatchId: assignment.dispatchId, status: { not: 'completed' } },
-      })
-      if (pending === 0) {
-        await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
-      }
+      // VPP-2D-4: canonical finalization after successful reconciliation.
+      await maybeFinalizeDispatch(tenantId, assignment.dispatchId, actorId)
       await appendAudit({
         tenantId, actorId,
         eventType: 'vpp.reconciliation_completed',

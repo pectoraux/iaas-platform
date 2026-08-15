@@ -296,19 +296,48 @@ export async function evaluatePortfolioCommitment(
     (dispatch.endTime.getTime() - dispatch.startTime.getTime()) / 3600000,
   )
 
-  let buyerDeliveredKw: number
-  if (commitment.measurementMethod === 'energy') {
-    // Energy method: deliveredKw = deliveredKwh (no conversion).
-    // The buyer obligation is in kWh, not kW.
-    buyerDeliveredKw = aggregate.buyerDeliveredKwh
-  } else {
-    // average_power (default): deliveredKw = deliveredKwh / durationHours.
-    buyerDeliveredKw = aggregate.buyerDeliveredKwh / durationHours
+  // OBLIGATION CONTRACT (VPP-2D-4 correction):
+  // The fulfillment denominator depends on the measurement method.
+  //
+  // average_power:
+  //   - Primary obligation: committedKw (capacity)
+  //   - deliveredKw = buyerDeliveredKwh / durationHours
+  //   - fulfillment = deliveredKw / committedKw
+  //
+  // energy:
+  //   - Primary obligation: requestedKwh (total energy)
+  //   - deliveredKwh = buyerDeliveredKwh (no kW conversion)
+  //   - fulfillment = buyerDeliveredKwh / requestedKwh
+  //   - committedKw is display-only (derived from requestedKwh / duration)
+  //
+  // interval_power:
+  //   - NOT SUPPORTED in 2D-4. Explicitly reject rather than silently
+  //     treating it as average_power.
+
+  if (commitment.measurementMethod === 'interval_power') {
+    throw new ValidationError(
+      `measurementMethod 'interval_power' is not yet supported. ` +
+        `Use 'average_power' or 'energy'.`,
+    )
   }
 
-  // Fulfillment percentage.
+  let buyerDeliveredKw: number
+  let fulfillmentPct: number
+
+  if (commitment.measurementMethod === 'energy') {
+    // Energy method: the obligation is in kWh, not kW.
+    // deliveredKw is display-only (= deliveredKwh / duration).
+    buyerDeliveredKw = aggregate.buyerDeliveredKwh / durationHours
+    const requestedKwh = parseFloat(commitment.requestedKwh)
+    fulfillmentPct = requestedKwh > 0 ? (aggregate.buyerDeliveredKwh / requestedKwh) * 100 : 0
+  } else {
+    // average_power (default): the obligation is in kW.
+    buyerDeliveredKw = aggregate.buyerDeliveredKwh / durationHours
+    const committedKw = parseFloat(commitment.committedKw)
+    fulfillmentPct = committedKw > 0 ? (buyerDeliveredKw / committedKw) * 100 : 0
+  }
+
   const committedKw = parseFloat(commitment.committedKw)
-  const fulfillmentPct = committedKw > 0 ? (buyerDeliveredKw / committedKw) * 100 : 0
 
   // Status: fulfilled (≥ tolerance) | partial | failed.
   const tolerance = parseFloat(commitment.toleranceThresholdPct)
@@ -534,6 +563,8 @@ export function computePortfolioFulfillment(
     toleranceThresholdPct?: number
     measurementMethod?: MeasurementMethod
     fulfillmentBasis?: FulfillmentBasis
+    /** Required for energy method: the buyer's requested energy (kWh). */
+    requestedKwh?: number
   } = {},
 ): {
   totalActualKwh: number
@@ -551,6 +582,13 @@ export function computePortfolioFulfillment(
   const toleranceThresholdPct = options.toleranceThresholdPct ?? 90
   const measurementMethod = options.measurementMethod ?? 'average_power'
   const fulfillmentBasis = options.fulfillmentBasis ?? 'per_asset_clipped'
+
+  if (measurementMethod === 'interval_power') {
+    throw new ValidationError(
+      `measurementMethod 'interval_power' is not yet supported. ` +
+        `Use 'average_power' or 'energy'.`,
+    )
+  }
 
   let totalActualKwh = 0
   let totalBaselineKwh = 0
@@ -571,12 +609,25 @@ export function computePortfolioFulfillment(
     buyerDeliveredKwh = operatorContributionKwh
   }
 
+  // OBLIGATION CONTRACT (VPP-2D-4 correction):
+  // The fulfillment denominator depends on the measurement method.
+  //
+  // average_power: fulfillment = deliveredKw / committedKw
+  //   where deliveredKw = deliveredKwh / durationHours
+  //
+  // energy: fulfillment = deliveredKwh / requestedKwh
+  //   (NOT deliveredKwh / committedKw — that would be dimensionally wrong)
   const safeDuration = Math.max(0.001, durationHours)
-  const buyerDeliveredKw = measurementMethod === 'energy'
-    ? buyerDeliveredKwh
-    : buyerDeliveredKwh / safeDuration
+  const buyerDeliveredKw = buyerDeliveredKwh / safeDuration
 
-  const fulfillmentPct = committedKw > 0 ? (buyerDeliveredKw / committedKw) * 100 : 0
+  let fulfillmentPct: number
+  if (measurementMethod === 'energy') {
+    const requestedKwh = options.requestedKwh ?? committedKw * safeDuration
+    fulfillmentPct = requestedKwh > 0 ? (buyerDeliveredKwh / requestedKwh) * 100 : 0
+  } else {
+    // average_power
+    fulfillmentPct = committedKw > 0 ? (buyerDeliveredKw / committedKw) * 100 : 0
+  }
 
   let status: CommitmentStatus
   if (fulfillmentPct >= toleranceThresholdPct) {

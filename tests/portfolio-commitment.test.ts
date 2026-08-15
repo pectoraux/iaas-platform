@@ -165,15 +165,56 @@ describe('Portfolio Commitment: measurement method', () => {
     expect(result.buyerDeliveredKw).toBe(100) // 200 / 2h = 100 kW
   })
 
-  it('energy: deliveredKw = deliveredKwh (no conversion)', () => {
+  it('energy: fulfillment = deliveredKwh / requestedKwh (NOT / committedKw)', () => {
+    // 200 kWh delivered, 1000 kWh requested → 20% fulfillment.
+    // committedKw = 500 (display-only for energy method).
     const perAsset = [asset('a', 200, 0)]  // performance = 200 kWh
 
-    const result = computePortfolioFulfillment(perAsset, 200, 2, {
+    const result = computePortfolioFulfillment(perAsset, 500, 2, {
       measurementMethod: 'energy',
+      requestedKwh: 1000,
     })
 
     expect(result.buyerDeliveredKwh).toBe(200)
-    expect(result.buyerDeliveredKw).toBe(200) // no conversion — energy is the obligation
+    expect(result.fulfillmentPct).toBeCloseTo(20, 1) // 200 / 1000 = 20%, NOT 200/500 = 40%
+    expect(result.status).toBe('failed') // 20% < 90% tolerance
+  })
+
+  it('energy: 1000 kWh delivered / 1000 kWh requested = 100% fulfillment', () => {
+    const perAsset = [asset('a', 1000, 0)]  // performance = 1000 kWh
+
+    const result = computePortfolioFulfillment(perAsset, 500, 2, {
+      measurementMethod: 'energy',
+      requestedKwh: 1000,
+    })
+
+    expect(result.fulfillmentPct).toBeCloseTo(100, 1)
+    expect(result.status).toBe('fulfilled')
+  })
+
+  it('energy: deliveredKw is still computed (display-only) = deliveredKwh / duration', () => {
+    const perAsset = [asset('a', 200, 0)]  // 200 kWh over 2h = 100 kW
+
+    const result = computePortfolioFulfillment(perAsset, 100, 2, {
+      measurementMethod: 'energy',
+      requestedKwh: 200,
+    })
+
+    // deliveredKw is display-only for energy method — still computed as
+    // deliveredKwh / durationHours for informational purposes.
+    expect(result.buyerDeliveredKw).toBe(100) // 200 / 2h = 100 kW
+    // But fulfillment uses the energy denominator, not kW.
+    expect(result.fulfillmentPct).toBeCloseTo(100, 1) // 200 / 200 = 100%
+  })
+
+  it('interval_power is explicitly rejected (not silently treated as average_power)', () => {
+    const perAsset = [asset('a', 100, 0)]
+
+    expect(() =>
+      computePortfolioFulfillment(perAsset, 100, 1, {
+        measurementMethod: 'interval_power',
+      }),
+    ).toThrow(/not yet supported/)
   })
 
   it('default measurementMethod is average_power', () => {
@@ -192,14 +233,17 @@ describe('Portfolio Commitment: measurement method', () => {
     expect(r4h.buyerDeliveredKw).toBe(25)
   })
 
-  it('energy: duration does not affect deliveredKw', () => {
-    const perAsset = [asset('a', 100, 0)]
+  it('average_power: fulfillment = deliveredKw / committedKw', () => {
+    // 1000 kWh over 2h = 500 kW. Committed 500 kW → 100%.
+    const perAsset = [asset('a', 1000, 0)]
 
-    const r1h = computePortfolioFulfillment(perAsset, 100, 1, { measurementMethod: 'energy' })
-    const r4h = computePortfolioFulfillment(perAsset, 100, 4, { measurementMethod: 'energy' })
+    const result = computePortfolioFulfillment(perAsset, 500, 2, {
+      measurementMethod: 'average_power',
+    })
 
-    expect(r1h.buyerDeliveredKw).toBe(100)
-    expect(r4h.buyerDeliveredKw).toBe(100)
+    expect(result.buyerDeliveredKw).toBe(500)
+    expect(result.fulfillmentPct).toBeCloseTo(100, 1)
+    expect(result.status).toBe('fulfilled')
   })
 })
 
