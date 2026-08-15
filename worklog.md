@@ -805,3 +805,28 @@ Stage Summary:
 - The FOR UPDATE lock guarantees the readiness check validates the exact policy snapshot that gets published — no race window between validation and commit.
 - VPP-2C status: ALL GREEN including concurrency safety — version reproducibility ✅, telemetry binding ✅, version authorization ✅, reward-policy closure ✅, strict baseline policy (program) ✅, publish-level baseline gate (sequential) ✅, publish-level baseline gate (concurrency-safe) ✅, runtime no-fallback ✅.
 - VPP-2C is now FROZEN. Proceed to VPP-2D (portfolio-level risk: 100 DERs → individual uncertainty → correlation/availability → safe aggregate commitment).
+
+---
+Task ID: VPP-2C-publication-atomicity
+Agent: orchestrator
+Task: Fix publication-event atomicity — NetworkPublished outbox event + publication audit were emitted AFTER the publish transaction, creating a crash window where the DB says "published" but downstream listeners never learn about it.
+
+Work Log:
+1. ROOT CAUSE: appendAudit() and emit() ran AFTER db.$transaction() returned. If the process crashed between the publish commit and the emit, the database said the version was published but no NetworkPublished outbox event existed — downstream workers/listeners would never learn about the publication. This violated the atomic-outbox principle already applied to ingestion and settlement.
+2. EXTENDED appendAudit: Added optional `tx?: ExtendedTransactionClient` parameter to AuditInput. When a tx is passed, the audit row is written INSIDE the caller's transaction and commits/rolls back atomically — and failures are NOT swallowed (they propagate so the transaction rolls back). Without a tx, the existing best-effort non-failing behavior is preserved (for ordinary side-effect auditing).
+3. MOVED emit + appendAudit INSIDE publishNetworkVersion transaction: Both now receive the `tx` from the publication transaction. The audit record and the NetworkPublished outbox event commit atomically with: set publishedAt, update currentVersionId, materialize capabilities, materialize reward rule. If the transaction commits → version + event + audit all persist. If it rolls back (validation failure, concurrent publish) → none persist. No orphaned events, no missing events.
+4. ATOMIC OUTBOX PATTERN: This matches the existing pattern in ingestion.service.ts (emit with tx inside the event-creation transaction). The DomainEvent outbox row is processed=0 until the worker fans it out — the publication transaction just guarantees the row exists if and only if the publication committed.
+5. ATOMICITY TESTS (tests/vpp-publication-atomicity.test.ts) — 5 cases:
+   - successful publication → version published AND NetworkPublished event exists AND audit record exists (all 3 commit together)
+   - failed publication (no baseline policy) → version stays unpublished AND no orphaned event AND no orphaned audit (all 3 roll back together)
+   - failed publication (no_acceptable_strategy) → same rollback guarantee
+   - already-published version rejected → no duplicate event/audit (exactly 1 of each from the first publication)
+   - instantiateTemplate regression guard → its publication also carries the atomic event + audit
+6. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors in network.service.ts or audit.ts (the only test-file error is the pre-existing bun:test module resolution issue). Dev server: / route HTTP 200 in ~31ms. Templates API compiles network.service.ts + audit.ts (62ms) cleanly. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The publication invariant is now fully atomic: published version + NetworkPublished outbox event + publication audit record ALWAYS commit together. A crash between publish-commit and event-emit is no longer possible — the event is part of the same transaction.
+- This completes the atomic-outbox principle for all three critical transitions: ingestion (event+outbox), settlement (ledger+outbox), and now publication (version+event+audit).
+- appendAudit is now dual-mode: best-effort (no tx, for ordinary auditing) or transactional (with tx, for critical immutable transitions). This is a reusable improvement for future settlement/reconciliation operations.
+- VPP-2C status: ALL GREEN — version reproducibility ✅, telemetry binding ✅, version authorization ✅, reward-policy closure ✅, strict baseline policy ✅, publish-level baseline gate (sequential) ✅, publish-level baseline gate (concurrency-safe) ✅, publication event/audit atomicity ✅, runtime no-fallback ✅.
+- VPP-2C is now FROZEN. Proceed to VPP-2D (portfolio-level risk: 100 DERs → individual uncertainty → correlation/availability → safe aggregate commitment).
