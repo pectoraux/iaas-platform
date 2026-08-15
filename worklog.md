@@ -1096,3 +1096,42 @@ Stage Summary:
 - The optimizer now has ONE authoritative objective definition (no stale comments).
 - The gap metric is honest: it uses the full lexicographic comparator, not just safe capacity. matchesGridObjective correctly identifies when the heuristic is suboptimal on a higher-priority dimension (opportunity cost) even if it's better on a lower-priority one (lockup).
 - VPP-2D-2 is now FROZEN. Ready for VPP-2D-3: integrate the optimizer into buyer program creation — DER candidate pool → optimizer → partial capacity reservations via the generic capacity layer, with concurrent reservation testing.
+
+---
+Task ID: VPP-2D-3-portfolio-reservation
+Agent: orchestrator
+Task: Connect the portfolio optimizer to the real generic capacity system — optimizeAndReserve service with atomic multi-reservation, concurrent safety, and all-or-nothing semantics.
+
+Work Log:
+1. RESEARCH: Studied capacity.service.ts internals. Key findings: createCapacityReservation accepts a `tx` parameter and locks CapacityResource FOR UPDATE before checking available capacity. Multiple reservations in the same transaction correctly see each other's reservedAmount in the overlap-sum check. Each reservation needs a unique sourceId to prevent idempotency short-circuits.
+2. IMPLEMENTED portfolio-reservation.service.ts: The optimizeAndReserve() function bridges the optimizer and the capacity layer:
+   - Phase 1: Run optimizePortfolio() (pure computation, no DB) to get selected assets + allocations
+   - Phase 2: Open a single db.$transaction (30s timeout):
+     a. Sort selected assets by assetId for stable lock ordering (prevents deadlocks)
+     b. For each asset, call createCapacityReservation(tx, allocatedKw, sourceId=portfolioId:assetId)
+     c. If ANY reservation fails → entire transaction rolls back → no orphan reservations
+   - Phase 3: Audit (outside tx, best-effort)
+   - Returns: portfolio result + reservation records + algorithm/optimalityGuarantee labels
+3. THREE MANDATORY SAFETY PROPERTIES enforced:
+   - NEVER OVER-RESERVE: each allocatedKw is checked against current available capacity inside the transaction (FOR UPDATE lock + overlap-sum). The optimizer's view may be stale — the capacity service is the source of truth.
+   - OPTIMIZER IS NOT THE CONCURRENCY AUTHORITY: two concurrent buyers can compute the same allocation, but the FOR UPDATE lock ensures only one wins. The loser gets a clean insufficient-capacity error.
+   - ALL-OR-NOTHING: if any reservation fails, the entire transaction rolls back. No orphan reservations. The buyer gets a clean failure and can retry.
+4. RECONCILIATION HELPER: reconcilePortfolioWithReservations() verifies every selected asset has a matching reservation with reservedAmount == allocatedKw. Also detects orphan reservations. Returns a list of discrepancies (empty if everything reconciles).
+5. QUERY HELPER: findPortfolioReservations() finds all active reservations for a given portfolioId.
+6. RESULT LABELS: result carries algorithm='greedy_lexicographic_marginal_safe_capacity' and optimalityGuarantee='heuristic'. The buyer-facing contract does NOT depend on the optimizer being globally optimal.
+7. TESTS (tests/portfolio-reservation.test.ts) — 7 cases across 4 describe blocks:
+   - Reconciliation: optimizer allocation reconciles exactly with reservation amounts (discrepancies = [])
+   - Persistence: reservations are queryable by portfolio ID
+   - Labels: result carries algorithm + optimalityGuarantee
+   - Insufficient capacity: clean failure, no orphans
+   - CONCURRENT ACCEPTANCE TEST: two buyers request 100 kW from 100 kW pool → exactly one succeeds, loser gets clean failure, no orphan reservations, no negative remaining capacity
+   - Concurrent with larger pool: both succeed when capacity suffices
+   - All-or-nothing: pre-reserve one asset fully → portfolio fails cleanly, no orphan reservations on the other assets
+8. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors in portfolio-reservation.service.ts (only pre-existing bun:test test-file error). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- VPP-2D-3 delivers the portfolio reservation integration — the optimizer's abstract result now locks real distributed capacity via the generic capacity layer.
+- The three mandatory safety properties are enforced: never over-reserve (FOR UPDATE + overlap-sum inside tx), optimizer is not the concurrency authority (capacity service is the arbiter), all-or-nothing (single transaction, no orphans).
+- The concurrent acceptance test proves two buyers racing for the same 100 kW pool results in exactly one winner and one clean failure — no orphan reservations, no negative remaining capacity.
+- The result carries honest labels: algorithm='greedy_lexicographic_marginal_safe_capacity', optimalityGuarantee='heuristic'. The buyer-facing contract does not depend on global optimality.
+- NEXT: the VPP layer can now call optimizeAndReserve() when a buyer program is created or a dispatch is planned, passing the DER candidate pool + target. The generic capacity layer remains the source of truth for what can actually be reserved.
