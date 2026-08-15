@@ -236,6 +236,20 @@ export async function instantiateTemplate(
     reward: template.reward,
   }
   const version = await createNetworkVersion(tenantId, network.id, configuration, actorId)
+
+  // VPP-2C strict-baseline rule (option A): an energy_vpp NetworkVersion
+  // MUST have an accepted baseline policy before it is published. This makes
+  // the immutable-policy architecture strict — no published VPP version can
+  // ever lack a baseline strategy, so no program can silently fall back to
+  // a hardcoded source-code default at execution time.
+  //
+  // For non-VPP verticals (generic, storage, wireless, compute), baseline
+  // policy is not applicable and this step is skipped.
+  if (template.vertical === 'energy_vpp') {
+    const { runAndPersistBaselineEvaluation } = await import('./baseline-evaluation.service')
+    await runAndPersistBaselineEvaluation({ tenantId, networkVersionId: version.id, numScenarios: 50 })
+  }
+
   const published = await publishNetworkVersion(tenantId, network.id, version.id, actorId)
 
   await appendAudit({

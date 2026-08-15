@@ -63,33 +63,30 @@ export interface CreateBuyerProgramInput {
 export async function createBuyerProgram(tenantId: string, input: CreateBuyerProgramInput, actorId?: string) {
   const network = await db.networkDefinition.findFirst({ where: { id: input.networkId, tenantId } })
   if (!network) throw new NotFoundError('network', input.networkId)
-  const rule = await db.rewardRule.findFirst({ where: { id: input.rewardRuleId, tenantId } })
-  if (!rule) throw new NotFoundError('reward_rule', input.rewardRuleId)
 
   // =========================================================================
-  // Authorization/integrity boundary (VPP-2C final correctness fix).
+  // Version-closed policy boundary (VPP-2C final correctness fix).
   // =========================================================================
-  // networkVersionId now controls:
-  //   - telemetry verification policy
-  //   - baseline policy
-  //   - reward configuration
-  //   - contribution policy
+  // The architectural invariant is:
   //
-  // Therefore the supplied version MUST be validated atomically against the
-  // supplied network + tenant, and MUST be published (no draft-program state
-  // exists). This prevents:
-  //   - cross-network version (Network A program bound to Network B version)
-  //   - cross-tenant version (tenant X program bound to tenant Y version)
-  //   - unpublished version for an active program (policy can still mutate)
+  //   Every VPP program must be version-closed:
+  //     program.networkVersionId    = N
+  //     rewardRule.networkVersionId = N
+  //     all runtime policy resolves from N
   //
-  // The default (no explicit networkVersionId) resolves to network.currentVersionId,
-  // which is always published (set by publishNetworkVersion).
+  // No economic calculation may use policy objects belonging to another
+  // version. We resolve the NetworkVersion FIRST, then validate the reward
+  // rule belongs to that exact version (and tenant). Both checks are
+  // validated lookups — NOT a single transaction — but they run before any
+  // write, so a failed validation leaves no partial state.
   // =========================================================================
+
+  // Step 1: resolve + validate the NetworkVersion.
   let networkVersionId: string
   if (input.networkVersionId) {
     // Explicit version — validate it belongs to this network + tenant and is published.
     // The compound `network: { id, tenantId }` filter enforces both the
-    // cross-network and cross-tenant constraints in a single round-trip.
+    // cross-network and cross-tenant constraints in a single lookup.
     const version = await db.networkVersion.findFirst({
       where: {
         id: input.networkVersionId,
@@ -117,6 +114,52 @@ export async function createBuyerProgram(tenantId: string, input: CreateBuyerPro
     networkVersionId = network.currentVersionId
   }
 
+  // Step 2: validate the reward rule belongs to the SAME NetworkVersion.
+  // The reward rule directly determines economic settlement — it MUST be
+  // version-closed with the program. A V12 program using a V13 reward rule
+  // would mix policies from two immutable versions, exactly the split we
+  // eliminated for baselines and verification.
+  const rule = await db.rewardRule.findFirst({
+    where: {
+      id: input.rewardRuleId,
+      tenantId,
+      networkVersionId,
+    },
+  })
+  if (!rule) {
+    throw new ValidationError(
+      `Reward rule ${input.rewardRuleId} does not belong to network version ${networkVersionId} ` +
+        `in this tenant. A buyer program's reward rule must be version-closed with its NetworkVersion.`,
+    )
+  }
+
+  // Step 3: for energy_vpp networks, require an accepted baseline policy on
+  // the bound version. A version without an accepted baseline policy cannot
+  // produce a valid settlement (no persisted strategy → BASELINE_UNAVAILABLE
+  // at execution time). Rejecting at program creation surfaces the
+  // misconfiguration early, rather than letting every dispatch fail at runtime.
+  //
+  // This removes the silent hardcoded-default fallback: an old or
+  // incompletely configured version can no longer execute using the
+  // source-code default 'weekday_weekend_average' baseline.
+  if (network.vertical === 'energy_vpp') {
+    const policy = await getBaselinePolicyStatus(networkVersionId)
+    if (!policy.hasPolicy) {
+      throw new ValidationError(
+        `Network version ${networkVersionId} has no persisted baseline policy. ` +
+          `An energy_vpp buyer program requires a version with an accepted baseline policy ` +
+          `(run runAndPersistBaselineEvaluation before binding a program).`,
+      )
+    }
+    if (policy.status !== 'accepted' || !policy.selectedStrategy) {
+      throw new ValidationError(
+        `Network version ${networkVersionId} baseline policy status is '${policy.status}' ` +
+          `(selectedStrategy: ${policy.selectedStrategy ?? 'null'}). ` +
+          `An energy_vpp buyer program requires a version with status='accepted'.`,
+      )
+    }
+  }
+
   const program = await db.vppBuyerProgram.create({
     data: {
       tenantId,
@@ -139,10 +182,38 @@ export async function createBuyerProgram(tenantId: string, input: CreateBuyerPro
     eventType: 'vpp.program_created',
     resourceType: 'vpp_buyer_program',
     resourceId: program.id,
-    metadata: { name: program.name, networkId: input.networkId },
+    metadata: { name: program.name, networkId: input.networkId, networkVersionId },
   })
 
   return program
+}
+
+/**
+ * Inspect a NetworkVersion's persisted baseline policy and return its status.
+ * Returns null when no policy is persisted.
+ *
+ * Used by createBuyerProgram to enforce the strict-baseline rule for
+ * energy_vpp networks: a version without an accepted baseline policy cannot
+ * host a buyer program.
+ */
+async function getBaselinePolicyStatus(networkVersionId: string): Promise<{
+  hasPolicy: boolean
+  status: string | null
+  selectedStrategy: string | null
+}> {
+  const version = await db.networkVersion.findUnique({
+    where: { id: networkVersionId },
+    select: { baselinePolicyJson: true },
+  })
+  if (!version?.baselinePolicyJson) {
+    return { hasPolicy: false, status: null, selectedStrategy: null }
+  }
+  const policy = JSON.parse(version.baselinePolicyJson)
+  return {
+    hasPolicy: true,
+    status: policy.status ?? null,
+    selectedStrategy: policy.selectedStrategy ?? null,
+  }
 }
 
 export async function listBuyerPrograms(tenantId: string) {
@@ -616,20 +687,30 @@ export async function executeDispatchAssignment(
     //
     // A dispatch created under V12 always uses V12's policy, even after V13
     // is published and becomes current.
+    //
+    // STRICT POLICY (VPP-2C final correctness fix): there is NO hardcoded
+    // fallback. A version without an accepted persisted baseline policy
+    // cannot execute. createBuyerProgram enforces this for new programs; this
+    // block is the defend-in-depth check for any program that pre-dates the
+    // strict rule or was created via direct DB access. Such a program gets
+    // BASELINE_UNAVAILABLE and enters RECONCILIATION_REQUIRED — it never
+    // silently uses a source-code default baseline.
     const versionForPolicy = programVersion
 
-    let strategyName: string
-    if (versionForPolicy.baselinePolicyJson) {
-      const policy = JSON.parse(versionForPolicy.baselinePolicyJson)
-      if (policy.status !== 'accepted' || !policy.selectedStrategy) {
-        throw new Error(`BASELINE_UNAVAILABLE: baseline policy status is '${policy.status}'`)
-      }
-      strategyName = policy.selectedStrategy
-    } else {
-      // No policy persisted on this version — use default.
-      // This allows backward compatibility with versions created before VPP-2C.
-      strategyName = 'weekday_weekend_average'
+    if (!versionForPolicy.baselinePolicyJson) {
+      throw new Error(
+        `BASELINE_UNAVAILABLE: network version ${versionForPolicy.id} (v${versionForPolicy.version}) ` +
+          `has no persisted baseline policy. No hardcoded fallback is permitted.`,
+      )
     }
+    const policy = JSON.parse(versionForPolicy.baselinePolicyJson)
+    if (policy.status !== 'accepted' || !policy.selectedStrategy) {
+      throw new Error(
+        `BASELINE_UNAVAILABLE: network version ${versionForPolicy.id} (v${versionForPolicy.version}) ` +
+          `baseline policy status is '${policy.status}' (no accepted strategy).`,
+      )
+    }
+    const strategyName: string = policy.selectedStrategy
 
     const baselineStrategy = getStrategy(strategyName)
     if (!baselineStrategy) {
