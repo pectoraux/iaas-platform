@@ -984,9 +984,16 @@ async function maybeFinalizeDispatch(
   // errors (DB failure, serialization conflict, invalid data, unsupported
   // measurement) PROPAGATE to the caller. The dispatch stays in
   // delivery_complete/reconciliation_required until evaluation succeeds.
+  //
+  // RACE FIX: We check the evaluationOutcome — only 'final' and
+  // 'already_final' mean the commitment has a final result. If the
+  // outcome is 'already_evaluating' (another evaluator holds the claim)
+  // or 'pending' (assignments not all terminal — shouldn't happen here
+  // but defensive), we do NOT mark the dispatch completed.
+  let evaluationResult: { evaluationOutcome: string } | null = null
   try {
     const { evaluatePortfolioCommitment } = await import('./portfolio-commitment.service')
-    await evaluatePortfolioCommitment(tenantId, dispatchId, actorId)
+    evaluationResult = await evaluatePortfolioCommitment(tenantId, dispatchId, actorId)
   } catch (err) {
     // Only ignore NotFoundError — it means this dispatch predates VPP-2D-4
     // and has no portfolio commitment. Everything else propagates.
@@ -996,9 +1003,13 @@ async function maybeFinalizeDispatch(
     throw err
   }
 
-  // Portfolio evaluation succeeded. If there are no reconciliation_required
-  // assignments, the dispatch is fully completed.
-  if (reconciliationCount === 0) {
+  // Only advance to economic 'completed' when the evaluation produced (or
+  // already had) a FINAL commitment status. If another evaluator is still
+  // processing (already_evaluating) or assignments aren't all terminal
+  // (pending), leave the dispatch in delivery_complete/reconciliation_required.
+  const isFinal = evaluationResult?.evaluationOutcome === 'final' || evaluationResult?.evaluationOutcome === 'already_final'
+
+  if (isFinal && reconciliationCount === 0) {
     await db.vppDispatch.updateMany({
       where: { id: dispatchId, status: 'delivery_complete' },
       data: { status: 'completed' },

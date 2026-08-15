@@ -103,10 +103,26 @@ export interface PortfolioFulfillmentResult {
     performanceKwh: number
     status: string
   }>
+  /**
+   * The evaluation outcome — tells the caller whether this invocation
+   * produced a final result, or whether another evaluator is processing
+   * (or assignments aren't all terminal yet).
+   *
+   *   final              — this call produced a final commitment status
+   *                        (fulfilled|partial|failed). The dispatch can
+   *                        advance to economic completion.
+   *   already_final       — the commitment was already in a final state
+   *                        from a prior evaluation. Idempotent — no
+   *                        duplicate audit was emitted.
+   *   already_evaluating  — another evaluator holds the claim. The
+   *                        commitment is in 'evaluating' status. The
+   *                        caller must NOT mark the dispatch completed.
+   *   pending             — not all assignments are terminal yet, or
+   *                        the claim was lost. The caller must NOT mark
+   *                        the dispatch completed.
+   */
+  evaluationOutcome: 'final' | 'already_final' | 'already_evaluating' | 'pending'
 }
-
-// ---------------------------------------------------------------------------
-// Create a portfolio commitment (idempotent, atomic with reservations)
 // ---------------------------------------------------------------------------
 
 /**
@@ -284,6 +300,7 @@ export async function evaluatePortfolioCommitment(
       completedAssignments: assignments.filter((a) => a.status === 'completed').length,
       failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
       perAsset: [],
+      evaluationOutcome: 'pending',
     }
   }
 
@@ -318,6 +335,7 @@ export async function evaluatePortfolioCommitment(
       completedAssignments: assignments.filter((a) => a.status === 'completed').length,
       failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
       perAsset: [],
+      evaluationOutcome: 'already_final',
     }
   }
 
@@ -351,6 +369,7 @@ export async function evaluatePortfolioCommitment(
       completedAssignments: assignments.filter((a) => a.status === 'completed').length,
       failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
       perAsset: [],
+      evaluationOutcome: 'already_evaluating',
     }
   }
 
@@ -484,6 +503,7 @@ export async function evaluatePortfolioCommitment(
     completedAssignments: assignments.filter((a) => a.status === 'completed').length,
     failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
     perAsset: aggregate.perAsset,
+    evaluationOutcome: 'final',
   }
   } catch (evalErr) {
     // Evaluation failed — revert evaluating → pending so the next caller
