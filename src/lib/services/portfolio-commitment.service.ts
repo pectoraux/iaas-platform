@@ -517,36 +517,44 @@ export async function evaluatePortfolioCommitment(
     evaluationOutcome: 'final',
   }
   } catch (evalErr) {
-    // Evaluation failed — revert evaluating → pending so a retry can occur.
-    // The error PROPAGATES (it is not swallowed).
-    await db.vppPortfolioCommitment.updateMany({
-      where: { id: commitment.id, status: 'evaluating' },
-      data: { status: 'pending' },
-    }).catch(() => {}) // best-effort revert; the error itself is what matters
-
-    // LIVENESS FIX (VPP-2D-4): emit an outbox event so a worker can retry
-    // the evaluation. Without this, if the winning evaluator fails and no
-    // other assignment transition occurs, the commitment stays stuck in
-    // 'pending' with no automatic retry. The outbox event ensures the
-    // evaluation is retried by the worker, independent of assignment
-    // lifecycle events.
+    // Evaluation failed — revert evaluating → pending AND emit the retry
+    // event in ONE transaction. This ensures the state transition and the
+    // outbox event are atomically coupled: if the transaction commits, both
+    // the revert and the retry event exist; if it rolls back, the commitment
+    // stays in 'evaluating' (recoverable via the fallback sweep worker).
+    //
+    // The error PROPAGATES (it is not swallowed) — the caller knows the
+    // evaluation failed. The outbox event ensures a worker will retry.
+    const reason = evalErr instanceof Error ? evalErr.message : 'Evaluation failed'
     try {
       const { emit, DomainEventTypes } = await import('@/lib/domain/events')
-      await emit({
-        event_type: DomainEventTypes.PortfolioEvaluationRetryRequested,
-        aggregate_id: commitment.id,
-        tenant_id: tenantId,
-        version: 1,
-        payload: {
-          dispatchId,
-          commitmentId: commitment.id,
-          reason: evalErr instanceof Error ? evalErr.message : 'Evaluation failed',
-        },
+      await db.$transaction(async (tx) => {
+        // Revert evaluating → pending inside the transaction.
+        await tx.vppPortfolioCommitment.updateMany({
+          where: { id: commitment.id, status: 'evaluating' },
+          data: { status: 'pending' },
+        })
+        // Emit the retry event in the SAME transaction.
+        await emit(
+          {
+            event_type: DomainEventTypes.PortfolioEvaluationRetryRequested,
+            aggregate_id: commitment.id,
+            tenant_id: tenantId,
+            version: 1,
+            payload: {
+              dispatchId,
+              commitmentId: commitment.id,
+              reason,
+            },
+          },
+          tx,
+        )
       })
     } catch {
-      // If the outbox emit fails, the error from the evaluation itself
-      // still propagates. The caller can retry manually. The outbox is
-      // a best-effort liveness mechanism, not a safety requirement.
+      // If the transaction itself fails (DB unavailable), the commitment
+      // may remain in 'evaluating'. The fallback sweep worker
+      // (recoverStuckPortfolioEvaluations) will eventually reclaim it.
+      // The original evaluation error still propagates.
     }
 
     throw evalErr

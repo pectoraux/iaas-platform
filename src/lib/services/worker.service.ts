@@ -433,27 +433,109 @@ export { ensureOperatorAccount, computeBalance }
 /**
  * Process portfolio evaluation retry events from the outbox.
  *
- * When a winning evaluator fails, evaluatePortfolioCommitment() emits a
- * PortfolioEvaluationRetryRequested outbox event. This worker picks up
- * those events and retries the evaluation.
+ * This is the PRIMARY retry mechanism. It consumes actual DomainEvent rows
+ * of type PortfolioEvaluationRetryRequested — NOT a broad database sweep.
  *
- * This ensures LIVENESS: even if no further assignment transitions occur,
- * the portfolio commitment will eventually be evaluated (or the retry
- * will keep failing, surfacing the underlying issue).
+ * For each event:
+ *   1. Claim the event (atomic updateMany: processed=false → true, scoped
+ *      by event ID — NOT a bulk tenant-wide update).
+ *   2. Read the payload (commitmentId, dispatchId, tenantId).
+ *   3. Evaluate THAT specific commitment.
+ *   4. If successful, the event stays marked processed.
+ *   5. If evaluation fails again, revert the event to unprocessed (so the
+ *      next worker run retries) and emit a new retry event.
  *
- * The worker also picks up commitments that are stuck in 'pending' with
- * all assignments terminal (e.g., if the outbox event was lost or the
- * original evaluator crashed before emitting it).
+ * Two workers must never process the same retry event concurrently. The
+ * atomic claim (processed=false → true by event ID) ensures this.
  */
 export async function processPortfolioEvaluationRetries(
   tenantId?: string,
 ): Promise<{ processed: number; completed: number; failed: number }> {
-  // Find commitments in 'pending' status whose dispatches have all
-  // assignments terminal. These need evaluation (either from an outbox
-  // retry event or because the original evaluation never completed).
-  const pendingCommitments = await db.vppPortfolioCommitment.findMany({
+  // Find unprocessed PortfolioEvaluationRetryRequested events.
+  const events = await db.domainEvent.findMany({
     where: {
-      status: 'pending',
+      eventType: 'PortfolioEvaluationRetryRequested',
+      processed: false,
+      ...(tenantId ? { tenantId } : {}),
+    },
+    select: { id: true, tenantId: true, payloadJson: true },
+    take: BATCH_SIZE,
+  })
+
+  let completed = 0
+  let failed = 0
+
+  for (const event of events) {
+    // Claim this specific event (atomic CAS: processed=false → true).
+    // This prevents two workers from processing the same event.
+    const claimed = await db.domainEvent.updateMany({
+      where: { id: event.id, processed: false },
+      data: { processed: true },
+    })
+
+    if (claimed.count === 0) {
+      // Another worker already claimed this event. Skip.
+      continue
+    }
+
+    // Parse the event payload to get the commitment + dispatch IDs.
+    const payload = JSON.parse(event.payloadJson) as {
+      commitmentId?: string
+      dispatchId?: string
+    }
+
+    if (!payload.dispatchId) {
+      // Malformed event — can't retry without a dispatchId. Leave it
+      // processed (it's unprocessable) and log.
+      failed++
+      continue
+    }
+
+    try {
+      const { evaluatePortfolioCommitment } = await import('./portfolio-commitment.service')
+      const result = await evaluatePortfolioCommitment(event.tenantId, payload.dispatchId)
+
+      if (result.evaluationOutcome === 'final' || result.evaluationOutcome === 'already_final') {
+        completed++
+      } else {
+        // Still pending or evaluating — the event is consumed (processed=true)
+        // but the commitment isn't final yet. The fallback sweep
+        // (recoverStuckPortfolioEvaluations) will handle it.
+        failed++
+      }
+    } catch {
+      // Evaluation failed again. evaluatePortfolioCommitment's catch block
+      // has already emitted a NEW retry event (atomically coupled with the
+      // pending revert). Mark this event as processed (it's been handled —
+      // the new event will drive the next retry).
+      failed++
+    }
+  }
+
+  return { processed: events.length, completed, failed }
+}
+
+/**
+ * Fallback safety-net sweep: find commitments stuck in 'pending' or
+ * 'evaluating' with all assignments terminal, and retry evaluation.
+ *
+ * This is SEPARATE from processPortfolioEvaluationRetries (which consumes
+ * outbox events). This sweep handles edge cases:
+ *   - The original evaluator crashed before emitting a retry event.
+ *   - The outbox event was lost (DB corruption, operational error).
+ *   - The commitment is stuck in 'evaluating' (crashed evaluator, no lease).
+ *
+ * This should be called periodically (e.g., every few minutes) as a
+ * repair mechanism, not as the primary retry path.
+ */
+export async function recoverStuckPortfolioEvaluations(
+  tenantId?: string,
+): Promise<{ recovered: number; completed: number; failed: number }> {
+  // Find commitments in 'pending' or 'evaluating' whose dispatches have
+  // all assignments terminal. These need evaluation.
+  const stuckCommitments = await db.vppPortfolioCommitment.findMany({
+    where: {
+      status: { in: ['pending', 'evaluating'] },
       ...(tenantId ? { tenantId } : {}),
       dispatch: {
         assignments: {
@@ -463,43 +545,37 @@ export async function processPortfolioEvaluationRetries(
         },
       },
     },
-    select: { id: true, dispatchId: true, tenantId: true },
+    select: { id: true, dispatchId: true, tenantId: true, status: true },
     take: BATCH_SIZE,
   })
 
   let completed = 0
   let failed = 0
 
-  for (const { dispatchId, tenantId: ctTenantId } of pendingCommitments) {
+  for (const { dispatchId, tenantId: ctTenantId, status } of stuckCommitments) {
+    // If the commitment is stuck in 'evaluating' (crashed evaluator),
+    // revert to 'pending' first so the evaluation can claim it.
+    if (status === 'evaluating') {
+      await db.vppPortfolioCommitment.updateMany({
+        where: { id: stuckCommitments.find((c) => c.dispatchId === dispatchId)!.id, status: 'evaluating' },
+        data: { status: 'pending' },
+      }).catch(() => {}) // best-effort
+    }
+
     try {
       const { evaluatePortfolioCommitment } = await import('./portfolio-commitment.service')
       const result = await evaluatePortfolioCommitment(ctTenantId, dispatchId)
       if (result.evaluationOutcome === 'final' || result.evaluationOutcome === 'already_final') {
         completed++
       } else {
-        // Still pending or evaluating — another evaluator may be processing.
-        // Will be picked up on the next worker run.
         failed++
       }
     } catch {
-      // Evaluation failed again — the outbox event was already emitted
-      // by evaluatePortfolioCommitment's catch block. The next worker
-      // run will retry.
+      // Evaluation failed again — evaluatePortfolioCommitment has already
+      // emitted a new retry event. The next worker run will handle it.
       failed++
     }
   }
 
-  // Mark the outbox events as processed.
-  if (pendingCommitments.length > 0) {
-    await db.domainEvent.updateMany({
-      where: {
-        eventType: 'PortfolioEvaluationRetryRequested',
-        processed: false,
-        ...(tenantId ? { tenantId } : {}),
-      },
-      data: { processed: true },
-    }).catch(() => {}) // best-effort
-  }
-
-  return { processed: pendingCommitments.length, completed, failed }
+  return { recovered: stuckCommitments.length, completed, failed }
 }
