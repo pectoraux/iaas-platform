@@ -129,6 +129,7 @@ model NetworkVersion {
   events         Event[]
   contributions  Contribution[]
   baselineEvaluations BaselineEvaluation[]
+  vppPrograms    VppBuyerProgram[]
 
   @@unique([networkId, version])
   @@index([networkId])
@@ -906,32 +907,33 @@ model VppBuyerProgram {
   id              String   @id @default(cuid())
   tenantId        String
   networkId       String
+  // Bind to the concrete NetworkVersion under which this program was created.
+  // The baseline policy, verification policy, and reward rules are resolved
+  // from THIS version — never from network.currentVersionId at execution time.
+  networkVersionId String
   name            String
   description     String?
   status          String   @default("active") // active | paused | ended
-  // The reward rule to use for contributions under this program.
-  // References the generic RewardRule (which is versioned via NetworkVersion).
   rewardRuleId    String
-  // Dispatch window: when can discharge be requested?
-  dispatchWindowStart String // e.g. "16:00" (hour:minute, local)
-  dispatchWindowEnd   String // e.g. "21:00"
-  // Pricing
-  pricePerKwh     String   // decimal as string
+  dispatchWindowStart String
+  dispatchWindowEnd   String
+  pricePerKwh     String
   currency        String   @default("USD")
-  // Capacity
-  minCapacityKw   String   // decimal as string — minimum total capacity required
-  maxCapacityKw   String?  // decimal as string — optional cap
+  minCapacityKw   String
+  maxCapacityKw   String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   tenant        Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   network       NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
+  networkVersion NetworkVersion   @relation(fields: [networkVersionId], references: [id])
   rewardRule    RewardRule        @relation(fields: [rewardRuleId], references: [id])
   reservations  VppCapacityReservation[]
   dispatches    VppDispatch[]
 
   @@index([tenantId])
   @@index([networkId])
+  @@index([networkVersionId])
 }
 
 /// An operator commits capacity from their assets to a buyer program.

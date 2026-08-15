@@ -11,6 +11,7 @@
 // =============================================================================
 
 import { db } from '@/lib/db'
+import { createHash } from 'crypto'
 import { DERHistorySimulator } from './der-simulator.service'
 import {
   evaluateAllBaselines,
@@ -81,45 +82,51 @@ export async function runAndPersistBaselineEvaluation(
   const selection = selectBaselineStrategy(allEvals, criteria)
 
   // Create a deterministic scenario hash for reproducibility.
-  const scenarioDatasetHash = JSON.stringify(scenarioParams).split('').reduce((h, c) => {
-    return ((h << 5) - h + c.charCodeAt(0)) | 0
-  }, 0).toString(16)
+  // Hash includes simulator version + canonical scenario params so different
+  // simulator implementations with same params produce different hashes.
+  const canonicalInput = JSON.stringify({ simulatorVersion: SIMULATOR_VERSION, scenarios: scenarioParams })
+  const scenarioDatasetHash = createHash('sha256').update(canonicalInput).digest('hex').substring(0, 16)
 
   const evaluationId = `eval-${Date.now()}`
+  const policyJson = JSON.stringify(selection.policy)
 
-  // Persist the evaluation record.
-  const evaluation = await db.baselineEvaluation.create({
-    data: {
-      tenantId: input.tenantId,
-      networkVersionId: input.networkVersionId ?? null,
-      evaluationId,
-      simulatorVersion: SIMULATOR_VERSION,
-      engineVersion: ENGINE_VERSION,
-      scenarioDatasetHash,
-      numScenarios: N,
-      criteriaJson: JSON.stringify(criteria),
-      metricsJson: JSON.stringify(selection.allMetrics),
-      selectedStrategy: selection.policy.selectedStrategy || '',
-      status: selection.policy.status,
-    },
-  })
+  // ATOMIC: create evaluation record + update policy in ONE transaction.
+  let evaluationRecordId = ''
+  await db.$transaction(async (tx) => {
+    const evaluation = await tx.baselineEvaluation.create({
+      data: {
+        tenantId: input.tenantId,
+        networkVersionId: input.networkVersionId ?? null,
+        evaluationId,
+        simulatorVersion: SIMULATOR_VERSION,
+        engineVersion: ENGINE_VERSION,
+        scenarioDatasetHash,
+        numScenarios: N,
+        criteriaJson: JSON.stringify(criteria),
+        metricsJson: JSON.stringify(selection.allMetrics),
+        selectedStrategy: selection.policy.selectedStrategy || '',
+        status: selection.policy.status,
+      },
+    })
+    evaluationRecordId = evaluation.id
 
-  // If a networkVersionId was provided, persist the policy on the version.
-  if (input.networkVersionId) {
-    const version = await db.networkVersion.findUnique({ where: { id: input.networkVersionId } })
-    if (version && !version.publishedAt) {
-      // Only set policy on unpublished versions (immutable after publish).
-      await db.networkVersion.update({
-        where: { id: input.networkVersionId },
-        data: { baselinePolicyJson: JSON.stringify(selection.policy) },
-      })
+    // If a networkVersionId was provided, persist the policy on the version
+    // (only if unpublished — immutable after publish).
+    if (input.networkVersionId) {
+      const version = await tx.networkVersion.findUnique({ where: { id: input.networkVersionId } })
+      if (version && !version.publishedAt) {
+        await tx.networkVersion.update({
+          where: { id: input.networkVersionId },
+          data: { baselinePolicyJson: policyJson },
+        })
+      }
     }
-  }
+  })
 
   return {
     evaluationId,
     policy: selection.policy,
-    evaluationRecordId: evaluation.id,
+    evaluationRecordId,
   }
 }
 

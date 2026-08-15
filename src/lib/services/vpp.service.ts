@@ -51,6 +51,7 @@ export interface CreateBuyerProgramInput {
   name: string
   description?: string
   rewardRuleId: string
+  networkVersionId?: string // optional: defaults to network.currentVersionId
   dispatchWindowStart: string
   dispatchWindowEnd: string
   pricePerKwh: string
@@ -65,10 +66,15 @@ export async function createBuyerProgram(tenantId: string, input: CreateBuyerPro
   const rule = await db.rewardRule.findFirst({ where: { id: input.rewardRuleId, tenantId } })
   if (!rule) throw new NotFoundError('reward_rule', input.rewardRuleId)
 
+  // Bind to the concrete NetworkVersion (defaults to current if not specified).
+  const networkVersionId = input.networkVersionId ?? network.currentVersionId
+  if (!networkVersionId) throw new ValidationError('Network has no published version')
+
   const program = await db.vppBuyerProgram.create({
     data: {
       tenantId,
       networkId: input.networkId,
+      networkVersionId,
       name: input.name,
       description: input.description ?? null,
       rewardRuleId: input.rewardRuleId,
@@ -354,7 +360,7 @@ export async function executeDispatchAssignment(
     where: { id: assignmentId, tenantId },
     include: {
       asset: { include: { devices: { include: { credential: true } } } },
-      dispatch: { include: { program: { include: { network: true } } } },
+      dispatch: { include: { program: { include: { network: true, networkVersion: true } } } },
     },
   })
   if (!assignment) throw new NotFoundError('vpp_dispatch_assignment', assignmentId)
@@ -530,15 +536,13 @@ export async function executeDispatchAssignment(
     }
 
     // Resolve the baseline strategy from the PERSISTED NetworkVersion policy.
-    // The baselinePolicyJson is immutable once the version is published.
-    const networkDef = await db.networkDefinition.findUnique({
-      where: { id: assignment.dispatch.program.networkId },
-    })
-    if (!networkDef || !networkDef.currentVersionId) {
-      throw new Error('BASELINE_UNAVAILABLE: network or current version not found')
-    }
+    // CRITICAL: uses dispatch.program.networkVersionId (the version the program
+    // was created under), NOT network.currentVersionId. This ensures historical
+    // reproducibility: a dispatch created under V12 always uses V12's policy,
+    // even after V13 is published.
+    const programVersionId = assignment.dispatch.program.networkVersionId
     const versionForPolicy = await db.networkVersion.findUnique({
-      where: { id: networkDef.currentVersionId },
+      where: { id: programVersionId },
     })
     if (!versionForPolicy) {
       throw new Error('BASELINE_UNAVAILABLE: network version not found')
