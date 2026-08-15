@@ -751,3 +751,32 @@ Stage Summary:
 - Architectural invariant now fully enforced: "Every VPP program must be version-closed — program.networkVersionId = N, rewardRule.networkVersionId = N, all runtime policy resolves from N. No economic calculation may use policy objects belonging to another version."
 - VPP-2C status: version reproducibility ✅, telemetry binding ✅, version authorization ✅, reward-policy closure ✅, strict baseline policy ✅.
 - Ready to FREEZE VPP-2C and proceed to VPP-2D (portfolio-level risk: 100 DERs → individual uncertainty → correlation/availability → safe aggregate commitment).
+
+---
+Task ID: VPP-2C-publication-gate
+Agent: orchestrator
+Task: Enforce the baseline invariant at publishNetworkVersion() — the actual immutable-version boundary — so no energy_vpp version can become published without an accepted baseline policy.
+
+Work Log:
+1. PUBLICATION-READINESS GATE: Added assertPublicationReadiness() to publishNetworkVersion(). For vertical === 'energy_vpp', it requires: baselinePolicyJson exists, policy.status === 'accepted', policy.selectedStrategy non-empty. Throws ValidationError if not met. The check runs before the publish transaction, so a rejected publication leaves no partial state (publishedAt stays null, currentVersionId unchanged).
+2. EXTENSIBLE DESIGN (per reviewer suggestion): assertPublicationReadiness is a switch on vertical with a default no-op. Future verticals (storage/wireless/compute) add their own gates here — proof policy, coverage verification, workload verification respectively. This keeps the publication boundary aligned with the broader Infrastructure-as-a-Network architecture.
+3. DEFENSE-IN-DEPTH NOW COMPLETE across all 4 layers:
+   - Template builder (instantiateTemplate)        ✅ runs eval before publish
+   - Program creation (createBuyerProgram)          ✅ requires accepted policy
+   - Version publication (publishNetworkVersion)    ✅ ← NEW (the key gap)
+   - Runtime execution (executeDispatchAssignment)  ✅ no hardcoded fallback
+4. TEST RESTRUCTURING: vpp-version-binding.test.ts rewritten with 4 describe blocks (14 cases total):
+   - networkVersionId authorization (6, unchanged)
+   - reward rule version-closure (3, unchanged)
+   - publication-readiness gate (4, NEW): no-baseline rejected + version stays unpublished; no_acceptable_strategy rejected + stays unpublished; accepted succeeds + becomes current; instantiateTemplate still works (runs eval internally)
+   - program-level baseline guard (2): defense-in-depth — DB-tamper bypass still rejected by createBuyerProgram; accepted policy accepted
+5. removed the beforeAll networks that previously published versions WITHOUT baseline policies (networkNoPolicy, networkNoAcceptable) — those publish calls would now correctly throw. The rejection cases moved into the publication-readiness describe block as proper publish-level tests.
+6. VERIFICATION: `bun run lint` clean. `tsc --noEmit` introduces ZERO new errors (1 before = 1 after, both the pre-existing bun:test module resolution issue). Dev server: / route HTTP 200 in ~34ms. Templates API compiles network.service.ts (62ms — new assertPublicationReadiness is pure JS, no new imports) cleanly. Agent-browser confirms / renders with no console/page errors.
+7. COMPATIBILITY CHECK: audited all test files that call publishNetworkVersion or instantiateTemplate. vpp-baseline-reproducibility.test.ts (V13 manual policy has status='accepted'), vpp-baseline-persisted.test.ts (runs eval before publish; no_acceptable case stays unpublished), and all instantiateTemplate-based tests (vpp-invariants, vpp, correctness, hardening, pre-vpp) remain compatible with the new gate.
+
+Stage Summary:
+- The claim "no published VPP version can lack an accepted baseline policy" is now TRUE at the platform boundary (publishNetworkVersion), not just at the template/program layers.
+- Publication is the immutable-version boundary — the most important defense layer because after publication the version becomes an immutable policy artifact that every downstream economic calculation resolves against.
+- The publication-readiness gate is extensible per-vertical, ready for storage/wireless/compute when those verticals land.
+- VPP-2C status: ALL GREEN — version reproducibility ✅, telemetry binding ✅, version authorization ✅, reward-policy closure ✅, strict baseline policy (program) ✅, publish-level baseline gate ✅, runtime no-fallback ✅.
+- VPP-2C is now FROZEN. Ready to proceed to VPP-2D (portfolio-level risk: 100 DERs → individual uncertainty → correlation/availability → safe aggregate commitment).
