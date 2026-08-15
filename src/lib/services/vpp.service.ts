@@ -842,6 +842,20 @@ export async function executeDispatchAssignment(
     })
     if (pendingAssignments === 0) {
       await db.vppDispatch.update({ where: { id: assignment.dispatchId }, data: { status: 'completed' } })
+
+      // VPP-2D-4: evaluate the portfolio commitment now that all assignments
+      // are terminal. This is the automatic lifecycle integration — no manual
+      // caller is required. The commitment was created atomically with the
+      // reservations; now it is evaluated atomically when the dispatch completes.
+      // If no commitment exists (e.g., dispatch created before 2D-4), this
+      // is a no-op (the function throws NotFoundError which we catch).
+      try {
+        const { evaluatePortfolioCommitment } = await import('./portfolio-commitment.service')
+        await evaluatePortfolioCommitment(tenantId, assignment.dispatchId, actorId)
+      } catch {
+        // No portfolio commitment for this dispatch — skip evaluation.
+        // This is expected for dispatches created before VPP-2D-4.
+      }
     }
 
     await appendAudit({

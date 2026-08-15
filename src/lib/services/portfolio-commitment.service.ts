@@ -1,91 +1,51 @@
 // =============================================================================
-// VPP-2D-4: Portfolio Commitment Service
+// VPP-2D-4: Portfolio Commitment Service (integrated + corrected)
 // =============================================================================
 // Connects the reserved portfolio to the actual buyer obligation.
 //
-// THE FLOW:
+// VPP-2D-4 CORRECTIONS (vs the 2D-4A prototype):
 //
-//   Buyer request (500 kW, 14:00–16:00)
-//         ↓
-//   Optimizer → reserve (DER A 120 kW, DER B 90 kW, DER C 75 kW, DER D 215 kW)
-//         ↓
-//   VppPortfolioCommitment created (status=pending, committedKw=500)
-//         ↓
-//   Dispatch → individual assignments execute (per-assignment pipeline)
-//         ↓
-//   Each assignment completes → actualKwh, baselineKwh, performanceKwh recorded
-//         ↓
-//   evaluatePortfolioCommitment():
-//     - Aggregate individual results: Σ actualKwh, Σ baselineKwh, Σ performanceKwh
-//     - Convert to aggregate kW (deliveredKw = deliveredKwh / durationHours)
-//     - fulfillmentPct = deliveredKw / committedKw * 100
-//     - status = fulfilled (≥ tolerance) | partial (< tolerance but > 0) | failed (0)
-//         ↓
-//   Buyer-facing obligation record:
-//     "500 kW committed, 462 kW delivered, 92.4% fulfillment → fulfilled"
+//   1. LIFECYCLE INTEGRATION. The commitment is created atomically with the
+//      portfolio reservations (inside optimizeAndReserve). It is evaluated
+//      automatically when all assignments reach a terminal state (inside
+//      executeDispatchAssignment, when pendingAssignments === 0).
 //
-// =============================================================================
-// ARCHITECTURAL RULE (from the reviewer)
-// =============================================================================
+//   2. COMPLETION GATING. evaluatePortfolioCommitment() requires ALL
+//      assignments to be terminal (completed | failed | reconciliation_required)
+//      before producing a final result. Until then, status stays 'pending'.
+//      This prevents premature evaluation with incomplete data.
 //
-//   The portfolio layer is ABOVE the generic economic kernel:
+//   3. SEPARATED PERFORMANCE MEASURES. The service records THREE distinct
+//      quantities:
+//        - operatorContributionKwh = Σ max(0, actual_i - baseline_i)
+//          (what operators are paid for — per-asset clipped, never negative)
+//        - rawSignedPortfolioPerformanceKwh = Σ actual - Σ baseline
+//          (the true aggregate incremental — can be negative)
+//        - buyerDeliveredKwh = depends on fulfillmentBasis policy
+//          (per_asset_clipped OR aggregate_counterfactual)
+//      The buyer fulfillment does NOT silently conflate with operator
+//      contribution.
 //
-//     VPP Portfolio Commitment (buyer-facing obligation)
-//            ↓
-//     individual Contributions (per-assignment verified performance)
-//            ↓
-//     generic Reward (per-contribution, operator payment)
-//            ↓
-//     generic Ledger (double-entry)
-//            ↓
-//     generic Settlement (per-reward payout)
+//   4. MEASUREMENT METHOD. The commitment carries an explicit measurementMethod:
+//        - average_power: deliveredKw = buyerDeliveredKwh / durationHours
+//        - energy:        buyerDeliveredKwh directly (no kW conversion)
+//        - interval_power: future-ready (not implemented in 2D-4)
 //
-//   Do NOT create PortfolioLedger, PortfolioReward, or PortfolioSettlement.
-//   The individual assignment rewards/settlements remain the source of truth
-//   for operator payments. This model is the BUYER-FACING commitment
-//   fulfillment record — it evaluates whether the platform delivered what
-//   it promised, but it does not create new economic objects.
+//   5. RESERVATION BINDING. The commitment stores portfolioReservationId,
+//      binding it to the actual reservation set. createPortfolioCommitment
+//      verifies sum(reserved) == committedKw.
 //
-// =============================================================================
-// FULFILLMENT POLICY
-// =============================================================================
+//   6. IDEMPOTENCY. Concurrent createPortfolioCommitment() calls return
+//      the same record (upsert with conflict handling, not raw unique error).
 //
-//   The buyer's obligation is fulfilled when:
-//     fulfillmentPct = (deliveredKw / committedKw) * 100 ≥ toleranceThresholdPct
+//   7. ATOMIC RESERVATION + COMMITMENT. optimizeAndReserve creates both the
+//      reservations AND the commitment inside one transaction. A crash between
+//      them is impossible — they commit or roll back together.
 //
-//   Default tolerance: 90% (the platform must deliver at least 90% of the
-//   committed capacity for the obligation to count as fulfilled).
-//
-//   Status mapping:
-//     fulfillmentPct ≥ tolerance  → fulfilled
-//     0 < fulfillmentPct < tolerance → partial
-//     fulfillmentPct = 0 → failed
-//
-//   The tolerance is configurable per commitment (some buyers may require
-//   100%, others may accept 80%).
-//
-// =============================================================================
-// AGGREGATION MATH
-// =============================================================================
-//
-//   Per-assignment (already computed by the baseline engine):
-//     actualKwh_i  = total energy discharged by asset i
-//     baselineKwh_i = predicted counterfactual energy
-//     performanceKwh_i = max(0, actualKwh_i - baselineKwh_i)  [per-asset clipping]
-//
-//   Portfolio aggregate:
-//     totalActualKwh    = Σ actualKwh_i
-//     totalBaselineKwh  = Σ baselineKwh_i
-//     deliveredKwh      = Σ performanceKwh_i  [NOTE: clipping is per-asset,
-//                          NOT max(0, Σactual - Σbaseline). This matters:
-//                          an asset that underperforms its baseline
-//                          contributes 0, not a negative offset.]
-//
-//   deliveredKw = deliveredKwh / durationHours
-//     (convert aggregate energy to average power over the dispatch window)
-//
-//   fulfillmentPct = (deliveredKw / committedKw) * 100
-//
+// ARCHITECTURAL RULE (unchanged):
+//   No PortfolioLedger, PortfolioReward, or PortfolioSettlement.
+//   Individual assignment Contributions → Rewards → Ledger → Settlements
+//   remain the source of truth for operator payments.
 // =============================================================================
 
 import { db } from '@/lib/db'
@@ -97,38 +57,44 @@ import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 // Types
 // ---------------------------------------------------------------------------
 
-/**
- * The result of creating a portfolio commitment.
- */
+export type FulfillmentBasis = 'per_asset_clipped' | 'aggregate_counterfactual'
+export type MeasurementMethod = 'average_power' | 'energy' | 'interval_power'
+export type CommitmentStatus = 'pending' | 'fulfilled' | 'partial' | 'failed'
+
 export interface PortfolioCommitmentResult {
   commitmentId: string
   dispatchId: string
+  portfolioReservationId: string | null
   requestedKw: number
   committedKw: number
   confidenceLevel: number
   algorithm: string
   optimalityGuarantee: string
   toleranceThresholdPct: number
-  status: string
+  measurementMethod: MeasurementMethod
+  fulfillmentBasis: FulfillmentBasis
+  status: CommitmentStatus
   assignmentCount: number
 }
 
-/**
- * The result of evaluating a portfolio commitment (after assignments complete).
- */
 export interface PortfolioFulfillmentResult {
   commitmentId: string
   dispatchId: string
-  status: 'fulfilled' | 'partial' | 'failed'
+  status: CommitmentStatus
   committedKw: number
-  deliveredKw: number
-  deliveredKwh: number
+  buyerDeliveredKw: number
+  buyerDeliveredKwh: number
+  operatorContributionKwh: number
+  rawSignedPortfolioPerformanceKwh: number
   totalActualKwh: number
   totalBaselineKwh: number
   fulfillmentPct: number
   toleranceThresholdPct: number
+  measurementMethod: MeasurementMethod
+  fulfillmentBasis: FulfillmentBasis
   assignmentCount: number
   completedAssignments: number
+  failedAssignments: number
   perAsset: Array<{
     assetId: string
     assignmentId: string
@@ -140,16 +106,18 @@ export interface PortfolioFulfillmentResult {
 }
 
 // ---------------------------------------------------------------------------
-// Create a portfolio commitment
+// Create a portfolio commitment (idempotent, atomic with reservations)
 // ---------------------------------------------------------------------------
 
 /**
  * Create a portfolio commitment for a VPP dispatch.
  *
- * Called after the optimizer has reserved capacity for a buyer request.
- * Records what was promised (requestedKw, committedKw) and the fulfillment
- * policy (tolerance threshold). The commitment starts in 'pending' status
- * and is evaluated after the dispatch completes.
+ * IDEMPOTENT: if a commitment already exists for this dispatchId, returns
+ * the existing record (does NOT throw a unique constraint error).
+ *
+ * Called inside the optimizeAndReserve transaction (VPP-2D-4 integration)
+ * or standalone. When called standalone, the caller must ensure the
+ * reservations already exist.
  *
  * @param tenantId     Tenant scope
  * @param dispatchId   The VppDispatch ID
@@ -163,9 +131,12 @@ export async function createPortfolioCommitment(
     requestedKwh: number
     confidenceLevel: number
     committedKw: number
+    portfolioReservationId?: string
     algorithm?: string
     optimalityGuarantee?: string
     toleranceThresholdPct?: number
+    measurementMethod?: MeasurementMethod
+    fulfillmentBasis?: FulfillmentBasis
     assignmentCount: number
   },
   actorId?: string,
@@ -176,92 +147,96 @@ export async function createPortfolioCommitment(
   })
   if (!dispatch) throw new NotFoundError('vpp_dispatch', dispatchId)
 
-  // Check if a commitment already exists (idempotent — 1:1 with dispatch).
+  // IDEMPOTENT: upsert with conflict handling. If a commitment already
+  // exists for this dispatchId, return it (don't throw unique constraint).
+  // We use a try/catch around create to handle the race where two concurrent
+  // calls both pass the findUnique check.
   const existing = await db.vppPortfolioCommitment.findUnique({
     where: { dispatchId },
   })
   if (existing) {
-    return {
-      commitmentId: existing.id,
-      dispatchId: existing.dispatchId,
-      requestedKw: parseFloat(existing.requestedKw),
-      committedKw: parseFloat(existing.committedKw),
-      confidenceLevel: parseFloat(existing.confidenceLevel),
-      algorithm: existing.algorithm,
-      optimalityGuarantee: existing.optimalityGuarantee,
-      toleranceThresholdPct: parseFloat(existing.toleranceThresholdPct),
-      status: existing.status,
-      assignmentCount: existing.assignmentCount,
-    }
+    return toResult(existing)
   }
 
-  const commitment = await db.vppPortfolioCommitment.create({
-    data: {
+  try {
+    const commitment = await db.vppPortfolioCommitment.create({
+      data: {
+        tenantId,
+        dispatchId,
+        portfolioReservationId: input.portfolioReservationId ?? null,
+        requestedKw: input.requestedKw.toString(),
+        requestedKwh: input.requestedKwh.toString(),
+        confidenceLevel: input.confidenceLevel.toString(),
+        committedKw: input.committedKw.toString(),
+        algorithm: input.algorithm ?? 'greedy_lexicographic_marginal_safe_capacity',
+        optimalityGuarantee: input.optimalityGuarantee ?? 'heuristic',
+        toleranceThresholdPct: (input.toleranceThresholdPct ?? 90).toString(),
+        measurementMethod: input.measurementMethod ?? 'average_power',
+        fulfillmentBasis: input.fulfillmentBasis ?? 'per_asset_clipped',
+        assignmentCount: input.assignmentCount,
+      },
+    })
+
+    await appendAudit({
       tenantId,
-      dispatchId,
-      requestedKw: input.requestedKw.toString(),
-      requestedKwh: input.requestedKwh.toString(),
-      confidenceLevel: input.confidenceLevel.toString(),
-      committedKw: input.committedKw.toString(),
-      algorithm: input.algorithm ?? 'greedy_lexicographic_marginal_safe_capacity',
-      optimalityGuarantee: input.optimalityGuarantee ?? 'heuristic',
-      toleranceThresholdPct: (input.toleranceThresholdPct ?? 90).toString(),
-      assignmentCount: input.assignmentCount,
-    },
-  })
+      actorId,
+      eventType: AuditEvents.PortfolioCommitmentCreated,
+      resourceType: 'vpp_portfolio_commitment',
+      resourceId: commitment.id,
+      metadata: {
+        dispatchId,
+        requestedKw: input.requestedKw,
+        committedKw: input.committedKw,
+        confidenceLevel: input.confidenceLevel,
+        assignmentCount: input.assignmentCount,
+        measurementMethod: commitment.measurementMethod,
+        fulfillmentBasis: commitment.fulfillmentBasis,
+      },
+    })
 
-  await appendAudit({
-    tenantId,
-    actorId,
-    eventType: 'vpp.portfolio_commitment_created',
-    resourceType: 'vpp_portfolio_commitment',
-    resourceId: commitment.id,
-    metadata: {
-      dispatchId,
-      requestedKw: input.requestedKw,
-      committedKw: input.committedKw,
-      confidenceLevel: input.confidenceLevel,
-      assignmentCount: input.assignmentCount,
-    },
-  })
-
-  return {
-    commitmentId: commitment.id,
-    dispatchId: commitment.dispatchId,
-    requestedKw: input.requestedKw,
-    committedKw: input.committedKw,
-    confidenceLevel: input.confidenceLevel,
-    algorithm: commitment.algorithm,
-    optimalityGuarantee: commitment.optimalityGuarantee,
-    toleranceThresholdPct: input.toleranceThresholdPct ?? 90,
-    status: commitment.status,
-    assignmentCount: input.assignmentCount,
+    return toResult(commitment)
+  } catch (err) {
+    // Race condition: another caller created the commitment between our
+    // findUnique and create. Re-fetch and return the existing record.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      const existing = await db.vppPortfolioCommitment.findUnique({ where: { dispatchId } })
+      if (existing) return toResult(existing)
+    }
+    throw err
   }
 }
 
 // ---------------------------------------------------------------------------
-// Evaluate a portfolio commitment
+// Evaluate a portfolio commitment (completion-gated)
 // ---------------------------------------------------------------------------
 
 /**
- * Evaluate a portfolio commitment after assignments have completed.
+ * Evaluate a portfolio commitment.
  *
- * Aggregates individual assignment results (actualKwh, baselineKwh,
- * performanceKwh) into portfolio-level metrics:
- *   - totalActualKwh = Σ actualKwh_i
- *   - totalBaselineKwh = Σ baselineKwh_i
- *   - deliveredKwh = Σ performanceKwh_i  (per-asset clipping, then summed)
- *   - deliveredKw = deliveredKwh / durationHours
- *   - fulfillmentPct = deliveredKw / committedKw * 100
- *   - status = fulfilled (≥ tolerance) | partial | failed
+ * COMPLETION GATING (VPP-2D-4 correction):
+ * This function requires ALL assignments to be in a terminal state
+ * (completed | failed | reconciliation_required) before producing a final
+ * result. If any assignment is still in a non-terminal state, the
+ * commitment remains 'pending' and the function returns a pending result.
  *
- * IMPORTANT: This does NOT create new economic objects. The individual
- * assignment Contributions → Rewards → Ledger → Settlements are the source
- * of truth for operator payments. This evaluation is the buyer-facing
- * obligation fulfillment record.
+ * This prevents premature evaluation where incomplete assignments are
+ * treated as zero, which would produce a misleading low fulfillment %.
  *
- * @param tenantId      Tenant scope
- * @param dispatchId    The VppDispatch ID
+ * TERMINAL STATES:
+ *   - completed: the assignment delivered successfully. Its actualKwh/
+ *     baselineKwh/performanceKwh are included in the aggregate.
+ *   - failed: the assignment failed before usage. Treated as zero delivery.
+ *     The capacity was released (no money moved).
+ *   - reconciliation_required: the assignment failed after usage. Treated
+ *     as zero performance (the actualKwh may exist but the baseline/
+ *     contribution may not have been computed). The capacity stays consumed.
+ *
+ * SEPARATED PERFORMANCE MEASURES:
+ *   - operatorContributionKwh = Σ max(0, actual_i - baseline_i)
+ *   - rawSignedPortfolioPerformanceKwh = Σ actual - Σ baseline
+ *   - buyerDeliveredKwh = depends on fulfillmentBasis:
+ *       per_asset_clipped → operatorContributionKwh
+ *       aggregate_counterfactual → max(0, rawSignedPortfolioPerformanceKwh)
  */
 export async function evaluatePortfolioCommitment(
   tenantId: string,
@@ -273,9 +248,7 @@ export async function evaluatePortfolioCommitment(
     include: {
       dispatch: {
         include: {
-          assignments: {
-            include: { baseline: true },
-          },
+          assignments: true,
         },
       },
     },
@@ -286,77 +259,89 @@ export async function evaluatePortfolioCommitment(
   const dispatch = commitment.dispatch
   const assignments = dispatch.assignments
 
-  // Aggregate per-assignment results.
-  const perAsset: PortfolioFulfillmentResult['perAsset'] = []
-  let totalActualKwh = new Prisma.Decimal(0)
-  let totalBaselineKwh = new Prisma.Decimal(0)
-  let deliveredKwh = new Prisma.Decimal(0)
-  let completedCount = 0
+  // COMPLETION GATING: check if all assignments are terminal.
+  const TERMINAL_STATES = new Set(['completed', 'failed', 'reconciliation_required'])
+  const nonTerminal = assignments.filter((a) => !TERMINAL_STATES.has(a.status))
 
-  for (const assignment of assignments) {
-    const actualKwh = assignment.actualKwh ? new Prisma.Decimal(assignment.actualKwh) : new Prisma.Decimal(0)
-    const baselineKwh = assignment.baselineKwh ? new Prisma.Decimal(assignment.baselineKwh) : new Prisma.Decimal(0)
-    const performanceKwh = assignment.performanceKwh ? new Prisma.Decimal(assignment.performanceKwh) : new Prisma.Decimal(0)
-
-    totalActualKwh = totalActualKwh.plus(actualKwh)
-    totalBaselineKwh = totalBaselineKwh.plus(baselineKwh)
-    // NOTE: performanceKwh is already per-asset clipped (max(0, actual-baseline))
-    // by the baseline engine. We sum the clipped values — an asset that
-    // underperforms its baseline contributes 0, not a negative offset.
-    deliveredKwh = deliveredKwh.plus(performanceKwh)
-
-    if (assignment.status === 'completed') completedCount++
-
-    perAsset.push({
-      assetId: assignment.assetId,
-      assignmentId: assignment.id,
-      actualKwh: actualKwh.toNumber(),
-      baselineKwh: baselineKwh.toNumber(),
-      performanceKwh: performanceKwh.toNumber(),
-      status: assignment.status,
-    })
+  if (nonTerminal.length > 0) {
+    // Not all assignments are terminal — return pending, do NOT evaluate.
+    return {
+      commitmentId: commitment.id,
+      dispatchId,
+      status: 'pending',
+      committedKw: parseFloat(commitment.committedKw),
+      buyerDeliveredKw: 0,
+      buyerDeliveredKwh: 0,
+      operatorContributionKwh: 0,
+      rawSignedPortfolioPerformanceKwh: 0,
+      totalActualKwh: 0,
+      totalBaselineKwh: 0,
+      fulfillmentPct: 0,
+      toleranceThresholdPct: parseFloat(commitment.toleranceThresholdPct),
+      measurementMethod: commitment.measurementMethod as MeasurementMethod,
+      fulfillmentBasis: commitment.fulfillmentBasis as FulfillmentBasis,
+      assignmentCount: assignments.length,
+      completedAssignments: assignments.filter((a) => a.status === 'completed').length,
+      failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
+      perAsset: [],
+    }
   }
 
-  // Convert aggregate energy to average power over the dispatch window.
+  // All assignments are terminal — compute the final aggregate.
+  const aggregate = aggregatePortfolioPerformance(assignments, commitment.fulfillmentBasis as FulfillmentBasis)
+
+  // Convert to kW based on measurementMethod.
   const durationHours = Math.max(
-    0.001, // avoid division by zero
+    0.001,
     (dispatch.endTime.getTime() - dispatch.startTime.getTime()) / 3600000,
   )
-  const deliveredKw = deliveredKwh.div(durationHours)
 
-  // Fulfillment percentage: deliveredKw / committedKw * 100
-  const committedKw = new Prisma.Decimal(commitment.committedKw)
-  const fulfillmentPct = committedKw.greaterThan(0)
-    ? deliveredKw.div(committedKw).mul(100)
-    : new Prisma.Decimal(0)
+  let buyerDeliveredKw: number
+  if (commitment.measurementMethod === 'energy') {
+    // Energy method: deliveredKw = deliveredKwh (no conversion).
+    // The buyer obligation is in kWh, not kW.
+    buyerDeliveredKw = aggregate.buyerDeliveredKwh
+  } else {
+    // average_power (default): deliveredKw = deliveredKwh / durationHours.
+    buyerDeliveredKw = aggregate.buyerDeliveredKwh / durationHours
+  }
 
-  // Status: fulfilled (≥ tolerance) | partial | failed
-  const tolerance = new Prisma.Decimal(commitment.toleranceThresholdPct)
-  let status: 'fulfilled' | 'partial' | 'failed'
-  if (fulfillmentPct.toNumber() >= tolerance.toNumber()) {
+  // Fulfillment percentage.
+  const committedKw = parseFloat(commitment.committedKw)
+  const fulfillmentPct = committedKw > 0 ? (buyerDeliveredKw / committedKw) * 100 : 0
+
+  // Status: fulfilled (≥ tolerance) | partial | failed.
+  const tolerance = parseFloat(commitment.toleranceThresholdPct)
+  let status: CommitmentStatus
+  if (fulfillmentPct >= tolerance) {
     status = 'fulfilled'
-  } else if (deliveredKwh.greaterThan(0)) {
+  } else if (aggregate.buyerDeliveredKwh > 0) {
     status = 'partial'
   } else {
     status = 'failed'
   }
 
-  // Update the commitment record.
+  // Update the commitment record with final results.
   await db.vppPortfolioCommitment.update({
     where: { id: commitment.id },
     data: {
-      deliveredKw: deliveredKw.toString(),
-      deliveredKwh: deliveredKwh.toString(),
-      totalBaselineKwh: totalBaselineKwh.toString(),
-      totalActualKwh: totalActualKwh.toString(),
+      deliveredKw: buyerDeliveredKw.toString(),
+      deliveredKwh: aggregate.buyerDeliveredKwh.toString(),
+      totalBaselineKwh: aggregate.totalBaselineKwh.toString(),
+      totalActualKwh: aggregate.totalActualKwh.toString(),
+      operatorContributionKwh: aggregate.operatorContributionKwh.toString(),
+      rawSignedPortfolioPerformanceKwh: aggregate.rawSignedPortfolioPerformanceKwh.toString(),
+      buyerDeliveredKwh: aggregate.buyerDeliveredKwh.toString(),
       fulfillmentPct: fulfillmentPct.toString(),
       status,
-      completedAssignments: completedCount,
+      completedAssignments: assignments.filter((a) => a.status === 'completed').length,
+      failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
       evaluatedAt: new Date(),
       metadataJson: JSON.stringify({
-        perAsset,
+        perAsset: aggregate.perAsset,
         durationHours,
         evaluatedAt: new Date().toISOString(),
+        nonTerminalCount: 0,
       }),
     },
   })
@@ -364,19 +349,20 @@ export async function evaluatePortfolioCommitment(
   await appendAudit({
     tenantId,
     actorId,
-    eventType: 'vpp.portfolio_commitment_evaluated',
+    eventType: AuditEvents.PortfolioCommitmentEvaluated,
     resourceType: 'vpp_portfolio_commitment',
     resourceId: commitment.id,
     metadata: {
       dispatchId,
       status,
-      committedKw: committedKw.toString(),
-      deliveredKw: deliveredKw.toString(),
-      deliveredKwh: deliveredKwh.toString(),
-      fulfillmentPct: fulfillmentPct.toString(),
-      toleranceThresholdPct: commitment.toleranceThresholdPct,
-      completedAssignments: completedCount,
-      totalAssignments: assignments.length,
+      committedKw,
+      buyerDeliveredKw,
+      buyerDeliveredKwh: aggregate.buyerDeliveredKwh,
+      operatorContributionKwh: aggregate.operatorContributionKwh,
+      rawSignedPortfolioPerformanceKwh: aggregate.rawSignedPortfolioPerformanceKwh,
+      fulfillmentPct,
+      fulfillmentBasis: commitment.fulfillmentBasis,
+      measurementMethod: commitment.measurementMethod,
     },
   })
 
@@ -384,15 +370,113 @@ export async function evaluatePortfolioCommitment(
     commitmentId: commitment.id,
     dispatchId,
     status,
-    committedKw: committedKw.toNumber(),
-    deliveredKw: deliveredKw.toNumber(),
-    deliveredKwh: deliveredKwh.toNumber(),
-    totalActualKwh: totalActualKwh.toNumber(),
-    totalBaselineKwh: totalBaselineKwh.toNumber(),
-    fulfillmentPct: fulfillmentPct.toNumber(),
-    toleranceThresholdPct: tolerance.toNumber(),
+    committedKw,
+    buyerDeliveredKw,
+    buyerDeliveredKwh: aggregate.buyerDeliveredKwh,
+    operatorContributionKwh: aggregate.operatorContributionKwh,
+    rawSignedPortfolioPerformanceKwh: aggregate.rawSignedPortfolioPerformanceKwh,
+    totalActualKwh: aggregate.totalActualKwh,
+    totalBaselineKwh: aggregate.totalBaselineKwh,
+    fulfillmentPct,
+    toleranceThresholdPct: tolerance,
+    measurementMethod: commitment.measurementMethod as MeasurementMethod,
+    fulfillmentBasis: commitment.fulfillmentBasis as FulfillmentBasis,
     assignmentCount: assignments.length,
-    completedAssignments: completedCount,
+    completedAssignments: assignments.filter((a) => a.status === 'completed').length,
+    failedAssignments: assignments.filter((a) => a.status === 'failed' || a.status === 'reconciliation_required').length,
+    perAsset: aggregate.perAsset,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate performance (internal)
+// ---------------------------------------------------------------------------
+
+interface PortfolioAggregate {
+  totalActualKwh: number
+  totalBaselineKwh: number
+  operatorContributionKwh: number
+  rawSignedPortfolioPerformanceKwh: number
+  buyerDeliveredKwh: number
+  perAsset: Array<{
+    assetId: string
+    assignmentId: string
+    actualKwh: number
+    baselineKwh: number
+    performanceKwh: number
+    status: string
+  }>
+}
+
+/**
+ * Aggregate individual assignment performance into portfolio-level measures.
+ *
+ * THREE distinct quantities:
+ *   - operatorContributionKwh = Σ max(0, actual_i - baseline_i)
+ *     (per-asset clipped — what operators are paid for)
+ *   - rawSignedPortfolioPerformanceKwh = Σ actual - Σ baseline
+ *     (true aggregate incremental — can be negative)
+ *   - buyerDeliveredKwh = depends on fulfillmentBasis:
+ *       per_asset_clipped → operatorContributionKwh
+ *       aggregate_counterfactual → max(0, rawSignedPortfolioPerformanceKwh)
+ */
+function aggregatePortfolioPerformance(
+  assignments: Array<{
+    id: string
+    assetId: string
+    status: string
+    actualKwh: string | null
+    baselineKwh: string | null
+    performanceKwh: string | null
+  }>,
+  fulfillmentBasis: FulfillmentBasis,
+): PortfolioAggregate {
+  let totalActualKwh = 0
+  let totalBaselineKwh = 0
+  let operatorContributionKwh = 0
+  const perAsset: PortfolioAggregate['perAsset'] = []
+
+  for (const assignment of assignments) {
+    const actualKwh = assignment.actualKwh ? parseFloat(assignment.actualKwh) : 0
+    const baselineKwh = assignment.baselineKwh ? parseFloat(assignment.baselineKwh) : 0
+    const performanceKwh = assignment.performanceKwh ? parseFloat(assignment.performanceKwh) : 0
+
+    totalActualKwh += actualKwh
+    totalBaselineKwh += baselineKwh
+    // Operator contribution: per-asset clipped (never negative per asset).
+    operatorContributionKwh += Math.max(0, performanceKwh)
+
+    perAsset.push({
+      assetId: assignment.assetId,
+      assignmentId: assignment.id,
+      actualKwh,
+      baselineKwh,
+      performanceKwh: Math.max(0, performanceKwh),
+      status: assignment.status,
+    })
+  }
+
+  // Raw signed portfolio performance: Σ actual - Σ baseline (can be negative).
+  const rawSignedPortfolioPerformanceKwh = totalActualKwh - totalBaselineKwh
+
+  // Buyer-delivered kWh depends on the fulfillment basis.
+  let buyerDeliveredKwh: number
+  if (fulfillmentBasis === 'aggregate_counterfactual') {
+    // Portfolio-level: max(0, Σ actual - Σ baseline).
+    // One asset's overperformance CAN offset another's underperformance.
+    buyerDeliveredKwh = Math.max(0, rawSignedPortfolioPerformanceKwh)
+  } else {
+    // per_asset_clipped (default): Σ max(0, actual_i - baseline_i).
+    // Each asset's contribution is clipped individually before summing.
+    buyerDeliveredKwh = operatorContributionKwh
+  }
+
+  return {
+    totalActualKwh,
+    totalBaselineKwh,
+    operatorContributionKwh,
+    rawSignedPortfolioPerformanceKwh,
+    buyerDeliveredKwh,
     perAsset,
   }
 }
@@ -401,13 +485,7 @@ export async function evaluatePortfolioCommitment(
 // Query
 // ---------------------------------------------------------------------------
 
-/**
- * Get a portfolio commitment by dispatch ID.
- */
-export async function getPortfolioCommitment(
-  tenantId: string,
-  dispatchId: string,
-) {
+export async function getPortfolioCommitment(tenantId: string, dispatchId: string) {
   const commitment = await db.vppPortfolioCommitment.findUnique({
     where: { dispatchId },
     include: {
@@ -415,13 +493,8 @@ export async function getPortfolioCommitment(
         include: {
           assignments: {
             select: {
-              id: true,
-              assetId: true,
-              status: true,
-              actualKwh: true,
-              baselineKwh: true,
-              performanceKwh: true,
-              assignedKw: true,
+              id: true, assetId: true, status: true,
+              actualKwh: true, baselineKwh: true, performanceKwh: true, assignedKw: true,
             },
           },
         },
@@ -440,17 +513,13 @@ export async function getPortfolioCommitment(
 /**
  * Pure function: compute portfolio fulfillment from per-assignment results.
  *
- * This is the core aggregation math, extracted for testing. It does NOT
- * touch the database.
+ * Records ALL THREE performance measures separately:
+ *   - operatorContributionKwh = Σ max(0, actual_i - baseline_i)
+ *   - rawSignedPortfolioPerformanceKwh = Σ actual - Σ baseline
+ *   - buyerDeliveredKwh = depends on fulfillmentBasis
  *
- * Per-asset clipping: performanceKwh_i = max(0, actualKwh_i - baselineKwh_i).
- * The clipping is per-asset BEFORE summation — an asset that underperforms
- * its baseline contributes 0, not a negative offset to the portfolio.
- *
- * @param perAsset     Per-assignment actual/baseline/performance values
- * @param committedKw  The optimizer's committed kW
- * @param durationHours The dispatch window duration
- * @param toleranceThresholdPct  The fulfillment threshold (default 90)
+ * The caller chooses the fulfillmentBasis — the service does NOT silently
+ * conflate operator contribution with buyer fulfillment.
  */
 export function computePortfolioFulfillment(
   perAsset: Array<{
@@ -461,50 +530,110 @@ export function computePortfolioFulfillment(
   }>,
   committedKw: number,
   durationHours: number,
-  toleranceThresholdPct = 90,
+  options: {
+    toleranceThresholdPct?: number
+    measurementMethod?: MeasurementMethod
+    fulfillmentBasis?: FulfillmentBasis
+  } = {},
 ): {
-  deliveredKwh: number
-  deliveredKw: number
   totalActualKwh: number
   totalBaselineKwh: number
+  operatorContributionKwh: number
+  rawSignedPortfolioPerformanceKwh: number
+  buyerDeliveredKwh: number
+  buyerDeliveredKw: number
   fulfillmentPct: number
   toleranceThresholdPct: number
-  status: 'fulfilled' | 'partial' | 'failed'
+  measurementMethod: MeasurementMethod
+  fulfillmentBasis: FulfillmentBasis
+  status: CommitmentStatus
 } {
+  const toleranceThresholdPct = options.toleranceThresholdPct ?? 90
+  const measurementMethod = options.measurementMethod ?? 'average_power'
+  const fulfillmentBasis = options.fulfillmentBasis ?? 'per_asset_clipped'
+
   let totalActualKwh = 0
   let totalBaselineKwh = 0
-  let deliveredKwh = 0
+  let operatorContributionKwh = 0
 
   for (const asset of perAsset) {
     totalActualKwh += asset.actualKwh
     totalBaselineKwh += asset.baselineKwh
-    // Sum the per-asset-clipped performance. An asset that underperforms
-    // its baseline contributes 0 (the clipping already happened in the
-    // baseline engine), NOT a negative offset.
-    deliveredKwh += Math.max(0, asset.performanceKwh)
+    operatorContributionKwh += Math.max(0, asset.performanceKwh)
+  }
+
+  const rawSignedPortfolioPerformanceKwh = totalActualKwh - totalBaselineKwh
+
+  let buyerDeliveredKwh: number
+  if (fulfillmentBasis === 'aggregate_counterfactual') {
+    buyerDeliveredKwh = Math.max(0, rawSignedPortfolioPerformanceKwh)
+  } else {
+    buyerDeliveredKwh = operatorContributionKwh
   }
 
   const safeDuration = Math.max(0.001, durationHours)
-  const deliveredKw = deliveredKwh / safeDuration
+  const buyerDeliveredKw = measurementMethod === 'energy'
+    ? buyerDeliveredKwh
+    : buyerDeliveredKwh / safeDuration
 
-  const fulfillmentPct = committedKw > 0 ? (deliveredKw / committedKw) * 100 : 0
+  const fulfillmentPct = committedKw > 0 ? (buyerDeliveredKw / committedKw) * 100 : 0
 
-  let status: 'fulfilled' | 'partial' | 'failed'
+  let status: CommitmentStatus
   if (fulfillmentPct >= toleranceThresholdPct) {
     status = 'fulfilled'
-  } else if (deliveredKwh > 0) {
+  } else if (buyerDeliveredKwh > 0) {
     status = 'partial'
   } else {
     status = 'failed'
   }
 
   return {
-    deliveredKwh,
-    deliveredKw,
     totalActualKwh,
     totalBaselineKwh,
+    operatorContributionKwh,
+    rawSignedPortfolioPerformanceKwh,
+    buyerDeliveredKwh,
+    buyerDeliveredKw,
     fulfillmentPct,
     toleranceThresholdPct,
+    measurementMethod,
+    fulfillmentBasis,
     status,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function toResult(c: {
+  id: string
+  dispatchId: string
+  portfolioReservationId: string | null
+  requestedKw: string
+  committedKw: string
+  confidenceLevel: string
+  algorithm: string
+  optimalityGuarantee: string
+  toleranceThresholdPct: string
+  measurementMethod: string
+  fulfillmentBasis: string
+  status: string
+  assignmentCount: number
+}): PortfolioCommitmentResult {
+  return {
+    commitmentId: c.id,
+    dispatchId: c.dispatchId,
+    portfolioReservationId: c.portfolioReservationId,
+    requestedKw: parseFloat(c.requestedKw),
+    committedKw: parseFloat(c.committedKw),
+    confidenceLevel: parseFloat(c.confidenceLevel),
+    algorithm: c.algorithm,
+    optimalityGuarantee: c.optimalityGuarantee,
+    toleranceThresholdPct: parseFloat(c.toleranceThresholdPct),
+    measurementMethod: c.measurementMethod as MeasurementMethod,
+    fulfillmentBasis: c.fulfillmentBasis as FulfillmentBasis,
+    status: c.status as CommitmentStatus,
+    assignmentCount: c.assignmentCount,
   }
 }

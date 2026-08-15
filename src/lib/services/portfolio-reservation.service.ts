@@ -125,6 +125,14 @@ export interface OptimizeAndReserveInput {
   /** Unique identifier for this buyer request (e.g., buyer program + dispatch ID). */
   portfolioId: string
   actorId?: string
+  /**
+   * Optional: the VppDispatch ID. When provided, the portfolio commitment
+   * (VppPortfolioCommitment) is created atomically with the reservations
+   * inside the same transaction. This ensures the invariant:
+   *   commitment exists ⇔ reservations exist
+   * A crash between reservation and commitment creation is impossible.
+   */
+  dispatchId?: string
 }
 
 /**
@@ -221,7 +229,7 @@ export interface OptimizeAndReserveResult {
 export async function optimizeAndReserve(
   input: OptimizeAndReserveInput,
 ): Promise<OptimizeAndReserveResult> {
-  const { tenantId, networkId, capabilityType, candidates, target, startTime, endTime, portfolioId, actorId } = input
+  const { tenantId, networkId, capabilityType, candidates, target, startTime, endTime, portfolioId, actorId, dispatchId } = input
 
   // Phase 1: Run the optimizer (pure computation, no DB).
   const portfolio = optimizePortfolio(candidates, target)
@@ -283,6 +291,43 @@ export async function optimizeAndReserve(
           allocatedKw: asset.committedKw,
           reservation,
         })
+      }
+
+      // VPP-2D-4: create the portfolio commitment atomically with the
+      // reservations. This ensures the invariant:
+      //   commitment exists ⇔ reservations exist
+      // A crash between reservation and commitment creation is impossible —
+      // they commit or roll back together.
+      if (dispatchId) {
+        // Verify the sum of allocated kW matches the committedKw.
+        const totalAllocated = results.reduce((sum, r) => sum + r.allocatedKw, 0)
+        if (Math.abs(totalAllocated - portfolio.committedKw) > 0.01) {
+          throw new ValidationError(
+            `Portfolio commitment reconciliation failed: sum of allocations (${totalAllocated.toFixed(4)} kW) ` +
+              `!= committedKw (${portfolio.committedKw.toFixed(4)} kW)`,
+          )
+        }
+
+        // Idempotent: check if commitment already exists (e.g., retry).
+        const existing = await tx.vppPortfolioCommitment.findUnique({
+          where: { dispatchId },
+        })
+        if (!existing) {
+          await tx.vppPortfolioCommitment.create({
+            data: {
+              tenantId,
+              dispatchId,
+              portfolioReservationId: portfolioId,
+              requestedKw: target.requestedKw.toString(),
+              requestedKwh: (target.requestedKw * (endTime.getTime() - startTime.getTime()) / 3600000).toString(),
+              confidenceLevel: target.confidenceLevel.toString(),
+              committedKw: portfolio.committedKw.toString(),
+              algorithm: portfolio.algorithm,
+              optimalityGuarantee: 'heuristic',
+              assignmentCount: results.length,
+            },
+          })
+        }
       }
 
       return results
