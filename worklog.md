@@ -1319,3 +1319,19 @@ Stage Summary:
 - The portfolio evaluation is now error-safe (only NotFoundError ignored), state-separated (delivery_complete ≠ completed), and concurrency-safe (atomic pending→evaluating claim, idempotent re-evaluation, no duplicate audits).
 - The dispatch lifecycle is: created → assigned → dispatching → delivery_complete → completed (or → reconciliation_required → completed after financial recovery).
 - VPP-2D-4 is now genuinely integrated with correct lifecycle semantics, error handling, and concurrency safety.
+
+---
+Task ID: VPP-2D-4-race-fix
+Agent: orchestrator
+Task: Fix the critical race where a losing evaluator can prematurely mark the dispatch completed. Add explicit evaluationOutcome type so callers don't infer concurrency from persisted status.
+
+Work Log:
+1. ROOT CAUSE: evaluatePortfolioCommitment() correctly claims pending→evaluating via CAS, but when a second evaluator loses the claim, it returns status=evaluating. maybeFinalizeDispatch() ignored the returned status and marked dispatch=completed whenever reconciliationCount===0 — even if the evaluation wasn't final. This recreated the exact inconsistent state (dispatch=completed, commitment=pending) the previous pass was supposed to eliminate.
+2. EXPLICIT EVALUATION OUTCOME: Added evaluationOutcome field to PortfolioFulfillmentResult: 'final' (this call produced a final result), 'already_final' (idempotent re-evaluation of a prior final result), 'already_evaluating' (another evaluator holds the claim), 'pending' (assignments not all terminal). Each return path in evaluatePortfolioCommitment now carries the correct outcome.
+3. RACE FIX IN maybeFinalizeDispatch: The function now checks evaluationResult.evaluationOutcome before marking the dispatch completed. Only 'final' and 'already_final' allow the dispatch to advance to 'completed'. If the outcome is 'already_evaluating' (another evaluator holds the claim) or 'pending', the dispatch stays in delivery_complete/reconciliation_required.
+4. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (15 before = 15 after — all pre-existing). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The race is eliminated: a losing evaluator can no longer prematurely mark the dispatch completed. The dispatch only reaches 'completed' when the portfolio commitment has a genuinely final status (fulfilled|partial|failed).
+- The explicit evaluationOutcome type means callers don't have to infer concurrency semantics from persisted status — they get a clear signal: final, already_final, already_evaluating, or pending.
+- VPP-2D-4 is now genuinely integrated with correct lifecycle semantics, error handling, concurrency safety, and race-free finalization.
