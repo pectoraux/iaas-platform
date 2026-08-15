@@ -724,3 +724,30 @@ Stage Summary:
 - Historical reproducibility test now asserts event.networkVersionId (not just baseline.strategyName), closing the gap the reviewer identified.
 - The architectural rule the reviewer wanted frozen is now enforced in code: "Every event and every economic calculation associated with a dispatch must resolve against the same immutable NetworkVersion."
 - Ready to freeze NetworkVersion as the immutable policy boundary and proceed to VPP-2D (portfolio-level risk).
+
+---
+Task ID: VPP-2C-version-closed-policy
+Agent: orchestrator
+Task: Fix two final policy-integrity issues — (1) reward rule must be version-closed with the program, (2) remove the hardcoded baseline fallback for VPP (require accepted baselinePolicyJson).
+
+Work Log:
+1. REWARD RULE VERSION-CLOSURE: createBuyerProgram now validates the reward rule with `{ id, tenantId, networkVersionId }` — the rule MUST belong to the exact same NetworkVersion as the program. A V12 program using a V13 reward rule is now rejected at creation. The reward rule directly determines economic settlement, so this closes the last policy-object binding gap.
+2. CORRECTED TERMINOLOGY: The reviewer noted "atomic" was misleading. The validation is now explicitly documented as "validated lookups — NOT a single transaction — but they run before any write, so a failed validation leaves no partial state." (No code change needed; comment correction.)
+3. STRICT BASELINE POLICY (Option B at program creation): For energy_vpp networks, createBuyerProgram now requires the bound NetworkVersion to have an accepted baselinePolicyJson (status='accepted' + selectedStrategy). A version with no policy, or status='no_acceptable_strategy', is rejected at program creation — surfacing misconfiguration early instead of letting every dispatch fail at runtime.
+4. STRICT BASELINE POLICY (Option A at template instantiation): instantiateTemplate now runs runAndPersistBaselineEvaluation (50 scenarios) for energy_vpp templates BEFORE publishNetworkVersion. This makes the immutable-policy architecture strict at the source — no published VPP version can ever lack a baseline strategy. Non-VPP verticals are unaffected.
+5. REMOVED HARDCODED FALLBACK IN EXECUTION: The `else { strategyName = 'weekday_weekend_average' }` branch in executeDispatchAssignment is GONE. Now: no baselinePolicyJson → BASELINE_UNAVAILABLE; status != 'accepted' → BASELINE_UNAVAILABLE. This is the defend-in-depth check for any program that pre-dates the strict rule or was created via direct DB access. Such a program enters RECONCILIATION_REQUIRED — it NEVER silently uses a source-code default baseline.
+6. ADDED getBaselinePolicyStatus() HELPER: Returns {hasPolicy, status, selectedStrategy} for a NetworkVersion. Used by createBuyerProgram's strict-baseline check.
+7. TESTS — vpp-version-binding.test.ts expanded from 6 to 12 cases across 3 describe blocks:
+   - networkVersionId authorization (6 cases, unchanged)
+   - reward rule version-closure (3 cases): same-version accepted, V12-program+V13-rule rejected, cross-tenant rule rejected
+   - strict baseline policy (3 cases): no-policy version rejected, no_acceptable_strategy rejected, accepted policy accepted
+8. SETUP FIX: beforeAll in vpp-version-binding.test.ts now runs runAndPersistBaselineEvaluation on all published VPP versions (A1, A3, B1) so they pass the strict-baseline check. Two new networks added: networkNoPolicy (published, no baseline policy) and networkNoAcceptable (published, status='no_acceptable_strategy').
+9. VERIFICATION: `bun run lint` clean. `tsc --noEmit` introduces ZERO new errors (16 before = 16 after, all pre-existing in reconcileAssignment + baselineEngine namespace + bun:test module resolution). Dev server: / route HTTP 200 in ~31ms. VPP API compiles vpp.service.ts (155ms) cleanly. Templates API compiles network.service.ts (673ms, includes dynamic baseline-evaluation import) cleanly. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- VPP programs are now fully VERSION-CLOSED: program.networkVersionId = rewardRule.networkVersionId = baseline policy version = N. No economic calculation can use policy objects from another version.
+- The hardcoded baseline fallback is eliminated at both boundaries: program creation (option B) and template instantiation (option A). No published VPP version can lack an accepted baseline strategy.
+- The defend-in-depth runtime check ensures even legacy/DB-tampered programs throw BASELINE_UNAVAILABLE rather than silently using a source-code default.
+- Architectural invariant now fully enforced: "Every VPP program must be version-closed — program.networkVersionId = N, rewardRule.networkVersionId = N, all runtime policy resolves from N. No economic calculation may use policy objects belonging to another version."
+- VPP-2C status: version reproducibility ✅, telemetry binding ✅, version authorization ✅, reward-policy closure ✅, strict baseline policy ✅.
+- Ready to FREEZE VPP-2C and proceed to VPP-2D (portfolio-level risk: 100 DERs → individual uncertainty → correlation/availability → safe aggregate commitment).
