@@ -1356,3 +1356,20 @@ Stage Summary:
 - The type model is sound: CommitmentStatus includes all 5 states, no unsound casts.
 - Concurrency regression tests prove the race-fix logic and deterministic computation.
 - VPP-2D-4 is now complete with safety AND liveness.
+
+---
+Task ID: VPP-2D-4-outbox-correctness
+Agent: orchestrator
+Task: Fix the outbox event processing — worker was not consuming actual DomainEvent rows, was bulk-marking all tenant events as processed, and the state transition + event emit were not atomically coupled.
+
+Work Log:
+1. PRIMARY WORK QUEUE (processPortfolioEvaluationRetries): Rewrote to consume actual DomainEvent rows of type PortfolioEvaluationRetryRequested. For each event: (a) claim by event ID (atomic CAS: processed=false→true, scoped to that specific event — NOT a bulk tenant update), (b) parse payload for commitmentId/dispatchId, (c) evaluate THAT specific commitment, (d) if successful, event stays processed; if failed, evaluatePortfolioCommitment's catch block emits a NEW retry event. Two workers cannot process the same event concurrently (the CAS claim ensures this).
+2. ATOMIC COUPLING: The evaluation failure path now does the evaluating→pending revert AND the retry event emit in ONE db.$transaction. If the transaction commits, both the revert and the event exist. If it rolls back (DB unavailable), the commitment stays in 'evaluating' — recoverable via the fallback sweep.
+3. SEPARATE FALLBACK SWEEP (recoverStuckPortfolioEvaluations): Extracted as a separate function that scans for commitments stuck in 'pending' or 'evaluating' with all-terminal assignments. This is a REPAIR mechanism for edge cases (crashed evaluator, lost outbox event, stuck 'evaluating' state) — NOT the primary retry path. It reverts stuck 'evaluating' commitments to 'pending' before retrying.
+4. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (only pre-existing bun:test + vpp.service.ts). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The outbox is now used as an actual reliable queue: each PortfolioEvaluationRetryRequested event is individually claimed, processed, and marked. No bulk tenant-wide acknowledgements.
+- The state transition (evaluating→pending) and the retry event are atomically coupled in one transaction — no orphaned state.
+- The fallback sweep is a separate repair mechanism, not the primary retry path.
+- VPP-2D-4 now has correct outbox semantics, atomic state coupling, and proper event-to-work correspondence.
