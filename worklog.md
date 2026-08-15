@@ -888,3 +888,29 @@ Stage Summary:
 - VPP-2C is FROZEN with the failure-injection test closing the atomicity proof.
 - VPP-2D-1 delivers the portfolio risk engine — the core mathematical answer to "how much capacity can the platform safely promise?" The engine is pure, tested, and captures the key insight: individual DER uncertainty + inter-DER correlation → portfolio VaR → safe committed capacity. Diversification reduces risk for uncorrelated DERs; correlation (common-mode failure) erodes the diversification benefit.
 - NEXT (VPP-2D-2): integrate the risk engine into buyer program creation — when a buyer requests X kW, compute the safe committed capacity from the portfolio of available DERs, persist it, and enforce it at dispatch time. Then VPP-2D-3: portfolio-level settlement (aggregate realized response vs. committed).
+
+---
+Task ID: VPP-2D-1-dimensions-validation
+Agent: orchestrator
+Task: Fix three issues in the portfolio risk engine — (1) kW/kWh dimensional bug, (2) overclaimed confidence guarantee, (3) missing correlation matrix validation.
+
+Work Log:
+
+1. DIMENSIONAL FIX (kW, not kWh): Converted the entire engine to POWER (kW). DerUncertaintyProfile now uses expectedPerformanceKw + stdDevKw. DerContribution uses expectedKw + varianceKw2 + stdDevKw. PortfolioRiskResult + SafeCapacityResult use expectedKw + stdDevKw + committedKw + requestedKw + shortfallKw. This matches the capacity-vs-usage distinction: capacity (what we promise) = kW; usage/performance (what was delivered) = kWh, handled separately by the contribution/settlement layer.
+
+2. kWh→kW CONVERSION in deriveUncertaintyFromEvaluation: μ (kW) = reservedKw (expected power = reserved capacity, NOT reserved*duration). σ (kW) = max(MAE, P95/1.96) / durationHours — converts the energy error (kWh) to a power error (kW) via the dispatch duration. Added test proving longer duration → lower σ in kW (same energy error spread over more hours). Documented as an ENGINEERING ASSUMPTION (μ = reservedKw assumes full delivery) that must be replaced with historical actuals in VPP-2D-2.
+
+3. DISTRIBUTION MODEL LABELING: SafeCapacityResult now carries distributionModel: 'normal_approximation' and normalApproximationSafeCapacity (the raw uncapped value). The JSDoc explicitly states this is a normal approximation, NOT an exact delivery guarantee — the true portfolio distribution is a mixture (availability creates a point mass at 0) with heavier tails, especially under high correlation. Downstream consumers MUST check distributionModel.
+
+4. CORRELATION MATRIX VALIDATION: Added validateCorrelationMatrix() — checks shape (square, correct size), diagonal (= 1.0), symmetry (within epsilon), range (every ρ ∈ [-1,1]), and positive semidefiniteness via Cholesky decomposition. computePortfolioRiskWithMatrix now validates BEFORE computation. Invalid matrices throw ValidationError — the engine NEVER silently clamps negative variance to zero (the wrong failure mode for a risk engine). If variance is somehow negative after PSD validation (should be unreachable), it throws rather than hides the bug.
+
+5. NON-PSD TEST: Added a test with a symmetric, unit-diagonal, in-range matrix that is NOT PSD (eigenvalues ~2.0, ~0.9, ~-0.1). validateCorrelationMatrix rejects it with "not positive semidefinite". computePortfolioRiskWithMatrix also rejects it. This is the key test the reviewer requested.
+
+6. FULL TEST SUITE UPDATE: All 35+ tests converted to kW dimension. The 100-DER scenario now uses 50 kW per DER (E[S] = 4850 kW), requests 4000 kW, asserts committedKw > 2500. Added tests for: distributionModel field, normalApproximationSafeCapacity, negative requestedKw rejection, non-positive durationHours rejection, kWh→kW conversion correctness, longer-duration-lower-σ property.
+
+7. VERIFICATION: `bun run lint` clean. `tsc --noEmit` zero new errors (portfolio-risk.service.ts clean; only test-file error is pre-existing bun:test module resolution). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The portfolio risk engine is now dimensionally correct (kW throughout), honest about its distributional assumptions (normal_approximation label, not "99% guarantee"), and fails closed on invalid correlation matrices (PSD validation via Cholesky).
+- The engine remains PURE (no DB access) — ready for VPP-2D-2 integration once the μ = reservedKw placeholder is replaced with historical actual-dispatch performance.
+- NEXT (VPP-2D-2): portfolio optimizer — not just "compute safe capacity for the whole portfolio" but "which subset of N DERs should we commit to this buyer request while minimizing risk, cost, operator burden, and opportunity cost?" That is the DePIN allocation problem.
