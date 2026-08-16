@@ -558,3 +558,89 @@ describe('Architecture contract: linkContribution write-once (Phase 5.4)', () =>
     expect(content).toMatch(/Cannot link contribution.*already linked/)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Test 9: Phase 6 — Physical execution boundary (AdapterRegistry)
+// ---------------------------------------------------------------------------
+
+describe('Architecture contract: physical execution boundary (Phase 6)', () => {
+  it('VPP service does NOT import or instantiate DERAdapter', () => {
+    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
+    const content = readFileSync(vppServicePath, 'utf-8')
+
+    // VPP must NOT import DERAdapter or SimulatedDERAdapter.
+    expect(content).not.toMatch(/from\s+['"]\.\/der-adapter\.service['"]/)
+    expect(content).not.toMatch(/new SimulatedDERAdapter/)
+    // Must NOT instantiate a DERAdapter.
+    expect(content).not.toMatch(/:\s*DERAdapter\s*=/)
+    // Must NOT call executeDischarge directly.
+    expect(content).not.toMatch(/executeDischarge/)
+  })
+
+  it('VPP service calls runtime.executeAssignment for physical execution', () => {
+    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
+    const content = readFileSync(vppServicePath, 'utf-8')
+
+    // VPP must call runtime.executeAssignment() — physical execution
+    // enters through the runtime, not the vertical.
+    expect(content).toMatch(/runtime\.executeAssignment\(/)
+  })
+
+  it('InfrastructureRuntime has executeAssignment method', () => {
+    const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
+    const content = readFileSync(infraPath, 'utf-8')
+
+    expect(content).toMatch(/async executeAssignment\(/)
+  })
+
+  it('InfrastructureRuntime.executeAssignment resolves adapter via AdapterRegistry', () => {
+    const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
+    const content = readFileSync(infraPath, 'utf-8')
+
+    // The executeAssignment method must call resolveAdapter — not
+    // instantiate a concrete adapter.
+    expect(content).toMatch(/resolveAdapter\(/)
+  })
+
+  it('kernel runtime directory has adapter-registry and adapters-init', () => {
+    const runtimeDir = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime')
+    let entries: string[]
+    try {
+      entries = readdirSync(runtimeDir)
+    } catch {
+      return
+    }
+    expect(entries).toContain('adapter-registry.ts')
+    expect(entries).toContain('adapters-init.ts')
+  })
+
+  it('AdapterRegistry throws on unregistered asset type (no silent fallback)', () => {
+    const registryPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'adapter-registry.ts')
+    const content = readFileSync(registryPath, 'utf-8')
+
+    expect(content).toMatch(/throw new Error\([^)]*No adapter registered/)
+  })
+
+  it('DERAdapter implements the generic InfrastructureAdapter interface', () => {
+    const derAdapterPath = join(process.cwd(), 'src', 'lib', 'services', 'der-adapter.service.ts')
+    const content = readFileSync(derAdapterPath, 'utf-8')
+
+    // SimulatedDERAdapter must implement InfrastructureAdapter.
+    expect(content).toMatch(/class SimulatedDERAdapter implements InfrastructureAdapter/)
+    // Must have the generic execute(command: ExecuteCommand) method.
+    expect(content).toMatch(/async execute\(command:\s*ExecuteCommand\)/)
+  })
+
+  it('InfrastructureRuntime does NOT import VPP baseline or portfolio logic', () => {
+    const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
+    const content = readFileSync(infraPath, 'utf-8')
+
+    // The runtime must NOT import VPP-specific modules.
+    for (const pattern of VPP_IMPORT_PATTERNS) {
+      expect(content.match(pattern)).toBeNull()
+    }
+    // Must NOT reference baseline or portfolio.
+    expect(content).not.toMatch(/baseline/)
+    expect(content).not.toMatch(/portfolio/)
+  })
+})

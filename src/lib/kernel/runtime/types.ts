@@ -96,6 +96,44 @@ export interface RuntimeAssignmentResults {
   eventId?: string
 }
 
+/**
+ * Input for the runtime's physical execution of an assignment.
+ * Phase 6: The vertical provides the asset type (for adapter resolution),
+ * the assigned quantity, and execution parameters.
+ */
+export interface RuntimeExecuteInput {
+  /** The asset to execute on (looked up to determine assetType for adapter resolution). */
+  assetId: string
+  /** The asset type (e.g., 'battery', 'compute_node') — determines the adapter. */
+  assetType: string
+  /** The capability to execute (e.g., 'energy_discharge'). */
+  capabilityType: string
+  /** Assigned quantity (e.g., assignedKwh). */
+  assignedQuantity: string
+  assignedUnit: string
+  /** Duration in seconds. */
+  durationSeconds: number
+  /** Additional vertical-specific parameters (e.g., assignedKw for VPP). */
+  parameters?: Record<string, unknown>
+}
+
+/**
+ * Result of the runtime's physical execution of an assignment.
+ * Phase 6: The vertical takes this result and processes it (sign telemetry,
+ * submit event, verify, compute baseline, etc.).
+ */
+export interface RuntimeExecuteResult {
+  /** Actual output quantity (e.g., actualKwh). */
+  actualQuantity: string
+  actualUnit: string
+  /** Raw telemetry payload from the physical adapter. */
+  telemetryPayload: Record<string, unknown>
+  /** Whether the execution succeeded. */
+  success: boolean
+  /** Error message if failed. */
+  error?: string
+}
+
 // ---------------------------------------------------------------------------
 // NetworkRuntime — the contract all runtimes implement
 // ---------------------------------------------------------------------------
@@ -172,6 +210,35 @@ export interface NetworkRuntime {
     executionAssignmentId: string,
     results: RuntimeAssignmentResults,
   ): Promise<void>
+
+  /**
+   * Execute a physical assignment via the AdapterRegistry.
+   *
+   * Phase 6 — PHYSICAL EXECUTION BOUNDARY:
+   * This is the runtime's ownership of physical execution. It:
+   *   1. Resolves the adapter for the asset via AdapterRegistry
+   *   2. Calls adapter.execute() — commands the physical asset
+   *   3. Acquires the telemetry + actuals from the adapter
+   *   4. Returns the raw result to the vertical
+   *
+   * The vertical (VPP) does NOT import or instantiate the adapter. It calls
+   * this method, gets the raw telemetry + actuals, and then:
+   *   - Signs + submits the telemetry as a generic Event (vertical-specific)
+   *   - Verifies the event (generic pipeline, vertical triggers)
+   *   - Computes baseline (vertical-specific)
+   *   - Calls recordAssignmentResults + completeAssignment
+   *   - Runs the economic pipeline (contribution, reward, settlement)
+   *
+   * The runtime does NOT know about baselines, contributions, or settlements.
+   * It only knows how to execute an asset and acquire telemetry.
+   *
+   * THROWS on physical execution failure (adapter error, asset offline, etc.).
+   * The vertical catches this and calls failAssignment (if before operational
+   * completion) or markReconciliationRequired (if after).
+   */
+  executeAssignment(
+    input: RuntimeExecuteInput,
+  ): Promise<RuntimeExecuteResult>
 
   /**
    * Link a contribution to an assignment AFTER operational completion.

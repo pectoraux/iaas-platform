@@ -76,6 +76,12 @@ export class ProtocolRuntime implements NetworkRuntime {
     throw new ProtocolRuntimeNotImplementedError('beginAssignmentExecution')
   }
 
+  async executeAssignment(
+    _input: import('./types').RuntimeExecuteInput,
+  ): Promise<import('./types').RuntimeExecuteResult> {
+    throw new ProtocolRuntimeNotImplementedError('executeAssignment')
+  }
+
   async recordAssignmentResults(
     _tx: RuntimeClient,
     _executionAssignmentId: string,

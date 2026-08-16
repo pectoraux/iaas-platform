@@ -58,5 +58,6 @@ export function resolveRuntime(kind: RuntimeKind): NetworkRuntime {
 
 // Re-export the registry for testing/diagnostics.
 export { runtimeRegistry }
-export type { NetworkRuntime, RuntimeKind } from './types'
+export type { NetworkRuntime, RuntimeKind, RuntimeExecuteInput, RuntimeExecuteResult } from './types'
 export { RUNTIME_KINDS, validateRuntimeKind, isRuntimeKind } from './types'
+export { resolveAdapter, adapterRegistry } from './adapters-init'

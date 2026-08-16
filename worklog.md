@@ -2072,3 +2072,53 @@ Stage Summary:
 - recordAssignmentResults can no longer set contributionId — the only write path is linkContribution().
 - Single write authority: linkContribution() is the ONLY way to set ExecutionAssignment.contributionId.
 - Phase 5.4 is complete. Phase 5 is now genuinely clean. Phase 6 (InfrastructureRuntime extraction) is ready to begin.
+
+---
+Task ID: Phase-6-Physical-Execution-Boundary
+Agent: orchestrator
+Task: Move the physical execution boundary (DERAdapter) under InfrastructureRuntime. Add AdapterRegistry. VPP must not import or instantiate DERAdapter. The runtime owns adapter resolution + physical execute + telemetry acquisition. VPP retains baseline, portfolio, verification, contribution/reward/settlement.
+
+Work Log:
+- INFRASTRUCTUREADAPTER INTERFACE (kernel/adapters/infrastructure-adapter.ts): Already existed from Phase 3 — generic interface with discover(), getCapabilities(), readTelemetry(), execute(), health(). The ExecuteCommand and ExecuteResult types provide the generic physical execution contract.
+- SIMULATED DER ADAPTER (services/der-adapter.service.ts): Refactored to implement the generic InfrastructureAdapter interface. The old VPP-specific DERAdapter interface and executeDischarge() method are replaced by the generic execute(command: ExecuteCommand): Promise<ExecuteResult>. The adapter now returns a generic ExecuteResult (actualQuantity, actualUnit, telemetry.payload, success) instead of VPP-specific DERDischargeResult. The adapter does NOT know about baselines, contributions, or economics — it only produces telemetry.
+- ADAPTER REGISTRY (kernel/runtime/adapter-registry.ts): New AdapterRegistry class — maps asset types to InfrastructureAdapter implementations. registerForAssetTypes() registers an adapter for multiple asset types. resolve(assetType) throws on unregistered type (no silent fallback). Singleton adapterRegistry.
+- ADAPTERS-INIT (kernel/runtime/adapters-init.ts): Initialization module that registers the SimulatedDERAdapter for energy asset types (battery, solar_inverter, ev_charger, smart_meter). Auto-registers on module load. Exports resolveAdapter(assetType) — the ONLY function the InfrastructureRuntime calls to get an adapter.
+- NETWORK RUNTIME CONTRACT (kernel/runtime/types.ts): Added executeAssignment(input: RuntimeExecuteInput): Promise<RuntimeExecuteResult> to the NetworkRuntime interface. Added RuntimeExecuteInput (assetId, assetType, capabilityType, assignedQuantity/Unit, durationSeconds, parameters) and RuntimeExecuteResult (actualQuantity, actualUnit, telemetryPayload, success, error) types. The contract documentation explicitly states: the runtime owns adapter resolution + physical execute + telemetry acquisition; VPP owns baseline, verification, contribution, economics.
+- INFRASTRUCTURERUNTIME (kernel/runtime/infrastructure-runtime.ts): Implemented executeAssignment():
+  1. Resolves the adapter via resolveAdapter(input.assetType) — throws if unregistered.
+  2. Calls adapter.execute(command) — commands the physical asset.
+  3. Returns RuntimeExecuteResult (telemetry + actuals + success/error).
+  The runtime does NOT sign/submit events, does NOT verify, does NOT compute baseline. It only executes the asset and acquires telemetry.
+- PROTOCOL/HYBRID RUNTIMES: Added executeAssignment stubs that throw NotImplemented.
+- VPP SERVICE REFACTOR (services/vpp.service.ts):
+  - REMOVED: import { SimulatedDERAdapter, type DERAdapter } from './der-adapter.service'
+  - REMOVED: const derAdapter: DERAdapter = new SimulatedDERAdapter()
+  - REMOVED: derAdapter.executeDischarge(...) call
+  - ADDED: runtime.executeAssignment({ assetId, assetType, capabilityType, assignedQuantity, assignedUnit, durationSeconds, parameters }) — physical execution enters through the runtime.
+  - The VPP service takes the executeResult, signs + submits telemetry as Event (VPP-specific: device credential, signing key), verifies it, computes baseline, records results, completes assignment, runs economics.
+  - VPP does NOT import or instantiate DERAdapter. Physical execution is fully owned by the runtime.
+- ARCHITECTURE TESTS (8 new regex tests):
+  - VPP service does NOT import or instantiate DERAdapter
+  - VPP service calls runtime.executeAssignment for physical execution
+  - InfrastructureRuntime has executeAssignment method
+  - InfrastructureRuntime.executeAssignment resolves adapter via AdapterRegistry
+  - kernel runtime directory has adapter-registry and adapters-init
+  - AdapterRegistry throws on unregistered asset type
+  - DERAdapter implements the generic InfrastructureAdapter interface
+  - InfrastructureRuntime does NOT import VPP baseline or portfolio logic
+- ADAPTER RESOLUTION TESTS (5 new in-memory tests):
+  - resolveAdapter returns adapter for energy asset types (battery, solar_inverter, ev_charger, smart_meter)
+  - resolveAdapter throws for unregistered types (compute_node, storage_node)
+  - adapterRegistry has energy asset types registered
+  - InfrastructureRuntime.executeAssignment executes via the adapter (returns telemetry + actuals)
+  - InfrastructureRuntime.executeAssignment throws for unregistered asset type
+- VERIFICATION: bun run lint clean. tsc: 102 errors (all pre-existing, zero new). 70 non-DB tests pass (47 regex architecture + 23 runtime resolution/adapter, 0 fail, 137ms). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The physical execution boundary is now under InfrastructureRuntime:
+  VPP policies → InfrastructureRuntime → AdapterRegistry → InfrastructureAdapter → DER → Asset
+- VPP does NOT import or instantiate DERAdapter. Physical execution enters through runtime.executeAssignment(), which resolves the adapter via AdapterRegistry.
+- The runtime owns: adapter resolution, physical execute, telemetry acquisition, generic execution lifecycle. VPP owns: baseline, portfolio, verification, contribution/reward/settlement policy.
+- The InfrastructureRuntime does NOT know about baselines, contributions, or portfolios — it only knows how to execute an asset and acquire telemetry.
+- The strongest architectural proof: you can now replace DERAdapter with a completely different infrastructure adapter (ComputeAdapter, StorageAdapter) by registering it in adapters-init.ts — without modifying the generic runtime or the economic kernel.
+- Phase 6 is complete. Phase 7 (AdapterRegistry hardening) and Phase 8 (Compute reference network) are ready to begin.

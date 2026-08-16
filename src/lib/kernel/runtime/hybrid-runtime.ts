@@ -72,6 +72,12 @@ export class HybridRuntime implements NetworkRuntime {
     throw new HybridRuntimeNotImplementedError('beginAssignmentExecution')
   }
 
+  async executeAssignment(
+    _input: import('./types').RuntimeExecuteInput,
+  ): Promise<import('./types').RuntimeExecuteResult> {
+    throw new HybridRuntimeNotImplementedError('executeAssignment')
+  }
+
   async recordAssignmentResults(
     _tx: RuntimeClient,
     _executionAssignmentId: string,

@@ -18,12 +18,15 @@
 // =============================================================================
 
 import { finalizeExecutionIfTerminal } from '../execution/execution.service'
+import { resolveAdapter } from './adapters-init'
 import type {
   NetworkRuntime,
   RuntimeAssignmentResults,
   RuntimeClient,
   RuntimeCreateAssignmentInput,
   RuntimeCreateExecutionInput,
+  RuntimeExecuteInput,
+  RuntimeExecuteResult,
 } from './types'
 
 // ---------------------------------------------------------------------------
@@ -96,6 +99,44 @@ export class InfrastructureRuntime implements NetworkRuntime {
       where: { id: executionId, status: 'assigned' },
       data: { status: 'executing' },
     })
+  }
+
+  // Phase 6: Physical execution boundary.
+  // The runtime resolves the adapter via AdapterRegistry, calls adapter.execute(),
+  // and returns the raw telemetry + actuals. The vertical processes the result.
+  async executeAssignment(
+    input: RuntimeExecuteInput,
+  ): Promise<RuntimeExecuteResult> {
+    // Resolve the adapter for this asset type via the AdapterRegistry.
+    // Throws if no adapter is registered — no silent fallback.
+    const adapter = resolveAdapter(input.assetType)
+
+    // Execute the physical command via the adapter.
+    const result = await adapter.execute({
+      assetId: input.assetId,
+      capabilityType: input.capabilityType,
+      assignedQuantity: input.assignedQuantity,
+      assignedUnit: input.assignedUnit,
+      durationSeconds: input.durationSeconds,
+      parameters: input.parameters,
+    })
+
+    if (!result.success) {
+      return {
+        actualQuantity: '0',
+        actualUnit: input.assignedUnit,
+        telemetryPayload: {},
+        success: false,
+        error: result.error ?? 'Unknown adapter execution failure',
+      }
+    }
+
+    return {
+      actualQuantity: result.actualQuantity,
+      actualUnit: result.actualUnit,
+      telemetryPayload: result.telemetry.payload,
+      success: true,
+    }
   }
 
   async recordAssignmentResults(

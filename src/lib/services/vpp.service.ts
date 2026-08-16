@@ -38,18 +38,18 @@ import {
   releaseCommitment,
   findReservationBySource,
 } from './capacity.service'
-import { SimulatedDERAdapter, type DERAdapter } from './der-adapter.service'
 
 // VPP-4: Generic execution model — VPP wraps the kernel's Execution/ExecutionAssignment.
 // VPP-5: VPP enters through the NetworkRuntime (resolved via RuntimeRegistry).
 //        The vertical NEVER touches Execution records directly — it goes
 //        through the runtime, which owns the generic execution lifecycle.
+// VPP-6: VPP does NOT import or instantiate DERAdapter. Physical execution
+//        enters through runtime.executeAssignment(), which resolves the adapter
+//        via the AdapterRegistry.
 import {
   resolveRuntime,
   type RuntimeKind,
 } from '@/lib/kernel/runtime'
-
-const derAdapter: DERAdapter = new SimulatedDERAdapter()
 
 // ---------------------------------------------------------------------------
 // Buyer Programs
@@ -652,18 +652,35 @@ export async function executeDispatchAssignment(
       throw new ValidationError(`Asset ${assignment.assetId} has no active device with credential`)
     }
 
-    // --- DER adapter (can throw on network/hardware errors) ---
+    // =========================================================================
+    // PHASE 6: Physical execution via the InfrastructureRuntime.
+    // The runtime resolves the adapter via AdapterRegistry and calls
+    // adapter.execute(). VPP does NOT import or instantiate DERAdapter.
+    // The runtime owns: adapter resolution, physical execute, telemetry
+    // acquisition. VPP owns: baseline, verification, contribution, economics.
+    // =========================================================================
     const durationSeconds = Math.floor(
       (assignment.dispatch.endTime.getTime() - assignment.dispatch.startTime.getTime()) / 1000,
     )
-    const dischargeResult = await derAdapter.executeDischarge({
-      assignedKw: assignment.assignedKw,
-      assignedKwh: assignment.assignedKwh,
+    const executeResult = await runtime.executeAssignment({
+      assetId: assignment.assetId,
+      assetType: assignment.asset.assetType,
       capabilityType: assignment.capabilityType,
+      assignedQuantity: assignment.assignedKwh,
+      assignedUnit: 'kWh',
       durationSeconds,
+      parameters: { assignedKw: assignment.assignedKw },
     })
 
-    // Sign + submit telemetry as a generic Event.
+    if (!executeResult.success) {
+      throw new Error(`Physical execution failed: ${executeResult.error}`)
+    }
+
+    const actualKwh = new Prisma.Decimal(executeResult.actualQuantity)
+
+    // Sign + submit telemetry as a generic Event (VPP-specific: device
+    // credential, signing key). The runtime acquired the raw telemetry;
+    // VPP processes it into the generic Event pipeline.
     const eventId = `vpp-dispatch-${assignmentId}-${Date.now()}`
     const timestamp = new Date().toISOString()
     const sequence = Math.floor(Date.now() / 1000)
@@ -673,7 +690,7 @@ export async function executeDispatchAssignment(
       timestamp,
       event_type: 'telemetry',
       sequence,
-      payload: dischargeResult.telemetry.payload,
+      payload: executeResult.telemetryPayload,
     })
     const signingKey = deriveSigningKey(provisioningSecret)
     const signature = signMessage(message, signingKey)
@@ -715,7 +732,7 @@ export async function executeDispatchAssignment(
       timestamp,
       event_type: 'telemetry',
       sequence,
-      payload: dischargeResult.telemetry.payload,
+      payload: executeResult.telemetryPayload,
       signature,
       // SAME immutable version used for baseline/reward/contribution below.
       network_version_id: programVersion.id,
@@ -739,7 +756,7 @@ export async function executeDispatchAssignment(
     // FIX: Uses BaselineContext (production input) — NEVER ground truth.
     // FIX: Resolves strategy from persisted policy (not hardcoded).
     // FIX: Prevents negative performance payments: max(0, actual - baseline).
-    const actualKwh = new Prisma.Decimal(dischargeResult.actualKwh)
+    // Phase 6: actualKwh comes from runtime.executeAssignment() (set above).
 
     const { SimulatedHistoricalTelemetryProvider } = await import('./historical-telemetry-provider.service')
     const baselineEngine = await import('./baseline-engine.service')
@@ -839,7 +856,7 @@ export async function executeDispatchAssignment(
         method: baselinePrediction.method,
         baselineKw: '0',
         baselineKwh: baselineKwh.toString(),
-        actualKw: dischargeResult.actualKw,
+        actualKw: String(executeResult.telemetryPayload.power_kw ?? executeResult.actualQuantity),
         actualKwh: actualKwh.toString(),
         performanceKwh: verifiedPerformanceKwh.toString(),
         metadataJson: JSON.stringify({

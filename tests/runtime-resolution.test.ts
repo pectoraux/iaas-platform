@@ -19,6 +19,8 @@ import { describe, it, expect } from 'bun:test'
 import {
   resolveRuntime,
   runtimeRegistry,
+  resolveAdapter,
+  adapterRegistry,
   RUNTIME_KINDS,
   validateRuntimeKind,
   isRuntimeKind,
@@ -191,9 +193,73 @@ describe('Phase 5: InfrastructureRuntime contract completeness', () => {
     expect(typeof runtime.linkExecutionSource).toBe('function')
     expect(typeof runtime.createExecutionAssignment).toBe('function')
     expect(typeof runtime.beginAssignmentExecution).toBe('function')
+    expect(typeof runtime.executeAssignment).toBe('function')
     expect(typeof runtime.recordAssignmentResults).toBe('function')
+    expect(typeof runtime.linkContribution).toBe('function')
     expect(typeof runtime.completeAssignment).toBe('function')
     expect(typeof runtime.failAssignment).toBe('function')
     expect(typeof runtime.finalizeIfTerminal).toBe('function')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Test 7: Phase 6 — Adapter resolution
+// ---------------------------------------------------------------------------
+
+describe('Phase 6: adapter resolution', () => {
+  it('resolveAdapter returns an adapter for energy asset types', () => {
+    // The DER adapter is registered for battery, solar_inverter, ev_charger, smart_meter.
+    for (const assetType of ['battery', 'solar_inverter', 'ev_charger', 'smart_meter']) {
+      const adapter = resolveAdapter(assetType)
+      expect(adapter).toBeDefined()
+      expect(adapter.adapterType).toBe('simulated_der')
+    }
+  })
+
+  it('resolveAdapter throws for unregistered asset types', () => {
+    expect(() => resolveAdapter('compute_node')).toThrow(/No adapter registered/)
+    expect(() => resolveAdapter('storage_node')).toThrow(/No adapter registered/)
+    expect(() => resolveAdapter('')).toThrow(/No adapter registered/)
+  })
+
+  it('adapterRegistry has energy asset types registered', () => {
+    const types = adapterRegistry.registeredAssetTypes()
+    expect(types).toContain('battery')
+    expect(types).toContain('solar_inverter')
+    expect(types).toContain('ev_charger')
+    expect(types).toContain('smart_meter')
+  })
+
+  it('InfrastructureRuntime.executeAssignment executes via the adapter', async () => {
+    const runtime = new InfrastructureRuntime()
+    const result = await runtime.executeAssignment({
+      assetId: 'test-asset',
+      assetType: 'battery',
+      capabilityType: 'energy_discharge',
+      assignedQuantity: '10',
+      assignedUnit: 'kWh',
+      durationSeconds: 3600,
+      parameters: { assignedKw: '5' },
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.actualQuantity).toBeTruthy()
+    expect(result.actualUnit).toBe('kWh')
+    expect(result.telemetryPayload).toBeDefined()
+    expect(result.telemetryPayload.power_kw).toBeDefined()
+  })
+
+  it('InfrastructureRuntime.executeAssignment throws for unregistered asset type', async () => {
+    const runtime = new InfrastructureRuntime()
+    await expect(
+      runtime.executeAssignment({
+        assetId: 'test-asset',
+        assetType: 'compute_node',
+        capabilityType: 'gpu_compute',
+        assignedQuantity: '10',
+        assignedUnit: 'GPU',
+        durationSeconds: 3600,
+      }),
+    ).rejects.toThrow(/No adapter registered/)
   })
 })
