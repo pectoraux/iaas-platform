@@ -163,3 +163,60 @@ describe('Architecture contract: non-energy reference', () => {
     expect(content).toMatch(/generic-resource-network/)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Test 4: VPP-Execution structural invariant (Phase 4.2)
+// ---------------------------------------------------------------------------
+
+describe('Architecture contract: VPP-Execution invariant', () => {
+  it('VppDispatch has executionId @unique FK to Execution', () => {
+    const schemaPath = join(process.cwd(), 'prisma', 'schema.prisma')
+    const content = readFileSync(schemaPath, 'utf-8')
+
+    // VppDispatch must have executionId as a unique FK.
+    expect(content).toMatch(/executionId\s+String\s+@unique/)
+    expect(content).toMatch(/execution\s+Execution\s+@relation/)
+  })
+
+  it('VppDispatchAssignment has executionAssignmentId @unique FK to ExecutionAssignment', () => {
+    const schemaPath = join(process.cwd(), 'prisma', 'schema.prisma')
+    const content = readFileSync(schemaPath, 'utf-8')
+
+    expect(content).toMatch(/executionAssignmentId\s+String\s+@unique/)
+    expect(content).toMatch(/executionAssignment\s+ExecutionAssignment\s+@relation/)
+  })
+
+  it('VPP service uses executionAssignmentId directly (no findFirst ambiguity)', () => {
+    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
+    const content = readFileSync(vppServicePath, 'utf-8')
+
+    // The VPP service should reference executionAssignmentId directly.
+    expect(content).toMatch(/assignment\.executionAssignmentId/)
+    // Should NOT use findFirst with executionId + assetId (the old ambiguous pattern).
+    expect(content).not.toMatch(/findFirst.*executionId.*assetId/)
+  })
+
+  it('VPP service finalizes generic Execution via kernel function', () => {
+    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
+    const content = readFileSync(vppServicePath, 'utf-8')
+
+    // The VPP service should call finalizeExecutionIfTerminal.
+    expect(content).toMatch(/finalizeExecutionIfTerminal/)
+  })
+
+  it('VPP service synchronizes failure states to generic ExecutionAssignment', () => {
+    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
+    const content = readFileSync(vppServicePath, 'utf-8')
+
+    // The failAssignment function should update ExecutionAssignment → failed.
+    // Look for the pattern inside the failure handler.
+    expect(content).toMatch(/executionAssignment.*update.*status.*failed/)
+  })
+
+  it('kernel execution service has finalizeExecutionIfTerminal', () => {
+    const execServicePath = join(process.cwd(), 'src', 'lib', 'kernel', 'execution', 'execution.service.ts')
+    const content = readFileSync(execServicePath, 'utf-8')
+
+    expect(content).toMatch(/export async function finalizeExecutionIfTerminal/)
+  })
+})

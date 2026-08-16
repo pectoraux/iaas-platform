@@ -43,6 +43,7 @@ import { SimulatedDERAdapter, type DERAdapter } from './der-adapter.service'
 // VPP-4: Generic execution model — VPP wraps the kernel's Execution/ExecutionAssignment.
 import {
   updateAssignmentResults as updateGenericAssignmentResults,
+  finalizeExecutionIfTerminal,
 } from '@/lib/kernel/execution/execution.service'
 
 const derAdapter: DERAdapter = new SimulatedDERAdapter()
@@ -576,16 +577,34 @@ export async function executeDispatchAssignment(
 
   // Pre-usage failure: release capacity (no irreversible action has occurred).
   const failAssignment = async () => {
-    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
+    await db.$transaction(async (tx) => {
+      await tx.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
+      // VPP-4.2: Synchronize generic ExecutionAssignment → failed (atomic).
+      await tx.executionAssignment.update({
+        where: { id: assignment.executionAssignmentId },
+        data: { status: 'failed' },
+      })
+    })
     await releaseAssignmentCapacity()
   }
 
   // Post-usage failure: capacity is CONSUMED, money may have moved.
   // Do NOT release. Enter reconciliation state for retry.
   const markReconciliationRequired = async (reason: string) => {
-    await db.vppDispatchAssignment.update({
-      where: { id: assignmentId },
-      data: { status: 'reconciliation_required' },
+    await db.$transaction(async (tx) => {
+      await tx.vppDispatchAssignment.update({
+        where: { id: assignmentId },
+        data: { status: 'reconciliation_required' },
+      })
+      // VPP-4.2: Synchronize generic ExecutionAssignment → failed (atomic).
+      // The generic execution layer treats reconciliation_required as 'failed'
+      // for execution purposes — the work did not complete successfully.
+      // The VPP layer retains the richer 'reconciliation_required' state
+      // for financial recovery.
+      await tx.executionAssignment.update({
+        where: { id: assignment.executionAssignmentId },
+        data: { status: 'failed' },
+      })
     })
     await appendAudit({
       tenantId, actorId,
@@ -1035,6 +1054,18 @@ async function maybeFinalizeDispatch(
     // Some assignments are still in progress (assigned | dispatching |
     // reconciling). Do not finalize yet.
     return
+  }
+
+  // VPP-4.2: Finalize the generic Execution now that all assignments are terminal.
+  // The generic Execution lifecycle (created → assigned → executing → completed)
+  // is separate from VPP's richer commercial lifecycle. The Execution is
+  // 'completed' when the work finished, regardless of buyer settlement state.
+  const dispatch = await db.vppDispatch.findUnique({
+    where: { id: dispatchId },
+    select: { executionId: true },
+  })
+  if (dispatch) {
+    await finalizeExecutionIfTerminal(tenantId, dispatch.executionId)
   }
 
   // All assignments are performance-terminal.

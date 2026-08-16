@@ -213,3 +213,83 @@ export async function findExecutionBySource(
   })
   return execution
 }
+
+// ---------------------------------------------------------------------------
+// Finalize execution if all assignments are terminal (Phase 4.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * The set of terminal states for a generic ExecutionAssignment.
+ *
+ * Terminal = the assignment has reached a state where no further execution
+ * work will occur. The execution result (success or failure) is known.
+ *
+ * 'reconciliation_required' is NOT included here — it's an economic recovery
+ * state, not an execution state. The generic execution layer treats
+ * reconciliation_required assignments as 'failed' for execution purposes
+ * (the work did not complete successfully).
+ */
+const EXECUTION_TERMINAL_STATES = ['completed', 'failed'] as const
+
+/**
+ * Check if all assignments of an execution are terminal, and if so,
+ * transition the parent Execution to its final state:
+ *   - All completed → Execution completed
+ *   - Any failed → Execution completed (execution finished, but with failures)
+ *   - Mixed → Execution completed (execution finished)
+ *
+ * The generic Execution lifecycle is: created → assigned → executing → completed
+ * It does NOT track 'failed' as a parent state — an execution with failed
+ * assignments is still 'completed' (the execution happened, some assignments
+ * failed). The VPP layer tracks the richer commercial lifecycle.
+ *
+ * This function is idempotent: if the Execution is already 'completed',
+ * it's a no-op.
+ *
+ * @param tenantId    Tenant scope
+ * @param executionId The Execution ID
+ * @returns The updated Execution status, or null if no transition occurred
+ */
+export async function finalizeExecutionIfTerminal(
+  tenantId: string,
+  executionId: string,
+): Promise<string | null> {
+  const execution = await db.execution.findFirst({
+    where: { id: executionId, tenantId },
+    include: {
+      assignments: { select: { status: true } },
+    },
+  })
+  if (!execution) return null
+
+  // Already in a terminal state — no-op.
+  if (execution.status === 'completed' || execution.status === 'failed') {
+    return execution.status
+  }
+
+  const assignments = execution.assignments
+  if (assignments.length === 0) return null
+
+  // Check if ALL assignments are execution-terminal.
+  // VPP's 'reconciliation_required' maps to 'failed' for execution purposes.
+  const allTerminal = assignments.every((a) => {
+    if (EXECUTION_TERMINAL_STATES.includes(a.status as any)) return true
+    // VPP-specific: reconciliation_required means the execution didn't
+    // complete successfully. Map it to terminal for the generic layer.
+    if (a.status === 'reconciliation_required') return true
+    return false
+  })
+
+  if (!allTerminal) return null
+
+  // All assignments are terminal → finalize the execution.
+  // The generic execution is 'completed' regardless of whether individual
+  // assignments succeeded or failed. The execution *happened*; the
+  // vertical tracks success/failure at its layer.
+  await db.execution.updateMany({
+    where: { id: executionId, status: { notIn: ['completed', 'failed'] } },
+    data: { status: 'completed' },
+  })
+
+  return 'completed'
+}
