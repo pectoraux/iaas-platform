@@ -2122,3 +2122,45 @@ Stage Summary:
 - The InfrastructureRuntime does NOT know about baselines, contributions, or portfolios — it only knows how to execute an asset and acquire telemetry.
 - The strongest architectural proof: you can now replace DERAdapter with a completely different infrastructure adapter (ComputeAdapter, StorageAdapter) by registering it in adapters-init.ts — without modifying the generic runtime or the economic kernel.
 - Phase 6 is complete. Phase 7 (AdapterRegistry hardening) and Phase 8 (Compute reference network) are ready to begin.
+
+---
+Task ID: Phase-6.1-Composition-Root
+Agent: orchestrator
+Task: Fix the dependency direction violation: kernel/runtime/adapters-init.ts imported the concrete VPP adapter (SimulatedDERAdapter). Move concrete adapter registration to the application bootstrap layer. The kernel/runtime must not import any concrete adapter implementation.
+
+Work Log:
+- ROOT CAUSE: adapters-init.ts lived in kernel/runtime/ and imported SimulatedDERAdapter from services/der-adapter.service.ts. This meant the kernel layer had a dependency on a VPP-specific implementation — the exact vertical contamination the frozen architecture prohibits. The kernel knew about energy asset types (battery, solar_inverter, ev_charger, smart_meter).
+- FIX — MOVE REGISTRATION TO BOOTSTRAP:
+  - Deleted src/lib/kernel/runtime/adapters-init.ts.
+  - Created src/lib/bootstrap/adapters.ts — the COMPOSITION ROOT. This is the ONLY file that imports concrete adapter implementations + registers them with the generic AdapterRegistry. It imports: adapterRegistry (from kernel) + SimulatedDERAdapter (from services). It registers the DER adapter for energy asset types.
+  - The bootstrap is a side-effect module — it exports nothing. The act of importing it ensures adapters are registered.
+- GENERIC resolveAdapter IN KERNEL:
+  - Moved resolveAdapter(assetType) to kernel/runtime/adapter-registry.ts. It's a thin wrapper around adapterRegistry.resolve(). It does NOT import any concrete adapter.
+  - InfrastructureRuntime imports resolveAdapter from adapter-registry.ts (generic).
+  - kernel/runtime/index.ts re-exports resolveAdapter + adapterRegistry from adapter-registry.ts.
+- VPP SERVICE:
+  - Added `import '@/lib/bootstrap/adapters'` as a side-effect import. This ensures adapters are registered before any dispatch execution. VPP imports the bootstrap, NOT the concrete adapter.
+  - VPP still does NOT import der-adapter.service.ts. The architecture test confirms this.
+- DEPENDENCY DIRECTION (now correct):
+  - kernel/runtime/adapter-registry.ts → generic AdapterRegistry + resolveAdapter (NO concrete imports)
+  - kernel/runtime/infrastructure-runtime.ts → imports resolveAdapter from adapter-registry (generic)
+  - src/lib/bootstrap/adapters.ts → imports concrete SimulatedDERAdapter + adapterRegistry, registers them (COMPOSITION ROOT)
+  - src/lib/services/vpp.service.ts → imports bootstrap (side-effect) + resolveRuntime from kernel/runtime
+  - No kernel file imports der-adapter.service.ts.
+- ARCHITECTURE TESTS (2 new):
+  - kernel/runtime does NOT import concrete adapter implementations (Phase 6.1) — scans all .ts files in kernel/runtime/ for der-adapter.service, simulated-der.adapter, bootstrap/adapters, or new SimulatedDERAdapter.
+  - bootstrap/adapters.ts imports concrete adapters + registers them — confirms the composition root exists and registers the DER adapter for energy asset types.
+  - Updated the existing "kernel runtime directory has adapter-registry" test to verify adapters-init.ts is DELETED.
+- TEST FIX: runtime-resolution.test.ts now imports '../src/lib/bootstrap/adapters' as a side-effect before running adapter resolution tests (the kernel itself doesn't register adapters).
+- VERIFICATION: bun run lint clean. tsc: 102 errors (all pre-existing, zero new). 72 non-DB tests pass (50 regex architecture + 22 runtime resolution/adapter, 2 new Phase 6.1 regex tests, 0 fail, 134ms). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The dependency direction is now correct:
+  kernel (AdapterRegistry, InfrastructureAdapter interface)
+    ↑
+  bootstrap (registers concrete adapters)
+    ↑
+  vertical adapters (SimulatedDERAdapter, future ComputeAdapter)
+- The kernel/runtime layer NEVER imports concrete adapter implementations. Adding a new vertical (compute, storage) requires registering its adapter in the bootstrap — NOT modifying the kernel.
+- The AdapterRegistry and InfrastructureRuntime remain fully generic. They don't know about energy, batteries, or DERs.
+- Phase 6.1 is complete. Phase 6 is now architecturally closed. Phase 7 (AdapterRegistry hardening) is ready.

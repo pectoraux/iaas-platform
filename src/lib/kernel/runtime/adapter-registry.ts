@@ -87,7 +87,27 @@ export class AdapterRegistry {
 // ---------------------------------------------------------------------------
 
 /**
- * The global AdapterRegistry singleton. Initialized once with the canonical
- * adapters. The InfrastructureRuntime imports this to resolve adapters.
+ * The global AdapterRegistry singleton. Concrete adapters are registered
+ * into this singleton by the application bootstrap layer (NOT by the kernel).
+ *
+ * The kernel/runtime layer NEVER imports concrete adapter implementations.
+ * The composition root (src/lib/bootstrap/) owns registration.
  */
 export const adapterRegistry = new AdapterRegistry()
+
+// ---------------------------------------------------------------------------
+// Resolution helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve an adapter for a given asset type.
+ *
+ * This is a thin wrapper around adapterRegistry.resolve(). It lives in the
+ * kernel (generic) — it does NOT import any concrete adapter. The concrete
+ * adapters are registered by the bootstrap layer.
+ *
+ * THROWS if no adapter is registered for the asset type — no silent fallback.
+ */
+export function resolveAdapter(assetType: string): InfrastructureAdapter {
+  return adapterRegistry.resolve(assetType)
+}

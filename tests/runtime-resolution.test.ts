@@ -16,6 +16,10 @@
  * Run: bun test tests/runtime-resolution.test.ts --timeout 30000
  */
 import { describe, it, expect } from 'bun:test'
+// Import the bootstrap to register concrete adapters before tests run.
+// The kernel/runtime layer itself does NOT import concrete adapters;
+// the bootstrap (composition root) owns registration.
+import '../src/lib/bootstrap/adapters'
 import {
   resolveRuntime,
   runtimeRegistry,

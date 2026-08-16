@@ -602,7 +602,7 @@ describe('Architecture contract: physical execution boundary (Phase 6)', () => {
     expect(content).toMatch(/resolveAdapter\(/)
   })
 
-  it('kernel runtime directory has adapter-registry and adapters-init', () => {
+  it('kernel runtime directory has adapter-registry (generic, no concrete imports)', () => {
     const runtimeDir = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime')
     let entries: string[]
     try {
@@ -611,7 +611,9 @@ describe('Architecture contract: physical execution boundary (Phase 6)', () => {
       return
     }
     expect(entries).toContain('adapter-registry.ts')
-    expect(entries).toContain('adapters-init.ts')
+    // Phase 6.1: adapters-init.ts is DELETED — concrete adapter registration
+    // moved to the bootstrap layer (src/lib/bootstrap/adapters.ts).
+    expect(entries).not.toContain('adapters-init.ts')
   })
 
   it('AdapterRegistry throws on unregistered asset type (no silent fallback)', () => {
@@ -642,5 +644,49 @@ describe('Architecture contract: physical execution boundary (Phase 6)', () => {
     // Must NOT reference baseline or portfolio.
     expect(content).not.toMatch(/baseline/)
     expect(content).not.toMatch(/portfolio/)
+  })
+
+  it('kernel/runtime does NOT import concrete adapter implementations (Phase 6.1)', () => {
+    // Phase 6.1: The kernel/runtime layer must NOT import any concrete
+    // adapter implementation. Concrete adapters are registered by the
+    // bootstrap layer (src/lib/bootstrap/), not by the kernel.
+    const runtimeDir = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime')
+    let entries: string[]
+    try {
+      entries = readdirSync(runtimeDir)
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith('.ts')) continue
+      const filePath = join(runtimeDir, entry)
+      const content = readFileSync(filePath, 'utf-8')
+
+      // Must NOT import der-adapter.service or any concrete adapter.
+      expect(content).not.toMatch(/from\s+['"].*der-adapter\.service['"]/)
+      expect(content).not.toMatch(/from\s+['"].*simulated-der\.adapter['"]/)
+      // Must NOT import the bootstrap (which registers concrete adapters).
+      expect(content).not.toMatch(/from\s+['"].*bootstrap\/adapters['"]/)
+      // Must NOT instantiate SimulatedDERAdapter.
+      expect(content).not.toMatch(/new SimulatedDERAdapter/)
+    }
+  })
+
+  it('bootstrap/adapters.ts imports concrete adapters + registers them', () => {
+    const bootstrapPath = join(process.cwd(), 'src', 'lib', 'bootstrap', 'adapters.ts')
+    let content: string
+    try {
+      content = readFileSync(bootstrapPath, 'utf-8')
+    } catch {
+      return
+    }
+
+    // The bootstrap MUST import the concrete adapter + the generic registry.
+    expect(content).toMatch(/from\s+['"]@\/lib\/services\/der-adapter\.service['"]/)
+    expect(content).toMatch(/from\s+['"]@\/lib\/kernel\/runtime\/adapter-registry['"]/)
+    // Must register the adapter for energy asset types.
+    expect(content).toMatch(/registerForAssetTypes/)
+    expect(content).toMatch(/battery/)
+    expect(content).toMatch(/solar_inverter/)
   })
 })

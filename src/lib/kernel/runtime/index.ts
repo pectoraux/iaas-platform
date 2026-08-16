@@ -60,4 +60,4 @@ export function resolveRuntime(kind: RuntimeKind): NetworkRuntime {
 export { runtimeRegistry }
 export type { NetworkRuntime, RuntimeKind, RuntimeExecuteInput, RuntimeExecuteResult } from './types'
 export { RUNTIME_KINDS, validateRuntimeKind, isRuntimeKind } from './types'
-export { resolveAdapter, adapterRegistry } from './adapters-init'
+export { resolveAdapter, adapterRegistry } from './adapter-registry'

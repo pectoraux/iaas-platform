@@ -18,7 +18,7 @@
 // =============================================================================
 
 import { finalizeExecutionIfTerminal } from '../execution/execution.service'
-import { resolveAdapter } from './adapters-init'
+import { resolveAdapter } from './adapter-registry'
 import type {
   NetworkRuntime,
   RuntimeAssignmentResults,
