@@ -84,6 +84,14 @@ export class ProtocolRuntime implements NetworkRuntime {
     throw new ProtocolRuntimeNotImplementedError('recordAssignmentResults')
   }
 
+  async linkContribution(
+    _tx: RuntimeClient,
+    _executionAssignmentId: string,
+    _contributionId: string,
+  ): Promise<void> {
+    throw new ProtocolRuntimeNotImplementedError('linkContribution')
+  }
+
   async completeAssignment(
     _tx: RuntimeClient,
     _tenantId: string,

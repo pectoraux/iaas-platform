@@ -346,3 +346,79 @@ describe('Architecture contract: runtime boundary (Phase 5)', () => {
     expect(hybridContent).toMatch(/HybridRuntimeNotImplementedError/)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Test 6: Phase 5.2 — Execution/economics separation
+// ---------------------------------------------------------------------------
+
+describe('Architecture contract: execution/economics separation (Phase 5.2)', () => {
+  it('InfrastructureRuntime.failAssignment uses CAS (only fails if not already completed)', () => {
+    const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
+    const content = readFileSync(infraPath, 'utf-8')
+
+    // The failAssignment method must use updateMany with a CAS condition
+    // (status: { not: 'completed' }) — operational completion is irreversible.
+    expect(content).toMatch(/failAssignment[\s\S]*updateMany[\s\S]*status:\s*\{\s*not:\s*'completed'\s*\}/)
+  })
+
+  it('InfrastructureRuntime has linkContribution method', () => {
+    const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
+    const content = readFileSync(infraPath, 'utf-8')
+
+    expect(content).toMatch(/async linkContribution\(/)
+  })
+
+  it('VPP completeAssignment is called BEFORE createContribution (operational completion before economics)', () => {
+    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
+    const content = readFileSync(vppServicePath, 'utf-8')
+
+    // Find the position of runtime.completeAssignment and createContribution.
+    // completeAssignment must appear BEFORE createContribution in the
+    // executeDispatchAssignment function — operational completion happens
+    // before the economic pipeline.
+    const completeIdx = content.indexOf('runtime.completeAssignment(tx,')
+    const contributionIdx = content.indexOf('createContribution(')
+
+    expect(completeIdx).toBeGreaterThan(-1)
+    expect(contributionIdx).toBeGreaterThan(-1)
+    expect(completeIdx).toBeLessThan(contributionIdx)
+  })
+
+  it('VPP markReconciliationRequired checks operationalCompleted before calling runtime.failAssignment', () => {
+    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
+    const content = readFileSync(vppServicePath, 'utf-8')
+
+    // The markReconciliationRequired function must check operationalCompleted
+    // before calling runtime.failAssignment. If operationalCompleted is true,
+    // the generic assignment is already completed and must NOT be failed.
+    expect(content).toMatch(/if\s*\(\s*!operationalCompleted\s*\)\s*\{[\s\S]*runtime\.failAssignment/)
+  })
+
+  it('VPP success path does NOT call runtime.completeAssignment (generic already completed)', () => {
+    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
+    const content = readFileSync(vppServicePath, 'utf-8')
+
+    // The VPP success completion (after settlement) must NOT call
+    // runtime.completeAssignment — the generic was already completed during
+    // operational completion. The success path only updates VPP-specific state.
+    //
+    // Find the "VPP COMPLETED" section and verify it does not contain
+    // runtime.completeAssignment.
+    const vppCompletedIdx = content.indexOf('VPP COMPLETED')
+    expect(vppCompletedIdx).toBeGreaterThan(-1)
+
+    // Find the next runtime.completeAssignment after the operational completion
+    // (which is the legitimate one). There should be only ONE call total.
+    const completeCalls = content.match(/runtime\.completeAssignment\(tx,/g)
+    expect(completeCalls).not.toBeNull()
+    expect(completeCalls!.length).toBe(1) // only the operational completion call
+  })
+
+  it('VPP tracks operationalCompleted flag', () => {
+    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
+    const content = readFileSync(vppServicePath, 'utf-8')
+
+    expect(content).toMatch(/let operationalCompleted = false/)
+    expect(content).toMatch(/operationalCompleted = true/)
+  })
+})

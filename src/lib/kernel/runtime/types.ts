@@ -154,8 +154,13 @@ export interface NetworkRuntime {
 
   /**
    * Record verified results on an assignment (actuals, verified quantity,
-   * links to Event/Contribution). Called after the vertical has verified
-   * the execution output.
+   * links to Event). Called after the vertical has verified the execution
+   * output — this is OPERATIONAL completion, not economic completion.
+   *
+   * Phase 5.2: The contributionId is NOT set here. It is set later via
+   * linkContribution() after the vertical creates its economic contribution.
+   * This separates operational results (actuals, verified quantity) from
+   * economic links (contribution).
    */
   recordAssignmentResults(
     tx: RuntimeClient,
@@ -164,10 +169,37 @@ export interface NetworkRuntime {
   ): Promise<void>
 
   /**
+   * Link a contribution to an assignment AFTER operational completion.
+   * Called by the vertical after it has created its economic contribution
+   * (which depends on the verified results). This is an economic link,
+   * not an operational one — the assignment is already completed by this
+   * point.
+   */
+  linkContribution(
+    tx: RuntimeClient,
+    executionAssignmentId: string,
+    contributionId: string,
+  ): Promise<void>
+
+  /**
    * Complete an assignment: transition ExecutionAssignment → 'completed' and
    * atomically finalize the parent Execution if all assignments are terminal.
-   * Called when the vertical has finished all economic processing (reward,
-   * ledger, settlement) for this assignment.
+   *
+   * Phase 5.2 — EXECUTION/ECONOMICS SEPARATION:
+   * This is called after OPERATIONAL execution + verification, NOT after
+   * economic settlement. The generic Execution answers "did the work
+   * execute?" — it does NOT wait for reward/ledger/settlement. Those are
+   * VPP-specific economic obligations that continue AFTER the generic
+   * assignment is completed.
+   *
+   *   physical execution → telemetry → verification → baseline
+   *       → recordAssignmentResults → completeAssignment  ← HERE
+   *       → (generic Execution is now completed)
+   *       → contribution → reward → ledger → settlement  ← economic, separate
+   *
+   * If settlement fails AFTER this point, the generic assignment STAYS
+   * completed. The VPP layer enters 'reconciliation_required' for economic
+   * recovery, but the generic execution layer is not affected.
    */
   completeAssignment(
     tx: RuntimeClient,
@@ -179,8 +211,15 @@ export interface NetworkRuntime {
   /**
    * Fail an assignment: transition ExecutionAssignment → 'failed' and
    * atomically finalize the parent Execution if all assignments are terminal.
-   * Called when the vertical encounters a pre-usage failure (no irreversible
-   * action has occurred).
+   *
+   * Phase 5.2: This is only called for OPERATIONAL failures (physical
+   * execution failed, or verification failed before operational completion).
+   * It must NOT be called for economic failures (settlement failure) after
+   * the assignment is already completed.
+   *
+   * CAS GUARANTEE: If the assignment is already 'completed', this is a
+   * no-op — operational completion is irreversible. A settlement failure
+   * cannot change a completed assignment to failed.
    */
   failAssignment(
     tx: RuntimeClient,

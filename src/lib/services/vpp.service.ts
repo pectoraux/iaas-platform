@@ -604,29 +604,47 @@ export async function executeDispatchAssignment(
 
   // Post-usage failure: capacity is CONSUMED, money may have moved.
   // Do NOT release. Enter reconciliation state for retry.
+  //
+  // Phase 5.2 — EXECUTION/ECONOMICS SEPARATION:
+  // If operationalCompleted is true (the generic assignment is already
+  // completed), this is an ECONOMIC failure (e.g., settlement failed after
+  // verification). The generic assignment STAYS completed — the execution
+  // succeeded. Only the VPP layer enters reconciliation_required.
+  //
+  // If operationalCompleted is false (operational failure after usage, e.g.,
+  // baseline computation failed), the generic assignment IS failed — the
+  // work could not be verified. VPP enters reconciliation_required because
+  // capacity is consumed.
   const markReconciliationRequired = async (reason: string) => {
     await db.$transaction(async (tx) => {
       await tx.vppDispatchAssignment.update({
         where: { id: assignmentId },
         data: { status: 'reconciliation_required' },
       })
-      // VPP-5: Fail the generic assignment via the runtime. The generic layer
-      // treats reconciliation_required as 'failed' for execution purposes —
-      // the work did not complete successfully. The VPP layer retains the
-      // richer 'reconciliation_required' state for financial recovery.
-      await runtime.failAssignment(tx, tenantId, assignment.executionAssignmentId, assignment.dispatch.executionId)
+      // Only fail the generic assignment if operational completion has NOT
+      // happened. If the generic assignment is already completed, the CAS
+      // in runtime.failAssignment is a no-op — but we skip the call entirely
+      // to be explicit about the execution/economics boundary.
+      if (!operationalCompleted) {
+        await runtime.failAssignment(tx, tenantId, assignment.executionAssignmentId, assignment.dispatch.executionId)
+      }
     })
     await appendAudit({
       tenantId, actorId,
       eventType: 'vpp.reconciliation_required',
       resourceType: 'vpp_dispatch_assignment',
       resourceId: assignmentId,
-      metadata: { reason, commitmentId: assignment.capacityCommitmentId },
+      metadata: { reason, commitmentId: assignment.capacityCommitmentId, operationalCompleted },
     })
   }
 
   // Track whether usage has been recorded (determines failure handling).
   let usageRecorded = false
+
+  // Phase 5.2: Track whether the generic assignment has been operationally
+  // completed. If true, settlement failures do NOT fail the generic assignment —
+  // the execution succeeded, only the economics failed.
+  let operationalCompleted = false
 
   try {
     const device = assignment.asset.devices.find((d) => d.credential && d.credential.status === 'active')
@@ -845,22 +863,25 @@ export async function executeDispatchAssignment(
       },
     })
 
-    // --- Derived contribution (uses verifiedPerformanceKwh — never negative) ---
-    const contribution = await createContribution(
-      tenantId,
-      {
-        attestationIds: [attestation.id],
-        derivedQuantity: verifiedPerformanceKwh.toString(),
-        derivedUnit: 'kWh',
-      },
-      `vpp-baseline-${baseline.id}`,
-    )
-
-    // VPP-5: Update VPP assignment + record generic results via the runtime.
-    // The vertical owns the VPP-specific fields (baseline, performance);
-    // the runtime owns the generic ExecutionAssignment lifecycle.
+    // =========================================================================
+    // PHASE 5.2: OPERATIONAL COMPLETION (before economics)
+    // =========================================================================
+    // The generic ExecutionAssignment is completed HERE — after physical
+    // execution + telemetry + verification + baseline. This is OPERATIONAL
+    // completion: "did the work execute and was it verified?"
+    //
+    // The economic pipeline (contribution, reward, ledger, settlement) runs
+    // AFTER this point. If settlement fails, the generic assignment STAYS
+    // completed — the execution succeeded, only the economics failed. The
+    // VPP layer enters 'reconciliation_required' for economic recovery, but
+    // the generic execution layer is not affected.
+    //
+    // This is the execution/economics separation: the generic Execution
+    // answers "did the work execute?" NOT "did every economic obligation
+    // get paid?"
+    // =========================================================================
     await db.$transaction(async (tx) => {
-      // VPP assignment update (vertical-specific fields).
+      // VPP assignment update (vertical-specific fields — no contributionId yet).
       await tx.vppDispatchAssignment.update({
         where: { id: assignmentId },
         data: {
@@ -869,23 +890,30 @@ export async function executeDispatchAssignment(
           baselineKwh: baselineKwh.toString(),
           performanceKwh: verifiedPerformanceKwh.toString(),
           eventId: event.id,
-          contributionId: contribution.id,
         },
       })
 
-      // Generic ExecutionAssignment results via the runtime.
+      // Generic ExecutionAssignment: record operational results (no contributionId).
       await runtime.recordAssignmentResults(tx, assignment.executionAssignmentId, {
         actualQuantity: actualKwh.toString(),
         actualUnit: 'kWh',
         verifiedQuantity: verifiedPerformanceKwh.toString(),
         verifiedUnit: 'kWh',
         eventId: event.id,
-        contributionId: contribution.id,
       })
 
-      // Transition parent Execution → 'executing' via the runtime.
+      // Transition parent Execution → 'executing' (if not already).
       await runtime.beginAssignmentExecution(tx, assignment.dispatch.executionId, assignment.executionAssignmentId)
+
+      // OPERATIONAL COMPLETION: the generic assignment is now completed.
+      // The parent Execution finalizes if all assignments are terminal.
+      // This happens BEFORE contribution/reward/settlement.
+      await runtime.completeAssignment(tx, tenantId, assignment.executionAssignmentId, assignment.dispatch.executionId)
     })
+    // Mark that the generic assignment is operationally completed. The catch
+    // block uses this to decide whether to fail the generic assignment (pre-
+    // completion) or just enter VPP reconciliation (post-completion).
+    operationalCompleted = true
 
     // --- RECORD USAGE BEFORE ANY IRREVERSIBLE FINANCIAL SETTLEMENT ---
     if (assignment.capacityCommitmentId) {
@@ -903,6 +931,34 @@ export async function executeDispatchAssignment(
     usageRecorded = true
     await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'usage_recorded' } })
 
+    // =========================================================================
+    // ECONOMIC PIPELINE (after operational completion)
+    // =========================================================================
+    // The generic Execution is already completed. The following steps are
+    // VPP-specific economics. Failures here do NOT affect the generic
+    // Execution status — they only affect the VPP economic state.
+    // =========================================================================
+
+    // --- Derived contribution (uses verifiedPerformanceKwh — never negative) ---
+    const contribution = await createContribution(
+      tenantId,
+      {
+        attestationIds: [attestation.id],
+        derivedQuantity: verifiedPerformanceKwh.toString(),
+        derivedUnit: 'kWh',
+      },
+      `vpp-baseline-${baseline.id}`,
+    )
+
+    // Link the contribution to the generic assignment (economic link, post-completion).
+    await db.$transaction(async (tx) => {
+      await tx.vppDispatchAssignment.update({
+        where: { id: assignmentId },
+        data: { contributionId: contribution.id },
+      })
+      await runtime.linkContribution(tx, assignment.executionAssignmentId, contribution.id)
+    })
+
     // --- Reward ---
     const reward = await calculateReward(tenantId, contribution.id, `vpp-contrib-${contribution.id}`)
     await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'reward_calculated' } })
@@ -915,29 +971,25 @@ export async function executeDispatchAssignment(
     const settlement = await createSettlement(tenantId, reward.id)
     await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'settlement_pending' } })
 
-    // Use the TARGETED, LEASE-SAFE settlement processor — NOT the tenant-wide outbox.
-    // This ensures: settlement status is the source of truth for assignment completion.
-    // If settlement fails → assignment enters RECONCILIATION_REQUIRED (not COMPLETED).
+    // Use the TARGETED, LEASE-SAFE settlement processor.
+    // Phase 5.2: If settlement fails, the VPP assignment enters
+    // reconciliation_required (economic recovery), but the generic
+    // ExecutionAssignment STAYS completed — the execution succeeded.
     const settlementResult = await processSettlementForReward(tenantId, reward.id)
     if (!settlementResult.completed) {
-      // Settlement did not complete. The assignment must NOT be marked COMPLETED.
-      // Enter reconciliation state — capacity stays consumed, usage stays,
-      // financial liability exists. Reconciliation can retry.
+      // Settlement did not complete. The VPP assignment enters
+      // reconciliation_required (economic). The generic assignment is
+      // ALREADY completed — it is NOT failed.
       throw new Error(`Settlement not completed (status: ${settlementResult.settlementId})`)
     }
 
-    // --- COMPLETED (only reached if settlement succeeded) ---
-    // VPP-5: Complete the VPP assignment + complete the generic assignment via
-    // the runtime (atomic with parent finalization). The runtime owns the
-    // generic Execution lifecycle; the vertical owns the VPP-specific state.
-    await db.$transaction(async (tx) => {
-      await tx.vppDispatchAssignment.update({
-        where: { id: assignmentId },
-        data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
-      })
-
-      // Complete the generic assignment + finalize parent atomically via runtime.
-      await runtime.completeAssignment(tx, tenantId, assignment.executionAssignmentId, assignment.dispatch.executionId)
+    // --- VPP COMPLETED (only reached if settlement succeeded) ---
+    // Phase 5.2: The generic assignment was already completed during
+    // operational completion. Here we only update the VPP-specific state.
+    // No runtime.completeAssignment call — the generic is already done.
+    await db.vppDispatchAssignment.update({
+      where: { id: assignmentId },
+      data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
     })
 
     // VPP-2D-4: canonical finalization. Checks if ALL assignments are

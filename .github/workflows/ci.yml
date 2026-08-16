@@ -118,7 +118,7 @@ jobs:
         run: bunx prisma db push --accept-data-loss
 
       - name: Run all integration tests
-        run: bun test tests/vpp-4-2-execution-invariants.test.ts tests/runtime-resolution-integration.test.ts --timeout 120000
+        run: bun test tests/vpp-4-2-execution-invariants.test.ts tests/runtime-resolution-integration.test.ts tests/phase-5-2-execution-economics-separation.test.ts --timeout 120000
 
       - name: Run runtime resolution tests
         run: bun test tests/runtime-resolution.test.ts --timeout 30000

@@ -116,6 +116,19 @@ export class InfrastructureRuntime implements NetworkRuntime {
     })
   }
 
+  async linkContribution(
+    tx: RuntimeClient,
+    executionAssignmentId: string,
+    contributionId: string,
+  ): Promise<void> {
+    // Link the economic contribution to the assignment. This is an economic
+    // link, not an operational one — the assignment may already be completed.
+    await tx.executionAssignment.update({
+      where: { id: executionAssignmentId },
+      data: { contributionId },
+    })
+  }
+
   async completeAssignment(
     tx: RuntimeClient,
     tenantId: string,
@@ -124,6 +137,9 @@ export class InfrastructureRuntime implements NetworkRuntime {
   ): Promise<void> {
     // Complete the assignment + atomically finalize the parent Execution.
     // Both happen in the SAME transaction (tx) — if one fails, both roll back.
+    //
+    // Phase 5.2: This is OPERATIONAL completion — called after physical
+    // execution + verification, NOT after economic settlement.
     await tx.executionAssignment.update({
       where: { id: executionAssignmentId },
       data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
@@ -137,10 +153,15 @@ export class InfrastructureRuntime implements NetworkRuntime {
     executionAssignmentId: string,
     executionId: string,
   ): Promise<void> {
-    // Fail the assignment + atomically finalize the parent Execution.
-    // Both happen in the SAME transaction (tx).
-    await tx.executionAssignment.update({
-      where: { id: executionAssignmentId },
+    // Phase 5.2: CAS — only fail if NOT already completed. Operational
+    // completion is irreversible. A settlement failure AFTER operational
+    // completion must NOT change the generic assignment to failed.
+    //
+    // This is the critical guard that enforces the execution/economics
+    // separation: if the vertical accidentally calls failAssignment after
+    // completeAssignment, the CAS prevents the status from being overwritten.
+    await tx.executionAssignment.updateMany({
+      where: { id: executionAssignmentId, status: { not: 'completed' } },
       data: { status: 'failed' },
     })
     await finalizeExecutionIfTerminal(tx, tenantId, executionId)

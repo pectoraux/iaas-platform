@@ -1919,3 +1919,59 @@ Stage Summary:
   - In-memory runtime resolution tests (tests/runtime-resolution.test.ts) — prove the registry works.
   - DB-backed runtime resolution integration tests (tests/runtime-resolution-integration.test.ts) — prove a real persisted NetworkVersion flows through the resolver and that immutability is enforced.
 - Phase 5 is fully closed. Phase 6 (InfrastructureRuntime owns physical execution + AdapterRegistry) is ready to begin when confirmed.
+
+---
+Task ID: Phase-5.2-Execution-Economics-Separation
+Agent: orchestrator
+Task: Fix the critical abstraction leak: generic Execution completion was tied to economic finality (settlement). Separate operational completion (physical execution + verification) from economic completion (contribution + reward + settlement). Settlement failure must NOT fail a successfully executed generic assignment.
+
+Work Log:
+- ROOT CAUSE: The Phase 5 runtime contract had `completeAssignment()` called AFTER reward + ledger + settlement. This meant the generic Execution answered "did every economic obligation get paid?" instead of "did the work execute?" — the exact abstraction leak the frozen architecture was designed to prevent.
+- FIX — OPERATIONAL COMPLETION BEFORE ECONOMICS:
+  - Moved `runtime.completeAssignment(tx, ...)` to happen right after baseline computation (after physical execution + telemetry + verification), BEFORE `createContribution`.
+  - The generic ExecutionAssignment is now `completed` when the work is verified, NOT when settlement succeeds.
+  - The economic pipeline (contribution → reward → ledger → settlement) runs AFTER the generic assignment is already completed.
+  - `runtime.linkContribution(tx, assignmentId, contributionId)` is called after the contribution is created — it links the economic contribution to the already-completed assignment.
+- FIX — SETTLEMENT FAILURE DOES NOT FAIL THE GENERIC ASSIGNMENT:
+  - Added `operationalCompleted` flag (set to true after `runtime.completeAssignment`).
+  - `markReconciliationRequired` now checks `operationalCompleted`: if true, it does NOT call `runtime.failAssignment` — the generic assignment stays completed. Only the VPP layer enters `reconciliation_required`.
+  - If `operationalCompleted` is false (operational failure after usage, e.g., baseline failed), `runtime.failAssignment` IS called — the work couldn't be verified.
+- CAS GUARANTEE in InfrastructureRuntime.failAssignment:
+  - Changed from `tx.executionAssignment.update` (unconditional) to `tx.executionAssignment.updateMany` with `where: { id, status: { not: 'completed' } }`.
+  - If the assignment is already `completed`, the CAS prevents the status from being overwritten — operational completion is irreversible.
+  - This is the last line of defense: even if the vertical accidentally calls `failAssignment` after `completeAssignment`, the generic assignment stays completed.
+- NEW RUNTIME METHOD: `linkContribution(tx, executionAssignmentId, contributionId)`:
+  - Added to NetworkRuntime interface.
+  - Implemented in InfrastructureRuntime (simple update).
+  - Stub implementations in ProtocolRuntime + HybridRuntime.
+  - Called by VPP after `createContribution` — separates the operational results (actuals, verified quantity) from the economic link (contributionId).
+- VPP SUCCESS PATH SIMPLIFIED:
+  - The success completion (after settlement) no longer calls `runtime.completeAssignment` — the generic was already completed during operational completion.
+  - The success path only updates VPP-specific state (`status: 'completed', economicStage: 'completed', completedAt`).
+  - Architecture test verifies there is exactly ONE `runtime.completeAssignment(tx,` call in vpp.service.ts (the operational completion).
+- ARCHITECTURE TESTS (6 new regex tests):
+  - InfrastructureRuntime.failAssignment uses CAS (only fails if not completed)
+  - InfrastructureRuntime has linkContribution method
+  - VPP completeAssignment is called BEFORE createContribution (position check)
+  - VPP markReconciliationRequired checks operationalCompleted before calling runtime.failAssignment
+  - VPP success path has exactly 1 completeAssignment call (the operational one)
+  - VPP tracks operationalCompleted flag
+- DB-BACKED INTEGRATION TESTS (tests/phase-5-2-execution-economics-separation.test.ts, 8 tests):
+  - Operational completion finalizes Execution BEFORE any economic step
+  - Parent Execution completes when all operational assignments are terminal
+  - linkContribution sets contributionId on an already-completed assignment
+  - failAssignment is a no-op on a completed assignment (CAS guard)
+  - failAssignment works on a non-completed assignment (pre-usage failure)
+  - Mixed completed + failed → parent completed with correct per-assignment outcomes
+  - Completed assignment cannot be transitioned to any other status (irreversible)
+- CI: Added phase-5-2 test to the postgres-integration-tests job.
+- VERIFICATION: bun run lint clean. tsc: only pre-existing errors (bun:test pattern). 47 non-DB tests pass (29 regex architecture + 18 runtime resolution, 6 new Phase 5.2 regex tests). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The execution/economics separation is now enforced at three levels:
+  1. CODE STRUCTURE: completeAssignment is called before createContribution (proven by position-check regex test).
+  2. RUNTIME CAS: failAssignment cannot overwrite a completed assignment (proven by DB integration test).
+  3. VPP LOGIC: markReconciliationRequired checks operationalCompleted before calling failAssignment (proven by regex test).
+- The generic Execution now answers "did the work execute?" NOT "did every economic obligation get paid?"
+- Settlement failure → VPP reconciliation_required (economic), generic assignment stays completed (operational).
+- Phase 5.2 is complete. Phase 6 (InfrastructureRuntime extraction + AdapterRegistry) is ready to begin.

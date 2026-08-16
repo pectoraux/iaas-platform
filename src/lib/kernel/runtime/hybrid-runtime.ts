@@ -80,6 +80,14 @@ export class HybridRuntime implements NetworkRuntime {
     throw new HybridRuntimeNotImplementedError('recordAssignmentResults')
   }
 
+  async linkContribution(
+    _tx: RuntimeClient,
+    _executionAssignmentId: string,
+    _contributionId: string,
+  ): Promise<void> {
+    throw new HybridRuntimeNotImplementedError('linkContribution')
+  }
+
   async completeAssignment(
     _tx: RuntimeClient,
     _tenantId: string,
