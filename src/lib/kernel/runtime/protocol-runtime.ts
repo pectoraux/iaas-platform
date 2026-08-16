@@ -101,14 +101,16 @@ export class ProtocolRuntime implements NetworkRuntime {
    *
    * This is the protocol runtime's primary entry point. It delegates to
    * the deterministic executor, which:
-   *   1. Validates the transaction
-   *   2. Applies the state transition
-   *   3. Commits the resulting state
-   *   4. Returns the execution result + receipt
+   *   1. Reads the current state (async)
+   *   2. Validates the transaction
+   *   3. Applies the state transition (staged)
+   *   4. Commits with optimistic concurrency (async, version-checked)
+   *   5. Returns the execution result + receipt
    *
    * DETERMINISTIC: Given the same state + transaction, the result is identical.
+   * ASYNC: Phase 9B — the state store is async (supports persistent backends).
    */
-  executeTransaction(transaction: ProtocolTransaction): ProtocolExecutionResult {
+  async executeTransaction(transaction: ProtocolTransaction): Promise<ProtocolExecutionResult> {
     return this.deps.executor.execute(transaction)
   }
 
@@ -116,8 +118,9 @@ export class ProtocolRuntime implements NetworkRuntime {
    * Validate a transaction without executing it.
    * Returns null if valid, or an error message.
    */
-  validateTransaction(transaction: ProtocolTransaction): string | null {
-    return this.deps.executor.validate(transaction, this.deps.stateStore.getState())
+  async validateTransaction(transaction: ProtocolTransaction): Promise<string | null> {
+    const state = await this.deps.stateStore.getState()
+    return this.deps.executor.validate(transaction, state)
   }
 
   // -------------------------------------------------------------------------

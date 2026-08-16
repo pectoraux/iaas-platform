@@ -89,7 +89,11 @@ export function initializeBootstrap(): void {
   //    Phase 9A: The protocol runtime owns a state store, executor,
   //    validator registry, and consensus engine. These are injected
   //    (not imported as globals), mirroring InfrastructureRuntime.
-  const protocolStateStore = new InMemoryProtocolStateStore()
+  //    Phase 9B: The state store is now async + version-checked.
+  //    The bootstrap uses an in-memory store bound to a placeholder
+  //    networkVersionId. Tests construct their own store with the
+  //    correct networkVersionId.
+  const protocolStateStore = new InMemoryProtocolStateStore('bootstrap-protocol-store')
   const protocolExecutor = new DeterministicTransactionExecutor(protocolStateStore)
   const protocolRuntime = new ProtocolRuntime({
     stateStore: protocolStateStore,

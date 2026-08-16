@@ -1,8 +1,13 @@
 // =============================================================================
-// Kernel: In-Memory Protocol State Store (Phase 9A)
+// Kernel: In-Memory Protocol State Store (Phase 9B)
 // =============================================================================
 // A deterministic, versioned key-value state store. This is the simplest
 // implementation — no persistence, no disk, just in-memory maps.
+//
+// Phase 9B: The interface is now ASYNC and version-checked (optimistic
+// concurrency). This in-memory implementation implements the SAME async
+// contract as the PostgreSQL implementation — the test implementation is
+// NOT a different protocol.
 //
 // DETERMINISM:
 //   The state hash is computed from the entries in canonical (sorted-key)
@@ -10,11 +15,15 @@
 //   regardless of insertion order. This is the fundamental protocol
 //   invariant: given the same state, execution is deterministic.
 //
-// Phase 9B will add persistent storage. Phase 9A proves the contract in memory.
+// OPTIMISTIC CONCURRENCY:
+//   commit(expectedVersion) checks that the current version matches
+//   expectedVersion. If not, it throws StaleVersionError. This prevents
+//   two transactions from both committing against the same state.
 // =============================================================================
 
 import { createHash } from 'crypto'
 import type { ProtocolStateStore, ProtocolStateSnapshot } from './types'
+import { StaleVersionError } from './types'
 
 /**
  * In-memory implementation of ProtocolStateStore.
@@ -26,14 +35,19 @@ import type { ProtocolStateStore, ProtocolStateSnapshot } from './types'
  *
  * The hash is SHA-256 of the canonical JSON representation of the entries
  * (sorted keys). This ensures determinism.
+ *
+ * Phase 9B: All methods are async (matching the persistent implementation).
+ * The commit method is version-checked (optimistic concurrency).
  */
 export class InMemoryProtocolStateStore implements ProtocolStateStore {
+  readonly networkVersionId: string
   private currentEntries: Map<string, string> = new Map()
   private stagedEntries: Map<string, string | null> = new Map() // null = delete
   private history: ProtocolStateSnapshot[] = []
   private version = 0
 
-  constructor(initialEntries?: Record<string, string>) {
+  constructor(networkVersionId: string, initialEntries?: Record<string, string>) {
+    this.networkVersionId = networkVersionId
     if (initialEntries) {
       for (const [key, value] of Object.entries(initialEntries)) {
         this.currentEntries.set(key, value)
@@ -44,11 +58,11 @@ export class InMemoryProtocolStateStore implements ProtocolStateStore {
     this.history.push(genesis)
   }
 
-  getState(): ProtocolStateSnapshot {
+  async getState(): Promise<ProtocolStateSnapshot> {
     return this.history[this.history.length - 1]
   }
 
-  get(key: string): string | undefined {
+  async get(key: string): Promise<string | undefined> {
     // Check staged changes first.
     if (this.stagedEntries.has(key)) {
       const staged = this.stagedEntries.get(key)!
@@ -65,7 +79,12 @@ export class InMemoryProtocolStateStore implements ProtocolStateStore {
     this.stagedEntries.set(key, null) // null = delete
   }
 
-  commit(): ProtocolStateSnapshot {
+  async commit(expectedVersion: number): Promise<ProtocolStateSnapshot> {
+    // Optimistic concurrency check: the expected version must match.
+    if (expectedVersion !== this.version) {
+      throw new StaleVersionError(expectedVersion, this.version)
+    }
+
     // Apply staged changes to current entries.
     for (const [key, value] of this.stagedEntries) {
       if (value === null) {
@@ -86,7 +105,7 @@ export class InMemoryProtocolStateStore implements ProtocolStateStore {
     this.stagedEntries.clear()
   }
 
-  getSnapshot(version: number): ProtocolStateSnapshot | undefined {
+  async getSnapshot(version: number): Promise<ProtocolStateSnapshot | undefined> {
     return this.history.find((s) => s.version === version)
   }
 

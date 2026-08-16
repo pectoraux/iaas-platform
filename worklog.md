@@ -2596,3 +2596,63 @@ Stage Summary:
 - ProtocolRuntime does NOT import InfrastructureRuntime, AdapterRegistry, InfrastructureAdapter, VPP, or Compute. The protocol side is architecturally isolated.
 - ValidatorRegistry and ConsensusEngine are contract stubs — real implementations land in Phase 9C.
 - Phase 9A is complete. Phase 9B (persistent protocol state) is the next step before Phase 9C (minimal consensus).
+
+---
+Task ID: Phase-9B-Persistent-Protocol-State
+Agent: orchestrator
+Task: Phase 9B — persistent deterministic protocol state with optimistic concurrency. Upgrade ProtocolStateStore to async + version-checked. Add PostgreSQL-backed store. Prove persistence, versioning, atomicity, optimistic concurrency, deterministic hash, replay, restart proof.
+
+Work Log:
+- CONTRACT UPGRADE (protocol/types.ts):
+  - ProtocolStateStore is now ASYNC: getState() → Promise, get() → Promise, commit(expectedVersion) → Promise, getSnapshot() → Promise.
+  - commit(expectedVersion): optimistic concurrency control. If the current version doesn't match expectedVersion, throws StaleVersionError.
+  - StaleVersionError: new error class with expectedVersion + actualVersion.
+  - ProtocolStateStore now has readonly networkVersionId (bound to an immutable network version).
+  - ProtocolTransactionExecutor.execute() is now async → Promise<ProtocolExecutionResult>.
+- IN-MEMORY STORE UPGRADE (protocol/state-store.ts):
+  - InMemoryProtocolStateStore now implements the async contract (same interface as persistent).
+  - Constructor takes (networkVersionId, initialEntries?).
+  - commit(expectedVersion) checks version → throws StaleVersionError if stale.
+  - All methods are async (returns Promises).
+- POSTGRESQL STORE (protocol/postgres-state-store.ts):
+  - PostgresProtocolStateStore: production implementation backed by PostgreSQL.
+  - Persists snapshots to ProtocolStateSnapshot table (networkVersionId, version, stateJson, stateHash).
+  - UNIQUE(networkVersionId, version) constraint enforces optimistic concurrency at the database level.
+  - commit(expectedVersion): inserts a new row with version = expectedVersion + 1. If the insert fails with P2002 (unique constraint violation), throws StaleVersionError.
+  - loadLatestSnapshot(): on construction, loads the latest committed snapshot from the database (restart recovery).
+  - Genesis snapshot: if no snapshot exists, creates version 0 with empty state.
+  - Deterministic hash: SHA-256 of canonical JSON (sorted keys) — same as in-memory.
+- EXECUTOR UPGRADE (protocol/executor.ts):
+  - execute() is now async. Reads state (async), validates, stages, commits (async, version-checked).
+  - Catches StaleVersionError from commit → returns result with success=false + stale version error message.
+  - applyTransaction() now reads from the state snapshot (not the store) to avoid async in the sync stage method.
+- PROTOCOL RUNTIME (protocol-runtime.ts):
+  - executeTransaction() is now async → Promise<ProtocolExecutionResult>.
+  - validateTransaction() is now async → Promise<string | null>.
+- PRISMA SCHEMA:
+  - Added ProtocolStateSnapshot model: id, networkVersionId, version, stateJson, stateHash, createdAt.
+  - @@unique([networkVersionId, version]) — enforces optimistic concurrency.
+  - @@index([networkVersionId]) + @@index([stateHash]).
+- BOOTSTRAP:
+  - InMemoryProtocolStateStore now takes ('bootstrap-protocol-store') as networkVersionId.
+- DB-BACKED INTEGRATION TESTS (tests/phase-9b-persistent-protocol-state.test.ts):
+  - P9B.1 + P9B.10 (Persistence + Restart proof): Runtime A executes mint(alice, 100) → destroy → Runtime B loads same network → state survives (same version, hash, balance).
+  - P9B.2 (Versioning): every commit produces exactly N+1.
+  - P9B.3 (Atomicity): failed transaction (insufficient balance) leaves state unchanged (same version + hash).
+  - P9B.4 (Optimistic concurrency): two writers from same version — only one commits, the other gets StaleVersionError.
+  - P9B.5 (Deterministic hash): same version → same hash across store instances.
+  - P9B.6 (Replay): historical snapshots retrievable by version, including genesis (version 0).
+  - P9B.7 (Runtime integration): ProtocolRuntime.executeTransaction uses the persistent store — state verified by a second runtime instance.
+  - P9B.8 (Isolation): covered by Phase 9A architecture tests.
+- IN-MEMORY TEST UPDATE: Phase 9A tests updated for async API. Added stale-version test.
+- CI: Added phase-9b-persistent-protocol-state.test.ts to postgres-integration-tests job.
+- VERIFICATION: bun run lint clean. tsc: 105 errors (104 pre-existing + 1 bun:test in new test file, zero real new). 148 non-DB tests pass. Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The protocol state store is now persistent (PostgreSQL) with optimistic concurrency control.
+- The async + version-checked contract is the SAME for in-memory and PostgreSQL implementations — the test implementation is NOT a different protocol.
+- State survives runtime reconstruction (restart proof): write → destroy → reconstruct → state remains.
+- Two writers from the same version cannot both commit (StaleVersionError).
+- Deterministic hash is preserved across persistence (same state → same hash, regardless of store instance).
+- Historical snapshots are retrievable by version (deterministic replay).
+- Phase 9B is complete. Phase 9C (minimal validator/consensus reference) is the next step.

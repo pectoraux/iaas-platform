@@ -1429,3 +1429,34 @@ model ExecutionAssignment {
   @@index([assetId])
   @@index([status])
 }
+
+// -----------------------------------------------------------------------------
+// Phase 9B: Protocol State Snapshots — persistent deterministic state
+// -----------------------------------------------------------------------------
+
+/// A persisted protocol state snapshot. Each successful transaction commit
+/// produces exactly one new snapshot. The (networkVersionId, version) pair
+/// is UNIQUE — this enforces optimistic concurrency at the database level.
+///
+/// The state is stored as a canonical JSON string (sorted keys) with a
+/// deterministic SHA-256 hash. This gives us:
+///   - durable state (survives restart)
+///   - deterministic replay (getSnapshot by version)
+///   - state hashes (same state → same hash)
+///   - crash recovery (append-only)
+///   - optimistic concurrency (unique version constraint)
+///
+/// The protocol runtime owns this model — it is NOT used by VPP, Compute,
+/// or the generic Execution pipeline.
+model ProtocolStateSnapshot {
+  id                String   @id @default(cuid())
+  networkVersionId  String
+  version           Int
+  stateJson         String   // canonical JSON (sorted keys)
+  stateHash         String   // SHA-256 of stateJson
+  createdAt         DateTime @default(now())
+
+  @@unique([networkVersionId, version])
+  @@index([networkVersionId])
+  @@index([stateHash])
+}

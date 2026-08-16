@@ -118,7 +118,33 @@ export interface ProtocolStateSnapshot {
 }
 
 /**
+ * Error thrown when a commit fails due to a stale version (optimistic
+ * concurrency conflict). Two transactions that both read version N cannot
+ * both commit to N+1 — the second must retry.
+ */
+export class StaleVersionError extends Error {
+  constructor(
+    public readonly expectedVersion: number,
+    public readonly actualVersion: number,
+  ) {
+    super(
+      `Stale version: expected ${expectedVersion}, but the current version is ${actualVersion}. ` +
+        `Another transaction committed first — retry with the current state.`,
+    )
+    this.name = 'StaleVersionError'
+  }
+}
+
+/**
  * A deterministic, versioned key-value state store.
+ *
+ * Phase 9B: The interface is ASYNC and version-checked. The commit method
+ * takes an `expectedVersion` parameter — if the current version doesn't
+ * match, the commit fails with `StaleVersionError`. This is optimistic
+ * concurrency control (OCC):
+ *
+ *   Tx A ── read version 10 ── execute ── commit(10) → 11 ✅
+ *   Tx B ── read version 10 ── execute ── commit(10) → StaleVersionError ❌
  *
  * The store maintains a current state snapshot. Each commit produces a new
  * version with a deterministic hash. The store is the source of truth for
@@ -127,28 +153,47 @@ export interface ProtocolStateSnapshot {
  * DETERMINISM: The hash of a snapshot is computed from its entries in a
  * canonical order (sorted keys). Two snapshots with the same entries have
  * the same hash, regardless of insertion order.
+ *
+ * PERSISTENCE (Phase 9B): Implementations may be in-memory (for testing)
+ * or PostgreSQL-backed (for production). Both implement the SAME async
+ * interface — the test implementation is NOT a different protocol.
  */
 export interface ProtocolStateStore {
-  /** Get the current state snapshot. */
-  getState(): ProtocolStateSnapshot
+  /** The network version this store is bound to (immutable policy scope). */
+  readonly networkVersionId: string
+
+  /** Get the current committed state snapshot. */
+  getState(): Promise<ProtocolStateSnapshot>
 
   /** Get a specific key from the current state. */
-  get(key: string): string | undefined
+  get(key: string): Promise<string | undefined>
 
-  /** Stage a key-value update (does not commit). */
+  /**
+   * Stage a key-value update (does not commit).
+   * Must be called after getState() (reads the current version).
+   */
   put(key: string, value: string): void
 
   /** Stage a key deletion (does not commit). */
   delete(key: string): void
 
-  /** Commit staged changes → produces a new versioned snapshot. */
-  commit(): ProtocolStateSnapshot
+  /**
+   * Commit staged changes → produces a new versioned snapshot.
+   *
+   * OPTIMISTIC CONCURRENCY: If `expectedVersion` doesn't match the current
+   * committed version, the commit fails with `StaleVersionError`. This
+   * prevents two transactions from both committing against the same state.
+   *
+   * ATOMIC: The commit is all-or-nothing. If it fails, the state is
+   * unchanged and staged changes are discarded.
+   */
+  commit(expectedVersion: number): Promise<ProtocolStateSnapshot>
 
   /** Rollback staged changes (discard without committing). */
   rollback(): void
 
   /** Get a snapshot at a specific version (for deterministic replay). */
-  getSnapshot(version: number): ProtocolStateSnapshot | undefined
+  getSnapshot(version: number): Promise<ProtocolStateSnapshot | undefined>
 }
 
 // ---------------------------------------------------------------------------
@@ -161,14 +206,18 @@ export interface ProtocolStateStore {
  * THE CRITICAL INVARIANT:
  *   Given the same state + transaction, execution produces the same result.
  *
- * The executor:
- *   1. Validates the transaction (signature, nonce, domain rules)
- *   2. Applies the transaction to the state
- *   3. Commits the resulting state
- *   4. Returns the execution result + receipt
+ * Phase 9B: The executor is ASYNC (the state store is async). The executor:
+ *   1. Reads the current state (async)
+ *   2. Validates the transaction (signature, nonce, domain rules)
+ *   3. Applies the transaction to the state (staged)
+ *   4. Commits with optimistic concurrency (async, version-checked)
+ *   5. Returns the execution result + receipt
  *
  * If validation fails, the state is unchanged and the result has
  * success=false + an error message.
+ *
+ * If commit fails due to a stale version (another transaction committed
+ * first), the result has success=false + a StaleVersionError message.
  */
 export interface ProtocolTransactionExecutor {
   /**
@@ -180,9 +229,9 @@ export interface ProtocolTransactionExecutor {
   /**
    * Execute a transaction against the current state.
    * If validation fails, the state is unchanged.
-   * If execution succeeds, the state is committed.
+   * If execution succeeds, the state is committed (optimistic concurrency).
    */
-  execute(transaction: ProtocolTransaction): ProtocolExecutionResult
+  execute(transaction: ProtocolTransaction): Promise<ProtocolExecutionResult>
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 // =============================================================================
-// Kernel: Deterministic Transaction Executor (Phase 9A)
+// Kernel: Deterministic Transaction Executor (Phase 9B)
 // =============================================================================
 // A deterministic transaction executor that validates + executes transactions
 // against the protocol state store.
@@ -7,13 +7,15 @@
 // THE CRITICAL INVARIANT:
 //   Given the same state + transaction, execution produces the same result.
 //
-// Phase 9A implements a minimal reference state-transition protocol:
+// Phase 9B: The executor is now ASYNC (the state store is async). The
+// commit is version-checked (optimistic concurrency). If another transaction
+// committed first, the commit throws StaleVersionError and the result has
+// success=false.
+//
+// Phase 9A reference state-transition protocol:
 //   - 'transfer' transactions move a balance from one account to another
 //   - 'mint' transactions create balance (for testing/initialization)
 //   - State keys: 'balance:<account>' → string (decimal)
-//
-// This is deliberately tiny — no UTXO, no EVM, no gas, no slashing.
-// The point is to prove deterministic execution against a versioned state.
 // =============================================================================
 
 import { createHash } from 'crypto'
@@ -25,16 +27,7 @@ import type {
   ProtocolStateStore,
   ProtocolTransactionExecutor,
 } from './types'
-
-/**
- * Error thrown when a transaction fails validation.
- */
-export class ProtocolValidationError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'ProtocolValidationError'
-  }
-}
+import { StaleVersionError } from './types'
 
 /**
  * A deterministic transaction executor for the reference state-transition
@@ -53,6 +46,11 @@ export class ProtocolValidationError extends Error {
  *   The executor does NOT use Date.now() or Math.random() during execution.
  *   The receipt's executedAt is set from the transaction's submittedAt
  *   (not the current time) to ensure determinism.
+ *
+ * Optimistic concurrency:
+ *   The executor reads the current state, stages changes, then commits with
+ *   the expected version. If another transaction committed first, the commit
+ *   throws StaleVersionError and the result has success=false.
  */
 export class DeterministicTransactionExecutor implements ProtocolTransactionExecutor {
   private readonly stateStore: ProtocolStateStore
@@ -84,8 +82,11 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
     }
   }
 
-  execute(transaction: ProtocolTransaction): ProtocolExecutionResult {
-    const beforeState = this.stateStore.getState()
+  async execute(transaction: ProtocolTransaction): Promise<ProtocolExecutionResult> {
+    // 1. Read the current state (async).
+    const beforeState = await this.stateStore.getState()
+
+    // 2. Validate the transaction.
     const validationError = this.validate(transaction, beforeState)
 
     if (validationError) {
@@ -96,31 +97,51 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
           transactionId: transaction.id,
           beforeStateHash: beforeState.hash,
           afterStateHash: beforeState.hash, // unchanged
-          executedAt: transaction.submittedAt, // deterministic — not Date.now()
+          executedAt: transaction.submittedAt, // deterministic
           executor: 'deterministic-executor',
         },
         error: validationError,
       }
     }
 
-    // Apply the transaction to the staged state.
-    this.applyTransaction(transaction)
+    // 3. Apply the transaction to the staged state.
+    this.applyTransaction(transaction, beforeState)
 
-    // Commit the staged changes.
-    const afterState = this.stateStore.commit()
+    // 4. Commit with optimistic concurrency (async, version-checked).
+    try {
+      const afterState = await this.stateStore.commit(beforeState.version)
 
-    const receipt: ProtocolReceipt = {
-      transactionId: transaction.id,
-      beforeStateHash: beforeState.hash,
-      afterStateHash: afterState.hash,
-      executedAt: transaction.submittedAt, // deterministic
-      executor: 'deterministic-executor',
-    }
+      const receipt: ProtocolReceipt = {
+        transactionId: transaction.id,
+        beforeStateHash: beforeState.hash,
+        afterStateHash: afterState.hash,
+        executedAt: transaction.submittedAt, // deterministic
+        executor: 'deterministic-executor',
+      }
 
-    return {
-      success: true,
-      resultingState: afterState,
-      receipt,
+      return {
+        success: true,
+        resultingState: afterState,
+        receipt,
+      }
+    } catch (err) {
+      // StaleVersionError — another transaction committed first.
+      if (err instanceof StaleVersionError) {
+        const currentState = await this.stateStore.getState()
+        return {
+          success: false,
+          resultingState: currentState,
+          receipt: {
+            transactionId: transaction.id,
+            beforeStateHash: beforeState.hash,
+            afterStateHash: currentState.hash,
+            executedAt: transaction.submittedAt,
+            executor: 'deterministic-executor',
+          },
+          error: `Stale version: another transaction committed first (expected ${err.expectedVersion}, actual ${err.actualVersion})`,
+        }
+      }
+      throw err
     }
   }
 
@@ -163,7 +184,7 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
     return null
   }
 
-  private applyTransaction(transaction: ProtocolTransaction): void {
+  private applyTransaction(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): void {
     const sender = transaction.sender
     const nonceKey = `nonce:${sender}`
 
@@ -172,22 +193,25 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
         const { from, to, amount } = transaction.payload.data
         const fromKey = `balance:${from}`
         const toKey = `balance:${to}`
-        const fromBalance = parseFloat(this.stateStore.get(fromKey) ?? '0')
-        const toBalance = parseFloat(this.stateStore.get(toKey) ?? '0')
+        const fromBalance = state.entries.get(fromKey)
+        const toBalance = state.entries.get(toKey)
+        const currentFrom = fromBalance ? parseFloat(fromBalance) : 0
+        const currentTo = toBalance ? parseFloat(toBalance) : 0
         const transferAmount = parseFloat(amount as string)
 
-        this.stateStore.put(fromKey, (fromBalance - transferAmount).toString())
-        this.stateStore.put(toKey, (toBalance + transferAmount).toString())
+        this.stateStore.put(fromKey, (currentFrom - transferAmount).toString())
+        this.stateStore.put(toKey, (currentTo + transferAmount).toString())
         this.stateStore.put(nonceKey, (transaction.nonce + 1).toString())
         break
       }
       case 'mint': {
         const { to, amount } = transaction.payload.data
         const toKey = `balance:${to}`
-        const toBalance = parseFloat(this.stateStore.get(toKey) ?? '0')
+        const toBalance = state.entries.get(toKey)
+        const currentTo = toBalance ? parseFloat(toBalance) : 0
         const mintAmount = parseFloat(amount as string)
 
-        this.stateStore.put(toKey, (toBalance + mintAmount).toString())
+        this.stateStore.put(toKey, (currentTo + mintAmount).toString())
         this.stateStore.put(nonceKey, (transaction.nonce + 1).toString())
         break
       }

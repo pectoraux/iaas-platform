@@ -49,7 +49,7 @@ import type { ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/typ
 
 // Helper: create a ProtocolRuntime with stub deps for testing.
 function createProtocolRuntime() {
-  const stateStore = new InMemoryProtocolStateStore()
+  const stateStore = new InMemoryProtocolStateStore('test-nv')
   const deps: ProtocolRuntimeDeps = {
     stateStore,
     executor: new DeterministicTransactionExecutor(stateStore),
