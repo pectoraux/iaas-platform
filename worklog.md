@@ -2338,3 +2338,45 @@ Stage Summary:
 - Ambiguous resolution (multiple adapters, no adapterType) throws — no silent fallback.
 - Capability mismatch throws — the registry checks capability support during resolution.
 - Phase 7.2 is complete. Phase 7 is now fully closed (registry + runtime integration). Phase 8 (Compute reference network) is ready.
+
+---
+Task ID: Phase-7.3-Dependency-Injection
+Agent: orchestrator
+Task: Make InfrastructureRuntime accept an AdapterRegistry in its constructor (dependency injection). Remove the global singleton import. Move runtime registration from kernel/runtime/index.ts to the bootstrap. Rewrite the 5 multi-adapter tests to use the REAL InfrastructureRuntime(registry) — no test wrapper.
+
+Work Log:
+- ROOT CAUSE: InfrastructureRuntime imported the global `adapterRegistry` singleton from `./adapter-registry`. This made it impossible to test the runtime with an isolated registry — the multi-adapter tests had to use a test wrapper (`createRuntimeWithRegistry`) that duplicated the runtime's resolution/execution code. The tests proved the registry worked, but not that the real InfrastructureRuntime consumed it correctly.
+- FIX — DEPENDENCY INJECTION:
+  - InfrastructureRuntime constructor now accepts `adapterRegistry: AdapterRegistry` as a parameter: `constructor(private readonly adapterRegistry: AdapterRegistry)`.
+  - Changed `import { adapterRegistry } from './adapter-registry'` to `import type { AdapterRegistry } from './adapter-registry'` — imports the TYPE, not the singleton instance.
+  - `executeAssignment` uses `this.adapterRegistry.resolve(...)` instead of the global `adapterRegistry.resolve(...)`.
+- FIX — MOVE RUNTIME REGISTRATION TO BOOTSTRAP:
+  - Removed auto-registration from `kernel/runtime/index.ts` (it previously created `new InfrastructureRuntime()` on import, which now requires a registry parameter — the kernel can't import the bootstrap).
+  - `kernel/runtime/index.ts` now just exports `resolveRuntime` (which resolves from the `runtimeRegistry` — throws if not registered) and re-exports the `runtimeRegistry` for the bootstrap to use.
+  - `bootstrap/index.ts` now constructs the InfrastructureRuntime with the populated adapter registry and registers all three runtimes:
+    ```
+    registerAdapters() → adapterRegistry populated
+    new InfrastructureRuntime(adapterRegistry) → runtime constructed with DI
+    runtimeRegistry.register(infrastructureRuntime) → runtime registered
+    runtimeRegistry.register(new ProtocolRuntime())
+    runtimeRegistry.register(new HybridRuntime())
+    ```
+- TEST REWRITE — REAL RUNTIME, NO WRAPPER:
+  - Removed `createRuntimeWithRegistry` test wrapper entirely.
+  - All 5 multi-adapter tests now use `new InfrastructureRuntime(reg)` with an isolated `AdapterRegistry` instance:
+    - explicit adapterType resolves correct adapter — two adapters, selects each, verifies telemetry
+    - omitted adapterType resolves single adapter
+    - omitted adapterType with multiple adapters throws (ambiguous)
+    - capability mismatch throws
+    - VPP-style execution works via global runtime (uses the global adapterRegistry)
+  - These tests now prove: InfrastructureRuntime → AdapterRegistry → adapter (the real production path).
+- ARCHITECTURE TESTS (2 new):
+  - InfrastructureRuntime accepts AdapterRegistry in constructor (Phase 7.3) — checks constructor signature, type-only import, this.adapterRegistry usage, no global singleton import.
+  - kernel/runtime/index.ts does NOT auto-register runtimes — checks no `new InfrastructureRuntime()`, no `ensureRegistered()`, bootstrap owns construction.
+- VERIFICATION: bun run lint clean. tsc: 102 errors (all pre-existing, zero new — actually decreased from 108 to 102 by removing duplicate imports). 109 non-DB tests pass (62 regex architecture + 47 runtime resolution/adapter, 2 new Phase 7.3 regex tests, 0 fail, 134ms). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- InfrastructureRuntime is now dependency-injected: `new InfrastructureRuntime(adapterRegistry)`. Tests can create an isolated registry + runtime without polluting global state.
+- The 5 multi-adapter tests use the REAL InfrastructureRuntime — no test wrapper. They prove the actual production path: InfrastructureRuntime → AdapterRegistry → adapter.
+- Runtime registration moved from the kernel to the bootstrap (composition root). The kernel exports the registry; the bootstrap owns construction.
+- Phase 7.3 is complete. Phase 7 is now fully hardened (registry + runtime + DI). Phase 8 (Compute reference network) is ready.

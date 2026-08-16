@@ -33,6 +33,15 @@ import {
 import { InfrastructureRuntime } from '../src/lib/kernel/runtime/infrastructure-runtime'
 import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
 import { HybridRuntime } from '../src/lib/kernel/runtime/hybrid-runtime'
+import { AdapterRegistry } from '../src/lib/kernel/runtime/adapter-registry'
+import type {
+  InfrastructureAdapter,
+  ExecuteCommand,
+  ExecuteResult,
+  AssetCapabilities,
+  TelemetryReading,
+  HealthStatus,
+} from '../src/lib/kernel/adapters/infrastructure-adapter'
 
 // Explicitly initialize the bootstrap before tests run.
 // This is the test's composition root — same pattern as instrumentation.ts.
@@ -199,7 +208,7 @@ describe('Phase 5: protocol and hybrid runtimes are stubs', () => {
 
 describe('Phase 5: InfrastructureRuntime contract completeness', () => {
   it('InfrastructureRuntime has all NetworkRuntime methods', () => {
-    const runtime = new InfrastructureRuntime()
+    const runtime = new InfrastructureRuntime(adapterRegistry)
     expect(typeof runtime.createExecution).toBe('function')
     expect(typeof runtime.linkExecutionSource).toBe('function')
     expect(typeof runtime.createExecutionAssignment).toBe('function')
@@ -242,7 +251,7 @@ describe('Phase 6: adapter resolution', () => {
   })
 
   it('InfrastructureRuntime.executeAssignment executes via the adapter', async () => {
-    const runtime = new InfrastructureRuntime()
+    const runtime = new InfrastructureRuntime(adapterRegistry)
     const result = await runtime.executeAssignment({
       assetId: 'test-asset',
       assetType: 'battery',
@@ -261,7 +270,7 @@ describe('Phase 6: adapter resolution', () => {
   })
 
   it('InfrastructureRuntime.executeAssignment throws for unregistered asset type', async () => {
-    const runtime = new InfrastructureRuntime()
+    const runtime = new InfrastructureRuntime(adapterRegistry)
     await expect(
       runtime.executeAssignment({
         assetId: 'test-asset',
@@ -276,30 +285,16 @@ describe('Phase 6: adapter resolution', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Test 7b: Phase 7.2 — Runtime adapter selection (behavioral)
+// Test 7b: Phase 7.2/7.3 — Runtime adapter selection (behavioral, real runtime)
 // ---------------------------------------------------------------------------
 
-// These tests exercise the InfrastructureRuntime's adapter resolution using
-// the full selection contract (assetType + adapterType + capabilityType).
+// Phase 7.3: These tests use the REAL InfrastructureRuntime with an isolated
+// AdapterRegistry instance — no test wrapper. This proves the actual runtime
+// implementation correctly consumes the full selection contract.
 //
-// The global adapterRegistry already has 'simulated_der' registered for
-// energy asset types (via beforeAll → initializeBootstrap). We create a
-// fresh InfrastructureRuntime for each test — it uses the global registry.
-//
-// To test multi-adapter scenarios, we create a SEPARATE AdapterRegistry
-// instance and a custom InfrastructureRuntime-like wrapper that uses it.
-// This avoids polluting the global singleton.
-
-import { AdapterRegistry as AdapterRegistryClass } from '../src/lib/kernel/runtime/adapter-registry'
-import { finalizeExecutionIfTerminal } from '../src/lib/kernel/execution/execution.service'
-import type {
-  InfrastructureAdapter,
-  ExecuteCommand,
-  ExecuteResult,
-  AssetCapabilities,
-  TelemetryReading,
-  HealthStatus,
-} from '../src/lib/kernel/adapters/infrastructure-adapter'
+// The InfrastructureRuntime accepts an AdapterRegistry in its constructor
+// (dependency injection), so tests can create an isolated registry + runtime
+// without polluting the global singleton.
 
 // Helper: create a mock adapter with a specific adapterType.
 function mockNamedAdapter(adapterType: string): InfrastructureAdapter {
@@ -327,44 +322,15 @@ function mockNamedAdapter(adapterType: string): InfrastructureAdapter {
   }
 }
 
-// Helper: create a runtime that uses a specific registry (not the global one).
-// This lets us test multi-adapter scenarios without polluting the global state.
-function createRuntimeWithRegistry(registry: AdapterRegistryClass) {
-  return {
-    async executeAssignment(input: import('../src/lib/kernel/runtime/types').RuntimeExecuteInput) {
-      const adapter = registry.resolve({
-        assetType: input.assetType,
-        adapterType: input.adapterType,
-        capabilityType: input.capabilityType,
-      })
-      const result = await adapter.execute({
-        assetId: input.assetId,
-        capabilityType: input.capabilityType,
-        assignedQuantity: input.assignedQuantity,
-        assignedUnit: input.assignedUnit,
-        durationSeconds: input.durationSeconds,
-        parameters: input.parameters,
-      })
-      return {
-        actualQuantity: result.actualQuantity,
-        actualUnit: result.actualUnit,
-        telemetryPayload: result.telemetry.payload,
-        success: result.success,
-        error: result.error,
-      }
-    },
-  }
-}
-
-describe('Phase 7.2: runtime adapter selection', () => {
+describe('Phase 7.3: runtime adapter selection (real InfrastructureRuntime)', () => {
   it('explicit adapterType resolves the correct adapter', async () => {
-    const reg = new AdapterRegistryClass()
-    const adapterA = mockNamedAdapter('adapter_a')
-    const adapterB = mockNamedAdapter('adapter_b')
-    reg.register({ adapter: adapterA, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
-    reg.register({ adapter: adapterB, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    // Create an isolated registry with two adapters for 'battery'.
+    const reg = new AdapterRegistry()
+    reg.register({ adapter: mockNamedAdapter('adapter_a'), supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    reg.register({ adapter: mockNamedAdapter('adapter_b'), supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
 
-    const runtime = createRuntimeWithRegistry(reg)
+    // Use the REAL InfrastructureRuntime with the isolated registry.
+    const runtime = new InfrastructureRuntime(reg)
 
     // Explicit adapterType: adapter_a
     const resultA = await runtime.executeAssignment({
@@ -394,11 +360,11 @@ describe('Phase 7.2: runtime adapter selection', () => {
   })
 
   it('omitted adapterType resolves single adapter', async () => {
-    const reg = new AdapterRegistryClass()
-    const adapter = mockNamedAdapter('only_adapter')
-    reg.register({ adapter: adapter, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    const reg = new AdapterRegistry()
+    reg.register({ adapter: mockNamedAdapter('only_adapter'), supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
 
-    const runtime = createRuntimeWithRegistry(reg)
+    // Real InfrastructureRuntime with isolated registry.
+    const runtime = new InfrastructureRuntime(reg)
 
     const result = await runtime.executeAssignment({
       assetId: 'asset-1',
@@ -414,13 +380,12 @@ describe('Phase 7.2: runtime adapter selection', () => {
   })
 
   it('omitted adapterType with multiple adapters throws (ambiguous)', async () => {
-    const reg = new AdapterRegistryClass()
-    const adapterA = mockNamedAdapter('adapter_a')
-    const adapterB = mockNamedAdapter('adapter_b')
-    reg.register({ adapter: adapterA, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
-    reg.register({ adapter: adapterB, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    const reg = new AdapterRegistry()
+    reg.register({ adapter: mockNamedAdapter('adapter_a'), supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    reg.register({ adapter: mockNamedAdapter('adapter_b'), supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
 
-    const runtime = createRuntimeWithRegistry(reg)
+    // Real InfrastructureRuntime with isolated registry.
+    const runtime = new InfrastructureRuntime(reg)
 
     await expect(
       runtime.executeAssignment({
@@ -436,11 +401,11 @@ describe('Phase 7.2: runtime adapter selection', () => {
   })
 
   it('capability mismatch throws', async () => {
-    const reg = new AdapterRegistryClass()
-    const adapter = mockNamedAdapter('energy_only')
-    reg.register({ adapter: adapter, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    const reg = new AdapterRegistry()
+    reg.register({ adapter: mockNamedAdapter('energy_only'), supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
 
-    const runtime = createRuntimeWithRegistry(reg)
+    // Real InfrastructureRuntime with isolated registry.
+    const runtime = new InfrastructureRuntime(reg)
 
     await expect(
       runtime.executeAssignment({
@@ -458,7 +423,7 @@ describe('Phase 7.2: runtime adapter selection', () => {
     // The global adapterRegistry has 'simulated_der' registered for battery
     // (via beforeAll → initializeBootstrap). This proves VPP's current usage
     // (no adapterType) still works — the runtime resolves the single adapter.
-    const runtime = new InfrastructureRuntime()
+    const runtime = new InfrastructureRuntime(adapterRegistry)
     const result = await runtime.executeAssignment({
       assetId: 'vpp-asset',
       assetType: 'battery',
@@ -477,11 +442,6 @@ describe('Phase 7.2: runtime adapter selection', () => {
 // ---------------------------------------------------------------------------
 // Test 8: Phase 7 — AdapterRegistry hardening (behavioral)
 // ---------------------------------------------------------------------------
-
-// We use a fresh AdapterRegistry instance for these tests (not the global
-// singleton) to avoid interference with the bootstrap-registered adapters.
-import { AdapterRegistry } from '../src/lib/kernel/runtime/adapter-registry'
-import type { InfrastructureAdapter, ExecuteCommand, ExecuteResult } from '../src/lib/kernel/adapters/infrastructure-adapter'
 
 // Helper: create a minimal mock adapter for testing.
 function mockAdapter(adapterType: string, assetTypes: string[], capabilities: string[]): InfrastructureAdapter {

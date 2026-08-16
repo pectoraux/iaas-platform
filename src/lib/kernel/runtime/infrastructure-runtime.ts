@@ -1,5 +1,5 @@
 // =============================================================================
-// Kernel: Infrastructure Runtime (Phase 5)
+// Kernel: Infrastructure Runtime (Phase 5, hardened Phase 7.3)
 // =============================================================================
 // The InfrastructureRuntime is the runtime implementation for
 // runtimeKind = 'infrastructure'. It is the CURRENT execution model:
@@ -13,12 +13,20 @@
 //   VPP → RuntimeRegistry → InfrastructureRuntime → execution.service → Execution
 //
 // The InfrastructureRuntime is transaction-aware: all methods accept a `tx`
-// (Prisma TransactionClient or db) so the generic execution lifecycle changes
+// (Prisma.TransactionClient or db) so the generic execution lifecycle changes
 // are atomic with the vertical's state transitions.
+//
+// Phase 7.3 — DEPENDENCY INJECTION:
+// The runtime accepts an AdapterRegistry instance in its constructor, rather
+// than importing the global singleton. This makes the runtime testable with
+// an isolated registry — tests can create `new AdapterRegistry()` +
+// `new InfrastructureRuntime(registry)` without polluting global state.
+// The application bootstrap constructs the registry + runtime and registers
+// the runtime with the RuntimeRegistry.
 // =============================================================================
 
 import { finalizeExecutionIfTerminal } from '../execution/execution.service'
-import { adapterRegistry } from './adapter-registry'
+import type { AdapterRegistry } from './adapter-registry'
 import type {
   NetworkRuntime,
   RuntimeAssignmentResults,
@@ -33,8 +41,21 @@ import type {
 // InfrastructureRuntime
 // ---------------------------------------------------------------------------
 
+/**
+ * The runtime implementation for runtimeKind = 'infrastructure'.
+ *
+ * Phase 7.3: Accepts an AdapterRegistry instance in its constructor.
+ * The bootstrap constructs the registry + runtime; tests can construct
+ * an isolated registry for multi-adapter scenarios.
+ */
 export class InfrastructureRuntime implements NetworkRuntime {
   readonly kind = 'infrastructure' as const
+
+  /**
+   * @param adapterRegistry The registry this runtime uses for adapter resolution.
+   *   Injected (not imported as a global) so tests can use an isolated registry.
+   */
+  constructor(private readonly adapterRegistry: AdapterRegistry) {}
 
   async createExecution(
     tx: RuntimeClient,
@@ -114,7 +135,7 @@ export class InfrastructureRuntime implements NetworkRuntime {
     // - If adapterType is omitted + multiple adapters: AMBIGUOUS, throws.
     // - Unknown asset/adapter: throws. No silent fallback.
     // - capabilityType is checked against the adapter's supported capabilities.
-    const adapter = adapterRegistry.resolve({
+    const adapter = this.adapterRegistry.resolve({
       assetType: input.assetType,
       adapterType: input.adapterType,
       capabilityType: input.capabilityType,

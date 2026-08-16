@@ -611,12 +611,39 @@ describe('Architecture contract: physical execution boundary (Phase 6)', () => {
 
     // Phase 7.2: The runtime must use adapterRegistry.resolve({ assetType, adapterType, capabilityType })
     // — the full selection contract — NOT the old resolveAdapter(assetType) helper.
-    expect(content).toMatch(/adapterRegistry\.resolve\(/)
+    expect(content).toMatch(/this\.adapterRegistry\.resolve\(/)
     expect(content).toMatch(/assetType:\s*input\.assetType/)
     expect(content).toMatch(/adapterType:\s*input\.adapterType/)
     expect(content).toMatch(/capabilityType:\s*input\.capabilityType/)
     // Must NOT use the old backward-compatible helper.
     expect(content).not.toMatch(/resolveAdapter\(/)
+  })
+
+  it('InfrastructureRuntime accepts AdapterRegistry in constructor (Phase 7.3)', () => {
+    const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
+    const content = readFileSync(infraPath, 'utf-8')
+
+    // Phase 7.3: The runtime must accept an AdapterRegistry in its constructor
+    // (dependency injection), not import the global singleton.
+    expect(content).toMatch(/constructor\(private readonly adapterRegistry:\s*AdapterRegistry\)/)
+    // Must import the TYPE (not the singleton instance).
+    expect(content).toMatch(/import type \{ AdapterRegistry \}/)
+    // Must NOT import the global adapterRegistry singleton instance.
+    expect(content).not.toMatch(/import \{ adapterRegistry \}/)
+    // Must use this.adapterRegistry, not a global.
+    expect(content).toMatch(/this\.adapterRegistry/)
+  })
+
+  it('kernel/runtime/index.ts does NOT auto-register runtimes (bootstrap owns construction)', () => {
+    const indexPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'index.ts')
+    const content = readFileSync(indexPath, 'utf-8')
+
+    // Phase 7.3: The kernel must NOT auto-register runtimes. The bootstrap
+    // constructs InfrastructureRuntime(registry) and registers it.
+    expect(content).not.toMatch(/new InfrastructureRuntime\(\)/)
+    expect(content).not.toMatch(/ensureRegistered\(\)/)
+    // Must export resolveRuntime that just resolves from the registry.
+    expect(content).toMatch(/export function resolveRuntime/)
   })
 
   it('kernel runtime directory has adapter-registry (generic, no concrete imports)', () => {

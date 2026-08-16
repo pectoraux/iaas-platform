@@ -1,14 +1,21 @@
 // =============================================================================
-// Kernel: Runtime Registry Initialization (Phase 5)
+// Kernel: Runtime Module (Phase 5, hardened Phase 7.3)
 // =============================================================================
-// This module registers all canonical runtimes with the RuntimeRegistry
-// singleton. It is imported once at application startup (via the VPP service
-// or any other vertical that needs to resolve a runtime).
+// This module exports the runtime contract types and the RuntimeRegistry
+// singleton. It does NOT auto-register runtimes — that is the application
+// bootstrap's job (src/lib/bootstrap/).
 //
-// The registry is initialized with three runtimes:
-//   - InfrastructureRuntime (fully implemented — the current execution model)
-//   - ProtocolRuntime (stub — Phase 9)
-//   - HybridRuntime (stub — Phase 10)
+// Phase 7.3 — NO AUTO-REGISTRATION:
+//   Previously, this module auto-registered InfrastructureRuntime,
+//   ProtocolRuntime, and HybridRuntime on import. But InfrastructureRuntime
+//   now requires an AdapterRegistry in its constructor (dependency injection),
+//   and the kernel cannot import the bootstrap (which constructs the registry).
+//   So runtime registration moved to the bootstrap layer.
+//
+//   The application (via instrumentation.ts → initializeBootstrap) constructs
+//   the AdapterRegistry, constructs InfrastructureRuntime(registry), and
+//   registers all three runtimes with the RuntimeRegistry. Tests that need
+//   the global registry call initializeBootstrap() in beforeAll().
 //
 // Verticals import `resolveRuntime` from this module to resolve a
 // NetworkVersion's runtimeKind to a concrete NetworkRuntime. They never
@@ -16,28 +23,7 @@
 // =============================================================================
 
 import { runtimeRegistry } from './registry'
-import { InfrastructureRuntime } from './infrastructure-runtime'
-import { ProtocolRuntime } from './protocol-runtime'
-import { HybridRuntime } from './hybrid-runtime'
 import type { NetworkRuntime, RuntimeKind } from './types'
-
-// ---------------------------------------------------------------------------
-// Register canonical runtimes (once)
-// ---------------------------------------------------------------------------
-
-let initialized = false
-
-function ensureRegistered(): void {
-  if (initialized) return
-  runtimeRegistry.register(new InfrastructureRuntime())
-  runtimeRegistry.register(new ProtocolRuntime())
-  runtimeRegistry.register(new HybridRuntime())
-  initialized = true
-}
-
-// Auto-register on module load. This is idempotent (the registry throws on
-// double-registration, but this module is only loaded once).
-ensureRegistered()
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -46,17 +32,17 @@ ensureRegistered()
 /**
  * Resolve a runtime kind to its concrete NetworkRuntime implementation.
  *
- * This is the ONLY function verticals should call to get a runtime. It
- * ensures the registry is initialized, then resolves.
+ * Phase 7.3: This does NOT auto-register. The application bootstrap must
+ * have called initializeBootstrap() (which registers runtimes) before any
+ * code calls this. If no runtime is registered, it throws.
  *
  * THROWS if the kind is not registered — there is no silent fallback.
  */
 export function resolveRuntime(kind: RuntimeKind): NetworkRuntime {
-  ensureRegistered()
   return runtimeRegistry.resolve(kind)
 }
 
-// Re-export the registry for testing/diagnostics.
+// Re-export the registry for bootstrap + testing.
 export { runtimeRegistry }
 export type { NetworkRuntime, RuntimeKind, RuntimeExecuteInput, RuntimeExecuteResult } from './types'
 export { RUNTIME_KINDS, validateRuntimeKind, isRuntimeKind } from './types'
