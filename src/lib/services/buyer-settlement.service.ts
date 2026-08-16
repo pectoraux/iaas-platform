@@ -24,7 +24,6 @@ import { randomUUID } from 'crypto'
 import { NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import { ensureBuyerFundsAccount, ensurePlatformAccount, postBalancedPosting, computeBalance } from './ledger.service'
-import { supportsRowLocking } from '@/lib/kernel/db/provider'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -378,14 +377,12 @@ export async function processBuyerSettlement(
       const buyerAccount = await ensureBuyerFundsAccount(tenantId, currency)
       const revenueAccount = await ensurePlatformAccount(tenantId, currency, 'revenue')
 
-      // Lock the buyer funds account for the funding check (PostgreSQL only).
-      if (supportsRowLocking()) {
-        await db.$queryRaw`
-          SELECT * FROM "LedgerAccount"
-          WHERE "id" = ${buyerAccount.id}
-          FOR UPDATE
-        `
-      }
+      // Lock the buyer funds account for the funding check.
+      await db.$queryRaw`
+        SELECT * FROM "LedgerAccount"
+        WHERE "id" = ${buyerAccount.id}
+        FOR UPDATE
+      `
 
       const balance = await computeBalance(tenantId, buyerAccount.id)
       buyerFundsBalanceAfter = balance.minus(buyerCharge)

@@ -20,18 +20,9 @@ import { createAttestationForEvent } from './attestation.service'
 import { paymentsService } from './payments.service'
 import { ensureOperatorAccount, ensurePlatformAccount, postBalancedPosting, computeBalance } from './ledger.service'
 import { Prisma } from '@prisma/client'
-import { supportsRowLocking } from '@/lib/kernel/db/provider'
 
 const LEASE_DURATION_MINUTES = 5
 const BATCH_SIZE = 50
-
-/**
- * Compute the lease expiry timestamp (now + LEASE_DURATION_MINUTES).
- * Centralised so both the postgres and sqlite claiming paths agree.
- */
-function computeLeaseExpiry(): Date {
-  return new Date(Date.now() + LEASE_DURATION_MINUTES * 60_000)
-}
 
 // ---------------------------------------------------------------------------
 // Event outbox worker (tasks 2, 10)
@@ -44,65 +35,25 @@ function computeLeaseExpiry(): Date {
  * Also reclaims stale 'processing' events whose lease has expired (crash recovery).
  */
 async function claimEvents(tenantId?: string): Promise<string[]> {
-  if (supportsRowLocking()) {
-    // PostgreSQL: atomic UPDATE ... FOR UPDATE SKIP LOCKED ... RETURNING.
-    const tenantFilter = tenantId ? Prisma.sql`AND "tenantId" = ${tenantId}` : Prisma.empty
-    const result = await db.$queryRaw<Array<{ id: string }>>`
-      UPDATE "Event"
-      SET status = 'processing',
-          "claimedAt" = NOW(),
-          "leaseExpiresAt" = NOW() + INTERVAL '${Prisma.raw(String(LEASE_DURATION_MINUTES))} minutes'
-      WHERE id IN (
-        SELECT id FROM "Event"
-        WHERE (status = 'queued'
-               OR (status = 'processing' AND "leaseExpiresAt" < NOW()))
-              ${tenantFilter}
-        LIMIT ${BATCH_SIZE}
-        FOR UPDATE SKIP LOCKED
-      )
-      RETURNING id
-    `
-    return result.map((r) => r.id)
-  }
-
-  // SQLite fallback: find eligible events, then atomically claim each via
-  // updateMany CAS (status + lease check). A transaction serializes the
-  // find + claim so two concurrent workers cannot claim the same row.
-  return db.$transaction(async (tx) => {
-    const eligible = await tx.event.findMany({
-      where: {
-        ...(tenantId ? { tenantId } : {}),
-        OR: [
-          { status: 'queued' },
-          { status: 'processing', leaseExpiresAt: { lt: new Date() } },
-        ],
-      },
-      select: { id: true, status: true, leaseExpiresAt: true },
-      take: BATCH_SIZE,
-    })
-    const now = new Date()
-    const lease = computeLeaseExpiry()
-    const claimed: string[] = []
-    for (const ev of eligible) {
-      // CAS: only claim if still in the expected pre-claim state.
-      const cas = await tx.event.updateMany({
-        where: {
-          id: ev.id,
-          OR: [
-            { status: 'queued' },
-            { status: 'processing', leaseExpiresAt: { lt: now } },
-          ],
-        },
-        data: {
-          status: 'processing',
-          claimedAt: now,
-          leaseExpiresAt: lease,
-        },
-      })
-      if (cas.count > 0) claimed.push(ev.id)
-    }
-    return claimed
-  })
+  // Raw SQL: atomically transition queued/expired-lease events to 'processing'
+  // with a lease. FOR UPDATE SKIP LOCKED ensures no two workers claim the same row.
+  const tenantFilter = tenantId ? Prisma.sql`AND "tenantId" = ${tenantId}` : Prisma.empty
+  const result = await db.$queryRaw<Array<{ id: string }>>`
+    UPDATE "Event"
+    SET status = 'processing',
+        "claimedAt" = NOW(),
+        "leaseExpiresAt" = NOW() + INTERVAL '${Prisma.raw(String(LEASE_DURATION_MINUTES))} minutes'
+    WHERE id IN (
+      SELECT id FROM "Event"
+      WHERE (status = 'queued'
+             OR (status = 'processing' AND "leaseExpiresAt" < NOW()))
+            ${tenantFilter}
+      LIMIT ${BATCH_SIZE}
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id
+  `
+  return result.map((r) => r.id)
 }
 
 /**
@@ -277,61 +228,23 @@ export async function processEventOutbox(tenantId?: string): Promise<{ processed
  * Atomically claim 'created' settlements using FOR UPDATE SKIP LOCKED (task 2).
  */
 async function claimSettlements(tenantId?: string): Promise<string[]> {
-  if (supportsRowLocking()) {
-    const tenantFilter = tenantId ? Prisma.sql`AND "tenantId" = ${tenantId}` : Prisma.empty
-    const result = await db.$queryRaw<Array<{ id: string }>>`
-      UPDATE "Settlement"
-      SET status = 'claiming',
-          "claimedAt" = NOW(),
-          "leaseExpiresAt" = NOW() + INTERVAL '${Prisma.raw(String(LEASE_DURATION_MINUTES))} minutes'
-      WHERE id IN (
-        SELECT id FROM "Settlement"
-        WHERE (status = 'created'
-               OR (status = 'claiming' AND "leaseExpiresAt" < NOW()))
-              ${tenantFilter}
-        LIMIT ${BATCH_SIZE}
-        FOR UPDATE SKIP LOCKED
-      )
-      RETURNING id
-    `
-    return result.map((r) => r.id)
-  }
-
-  // SQLite fallback: find + CAS claim (same pattern as claimEvents).
-  return db.$transaction(async (tx) => {
-    const eligible = await tx.settlement.findMany({
-      where: {
-        ...(tenantId ? { tenantId } : {}),
-        OR: [
-          { status: 'created' },
-          { status: 'claiming', leaseExpiresAt: { lt: new Date() } },
-        ],
-      },
-      select: { id: true, status: true, leaseExpiresAt: true },
-      take: BATCH_SIZE,
-    })
-    const now = new Date()
-    const lease = computeLeaseExpiry()
-    const claimed: string[] = []
-    for (const st of eligible) {
-      const cas = await tx.settlement.updateMany({
-        where: {
-          id: st.id,
-          OR: [
-            { status: 'created' },
-            { status: 'claiming', leaseExpiresAt: { lt: now } },
-          ],
-        },
-        data: {
-          status: 'claiming',
-          claimedAt: now,
-          leaseExpiresAt: lease,
-        },
-      })
-      if (cas.count > 0) claimed.push(st.id)
-    }
-    return claimed
-  })
+  const tenantFilter = tenantId ? Prisma.sql`AND "tenantId" = ${tenantId}` : Prisma.empty
+  const result = await db.$queryRaw<Array<{ id: string }>>`
+    UPDATE "Settlement"
+    SET status = 'claiming',
+        "claimedAt" = NOW(),
+        "leaseExpiresAt" = NOW() + INTERVAL '${Prisma.raw(String(LEASE_DURATION_MINUTES))} minutes'
+    WHERE id IN (
+      SELECT id FROM "Settlement"
+      WHERE (status = 'created'
+             OR (status = 'claiming' AND "leaseExpiresAt" < NOW()))
+            ${tenantFilter}
+      LIMIT ${BATCH_SIZE}
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id
+  `
+  return result.map((r) => r.id)
 }
 
 /**

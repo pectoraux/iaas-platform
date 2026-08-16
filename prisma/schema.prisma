@@ -23,12 +23,24 @@ generator client {
 }
 
 datasource db {
-  // The platform schema is designed for PostgreSQL (row-level locking via
-  // FOR UPDATE, SKIP LOCKED). In local/test environments SQLite is used.
-  // Service code uses src/lib/kernel/db/provider.ts to conditionally skip
-  // postgres-only raw SQL when running on SQLite. The transaction is the
-  // correctness boundary; FOR UPDATE is a concurrency optimisation.
-  provider = "sqlite"
+  // =========================================================================
+  // DATABASE PROVIDER CONTRACT (Phase 4.3 — frozen)
+  // =========================================================================
+  // Canonical provider: PostgreSQL. The platform is deployed on Vercel with
+  // a PostgreSQL database (Neon). PostgreSQL is the ONLY supported provider
+  // for production and for all test suites.
+  //
+  // Concurrency guarantees (FOR UPDATE, FOR UPDATE SKIP LOCKED, NOW(),
+  // INTERVAL, RETURNING) are KERNEL INVARIANTS, not environment-conditional
+  // optimisations. They are used unconditionally in the service layer. A
+  // SQLite database CANNOT run this application — the raw SQL will fail
+  // and the generated Prisma client expects a postgresql:// URL.
+  //
+  // To run database-backed tests locally, use a PostgreSQL instance
+  // (Docker, Neon dev branch, or local postgres). Do NOT change this
+  // provider to sqlite — that would break the persistence contract.
+  // =========================================================================
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -390,7 +402,7 @@ model Attestation {
   tenantId                  String
   eventId                   String
   claimType                 String   // valid_measurement | valid_usage | ...
-  quantity                  Decimal
+  quantity                  Decimal @db.Decimal(20, 8)
   unit                      String
   status                    String   @default("verified") // verified | disputed | revoked
   verificationPolicyVersion Int      // = NetworkVersion.version (task 6)
@@ -416,7 +428,7 @@ model Contribution {
   operatorId       String
   assetId          String
   capabilityId     String
-  quantity         Decimal
+  quantity         Decimal @db.Decimal(20, 8)
   unit             String
   startTime        DateTime
   endTime          DateTime
@@ -629,7 +641,7 @@ model Reward {
   tenantId        String
   contributionId  String
   operatorId      String
-  amount          Decimal
+  amount          Decimal @db.Decimal(20, 8)
   currency        String   @default("USD")
   ruleVersion     Int
   ruleId          String
@@ -715,7 +727,7 @@ model LedgerEntry {
   tenantId  String
   postingId String
   accountId String
-  amount    Decimal // signed: +credit / -debit; sum per posting MUST = 0
+  amount    Decimal @db.Decimal(20, 8) // signed: +credit / -debit; sum per posting MUST = 0
   currency  String   @default("USD")
   entryType String   // reward_credit | platform_fee | buyer_debit | settlement_debit | settlement_credit | funding_credit | funding_debit
   createdAt DateTime @default(now())
@@ -742,7 +754,7 @@ model Settlement {
   tenantId         String
   rewardId         String   @unique
   operatorId       String
-  amount           Decimal
+  amount           Decimal @db.Decimal(20, 8)
   currency         String   @default("USD")
   status           String   @default("created") // created | claiming | submitted | processing | completed | failed | retrying
   idempotencyKey   String?

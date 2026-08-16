@@ -27,7 +27,6 @@
 import { db, type ExtendedTransactionClient } from '@/lib/db'
 import { Prisma } from '@prisma/client'
 import { NotFoundError, ValidationError, InsufficientCapacityError } from '@/lib/domain/errors'
-import { supportsRowLocking } from '@/lib/kernel/db/provider'
 
 // ---------------------------------------------------------------------------
 // CapacityResource — the verified physical capacity (stable lock target)
@@ -132,15 +131,13 @@ export async function createCapacityReservation(
     )
   }
 
-  if (supportsRowLocking()) {
-    await client.$queryRaw`
-      SELECT * FROM "CapacityResource"
-      WHERE "assetId" = ${input.assetId}
-        AND "networkId" = ${input.networkId}
-        AND "capabilityType" = ${input.capabilityType}
-      FOR UPDATE
-    `
-  }
+  await client.$queryRaw`
+    SELECT * FROM "CapacityResource"
+    WHERE "assetId" = ${input.assetId}
+      AND "networkId" = ${input.networkId}
+      AND "capabilityType" = ${input.capabilityType}
+    FOR UPDATE
+  `
 
   if (input.sourceId) {
     const existing = await client.capacityReservation.findFirst({
@@ -237,13 +234,11 @@ export async function createCapacityCommitment(
     throw new ValidationError(`Committed amount must be positive, got ${input.committedAmount}`)
   }
 
-  if (supportsRowLocking()) {
-    await client.$queryRaw`
-      SELECT * FROM "CapacityReservation"
-      WHERE id = ${input.reservationId}
-      FOR UPDATE
-    `
-  }
+  await client.$queryRaw`
+    SELECT * FROM "CapacityReservation"
+    WHERE id = ${input.reservationId}
+    FOR UPDATE
+  `
 
   const reservation = await client.capacityReservation.findUnique({
     where: { id: input.reservationId },
@@ -352,10 +347,8 @@ export async function recordUsage(input: RecordUsageInput): Promise<{ usageId: s
   // Atomic: create usage + mark commitment consumed in ONE transaction.
   try {
     const result = await db.$transaction(async (tx) => {
-      // Lock the commitment FOR UPDATE (PostgreSQL only).
-      if (supportsRowLocking()) {
-        await tx.$queryRaw`SELECT * FROM "CapacityCommitment" WHERE id = ${input.commitmentId} FOR UPDATE`
-      }
+      // Lock the commitment FOR UPDATE.
+      await tx.$queryRaw`SELECT * FROM "CapacityCommitment" WHERE id = ${input.commitmentId} FOR UPDATE`
 
       const commitment = await tx.capacityCommitment.findUnique({
         where: { id: input.commitmentId },
@@ -437,33 +430,21 @@ export async function releaseCommitment(
   sourceId: string,
 ): Promise<void> {
   await db.$transaction(async (tx) => {
-    // Lock the commitment FOR UPDATE (concurrency-safe, PostgreSQL only).
-    // On SQLite the transaction isolation suffices; we look up via Prisma.
-    let commitment: { id: string; status: string; reservationId: string; committedAmount: string } | undefined
-    if (supportsRowLocking()) {
-      const commitments = await tx.$queryRaw<Array<{ id: string; status: string; reservationId: string; committedAmount: string }>>`
-        SELECT * FROM "CapacityCommitment"
-        WHERE "tenantId" = ${tenantId}
-          AND "sourceType" = ${sourceType}
-          AND "sourceId" = ${sourceId}
-        FOR UPDATE
-      `
-      commitment = commitments[0]
-    } else {
-      const found = await tx.capacityCommitment.findFirst({
-        where: { tenantId, sourceType, sourceId },
-        select: { id: true, status: true, reservationId: true, committedAmount: true },
-      })
-      commitment = found ?? undefined
-    }
+    // Lock the commitment FOR UPDATE (concurrency-safe).
+    const commitments = await tx.$queryRaw<Array<{ id: string; status: string; reservationId: string; committedAmount: string }>>`
+      SELECT * FROM "CapacityCommitment"
+      WHERE "tenantId" = ${tenantId}
+        AND "sourceType" = ${sourceType}
+        AND "sourceId" = ${sourceId}
+      FOR UPDATE
+    `
+    const commitment = commitments[0]
     if (!commitment) return
     // Re-check status inside the lock (another caller may have already released/consumed).
     if (commitment.status === 'released' || commitment.status === 'consumed') return
 
-    // Lock the reservation FOR UPDATE (PostgreSQL only).
-    if (supportsRowLocking()) {
-      await tx.$queryRaw`SELECT * FROM "CapacityReservation" WHERE id = ${commitment.reservationId} FOR UPDATE`
-    }
+    // Lock the reservation FOR UPDATE.
+    await tx.$queryRaw`SELECT * FROM "CapacityReservation" WHERE id = ${commitment.reservationId} FOR UPDATE`
 
     const reservation = await tx.capacityReservation.findUnique({ where: { id: commitment.reservationId } })
     if (!reservation) return

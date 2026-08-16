@@ -21,7 +21,6 @@ import { Prisma } from '@prisma/client'
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import { emit, DomainEventTypes } from '@/lib/domain/events'
-import { supportsRowLocking } from '@/lib/kernel/db/provider'
 
 // ---------------------------------------------------------------------------
 // Account helpers
@@ -322,17 +321,13 @@ export async function postRewardToLedger(
 
   try {
     const result = await db.$transaction(async (tx) => {
-      // Issue 2: lock the buyer's LedgerAccount row FOR UPDATE (PostgreSQL
-      // only). This prevents any concurrent transaction from posting to the
-      // same buyer account until we commit. On SQLite the transaction
-      // isolation provides the same guarantee. We lock the ACCOUNT row (not
-      // the entries) because:
+      // Issue 2: lock the buyer's LedgerAccount row FOR UPDATE. This prevents
+      // any concurrent transaction from posting to the same buyer account
+      // until we commit. We lock the ACCOUNT row (not the entries) because:
       //   - it's always exactly one row (fast lock)
       //   - it serializes all postings to this account
       //   - it works even when the account has zero entries
-      if (supportsRowLocking()) {
-        await tx.$queryRaw`SELECT * FROM "LedgerAccount" WHERE "id" = ${buyerFundsAccount.id} FOR UPDATE`
-      }
+      await tx.$queryRaw`SELECT * FROM "LedgerAccount" WHERE "id" = ${buyerFundsAccount.id} FOR UPDATE`
 
       // Compute the buyer's current balance (inside the lock).
       const buyerEntries = await tx.ledgerEntry.findMany({ where: { accountId: buyerFundsAccount.id } })

@@ -45,7 +45,6 @@ import {
   updateAssignmentResults as updateGenericAssignmentResults,
   finalizeExecutionIfTerminal,
 } from '@/lib/kernel/execution/execution.service'
-import { supportsRowLocking } from '@/lib/kernel/db/provider'
 
 const derAdapter: DERAdapter = new SimulatedDERAdapter()
 
@@ -353,19 +352,15 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
 
   // Task 5: transactional dispatch — create dispatch + allocations + assignments atomically.
   const dispatch = await db.$transaction(async (tx) => {
-    // Lock all active reservations for this program (PostgreSQL only —
-    // SQLite's transaction isolation makes this redundant; skipped via
-    // supportsRowLocking()).
-    if (supportsRowLocking()) {
-      await tx.$queryRaw`
-        SELECT * FROM "VppCapacityReservation"
-        WHERE "programId" = ${input.programId}
-          AND status = 'active'
-          AND "effectiveFrom" < ${endTime}
-          AND "effectiveTo" > ${startTime}
-        FOR UPDATE
-      `
-    }
+    // Lock all active reservations for this program.
+    await tx.$queryRaw`
+      SELECT * FROM "VppCapacityReservation"
+      WHERE "programId" = ${input.programId}
+        AND status = 'active'
+        AND "effectiveFrom" < ${endTime}
+        AND "effectiveTo" > ${startTime}
+      FOR UPDATE
+    `
 
     // Reload reservations inside the lock.
     const reservations = await tx.vppCapacityReservation.findMany({
