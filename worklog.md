@@ -1975,3 +1975,60 @@ Stage Summary:
 - The generic Execution now answers "did the work execute?" NOT "did every economic obligation get paid?"
 - Settlement failure → VPP reconciliation_required (economic), generic assignment stays completed (operational).
 - Phase 5.2 is complete. Phase 6 (InfrastructureRuntime extraction + AdapterRegistry) is ready to begin.
+
+---
+Task ID: Phase-5.3-Schema-Cleanup
+Agent: orchestrator
+Task: Remove ExecutionAssignment.economicStage and Execution.contributionId from the generic kernel models (no universal invariant requires them). Make linkContribution() fenced/idempotent. Do NOT alter VPP-specific economicStage.
+
+Work Log:
+- AUDIT — ExecutionAssignment.economicStage:
+  - Set by InfrastructureRuntime.completeAssignment (always to 'completed').
+  - Accepted optionally by execution.service updateAssignmentResults.
+  - NEVER READ for any logic — no code branches on it.
+  - It's a leak of VPP's economicStage concept into the generic layer.
+  - VERDICT: No universal invariant. Remove it. The generic layer only needs `status`.
+- AUDIT — Execution.contributionId (parent-level):
+  - NEVER SET or READ anywhere in any .ts file.
+  - A dead field from the initial design. An Execution can have multiple assignments, each with its own contribution — a single contributionId on the parent makes no sense.
+  - VERDICT: No universal invariant. Remove it.
+- AUDIT — ExecutionAssignment.contributionId:
+  - This IS needed — it's the link that linkContribution() sets, connecting the assignment to its derived economic contribution.
+  - VERDICT: Keep it.
+- SCHEMA CHANGES (prisma/schema.prisma):
+  - Removed `contributionId String?` from Execution model.
+  - Removed `economicStage String @default("none")` from ExecutionAssignment model.
+  - ExecutionAssignment.contributionId kept (the link linkContribution sets).
+- INFRASTRUCTURERUNTIME (infrastructure-runtime.ts):
+  - completeAssignment: removed `economicStage: 'completed'` from the update. Now only sets `status: 'completed', completedAt`.
+  - linkContribution: rewritten as fenced + idempotent:
+    - FENCED: uses updateMany with CAS `where: { id, status: 'completed' }` — only links if the assignment is completed. A non-completed assignment cannot have a contribution linked.
+    - IDEMPOTENT: linking the same contributionId twice is a no-op (updateMany matches 0 rows but doesn't error). The contributionId itself is the idempotency key.
+- EXECUTION.SERVICE (execution.service.ts):
+  - Removed `economicStage?: string` from the updateAssignmentResults input type.
+  - Removed the economicStage spread from the update data.
+- PROTOCOL/HYBRID RUNTIMES: No changes needed (stubs already don't set economicStage).
+- VPP SERVICE: No changes to VPP-specific economicStage (on VppDispatchAssignment). The VPP service never set economicStage on the generic ExecutionAssignment — it was only set by the runtime's completeAssignment, which is now fixed.
+- TESTS:
+  - vpp-4-2-execution-invariants.test.ts: removed `economicStage: 'completed'` from the ExecutionAssignment update (kept it on VppDispatchAssignment — that's VPP-specific).
+  - phase-5-2-execution-economics-separation.test.ts: added 3 new DB-backed tests for linkContribution fenced/idempotent semantics:
+    - linkContribution is a no-op on a non-completed assignment (fenced)
+    - linkContribution is idempotent — linking the same contributionId twice is a no-op
+    - linkContribution works on a completed assignment and sets contributionId
+  - architecture-contract.test.ts: added 6 new regex tests for Phase 5.3:
+    - ExecutionAssignment does NOT have economicStage field
+    - Execution does NOT have contributionId field
+    - ExecutionAssignment DOES have contributionId (the link)
+    - completeAssignment does NOT set economicStage (as a data field)
+    - linkContribution is fenced (CAS: only links if status=completed)
+    - updateAssignmentResults does NOT accept economicStage
+- CI: The PostgreSQL integration suite in .github/workflows/ci.yml already runs all DB-backed tests (vpp-4-2-execution-invariants, runtime-resolution-integration, phase-5-2-execution-economics-separation). The new Phase 5.3 linkContribution tests are in the phase-5-2 file and will run in CI.
+- VERIFICATION: bun run lint clean. tsc: 102 errors (all pre-existing, zero new). 53 non-DB tests pass (35 regex architecture + 18 runtime resolution, 6 new Phase 5.3 regex tests). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The generic kernel models are now clean: no vertical economics leak into them.
+  - Execution: status, sourceType/sourceId, requestedQuantity/Unit, metadataJson. No contributionId.
+  - ExecutionAssignment: status, actualQuantity/Unit, verifiedQuantity/Unit, eventId, contributionId (the link). No economicStage.
+- linkContribution is fenced (CAS: only links if completed) and idempotent (same contributionId twice = no-op).
+- VPP-specific economicStage on VppDispatchAssignment is untouched.
+- Phase 5.3 is complete. Phase 6 (InfrastructureRuntime extraction) is ready to begin.

@@ -122,7 +122,6 @@ export async function updateAssignmentResults(
     eventId?: string
     contributionId?: string
     status?: string
-    economicStage?: string
   },
 ) {
   const assignment = await db.executionAssignment.findFirst({
@@ -140,7 +139,6 @@ export async function updateAssignmentResults(
       ...(results.eventId ? { eventId: results.eventId } : {}),
       ...(results.contributionId ? { contributionId: results.contributionId } : {}),
       ...(results.status ? { status: results.status } : {}),
-      ...(results.economicStage ? { economicStage: results.economicStage } : {}),
       ...(results.status === 'completed' ? { completedAt: new Date() } : {}),
     },
   })

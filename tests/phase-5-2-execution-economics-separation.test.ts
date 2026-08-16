@@ -305,3 +305,69 @@ describe('Phase 5.2: structural enforcement', () => {
     expect(assignment!.completedAt).toBeTruthy()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Test 6: Phase 5.3 — linkContribution is fenced + idempotent
+// ---------------------------------------------------------------------------
+
+describe('Phase 5.3: linkContribution fenced + idempotent', () => {
+  it('linkContribution is a no-op on a non-completed assignment (fenced)', async () => {
+    const { executionId, assignments, runtime } = await setupExecution(1)
+
+    // Do NOT complete the assignment first.
+    // Attempt to link a contribution — the CAS must prevent it.
+    await db.$transaction(async (tx) => {
+      await runtime.linkContribution(tx, assignments[0].id, 'contrib-fenced-1')
+    })
+
+    // The contributionId must NOT be set — the assignment is not completed.
+    const assignment = await db.executionAssignment.findUnique({ where: { id: assignments[0].id } })
+    expect(assignment!.status).toBe('assigned') // unchanged
+    expect(assignment!.contributionId).toBeNull() // NOT linked
+  })
+
+  it('linkContribution is idempotent — linking the same contributionId twice is a no-op', async () => {
+    const { executionId, assignments, runtime } = await setupExecution(1)
+
+    // Complete the assignment first.
+    await db.$transaction(async (tx) => {
+      await runtime.completeAssignment(tx, tenantId, assignments[0].id, executionId)
+    })
+
+    const contribId = `contrib-idem-${Date.now()}`
+
+    // Link the contribution.
+    await db.$transaction(async (tx) => {
+      await runtime.linkContribution(tx, assignments[0].id, contribId)
+    })
+
+    // Link it AGAIN — must not error, must not change anything.
+    await db.$transaction(async (tx) => {
+      await runtime.linkContribution(tx, assignments[0].id, contribId)
+    })
+
+    // The contributionId is set, the assignment is still completed.
+    const assignment = await db.executionAssignment.findUnique({ where: { id: assignments[0].id } })
+    expect(assignment!.status).toBe('completed')
+    expect(assignment!.contributionId).toBe(contribId)
+  })
+
+  it('linkContribution works on a completed assignment and sets contributionId', async () => {
+    const { executionId, assignments, runtime } = await setupExecution(1)
+
+    // Complete the assignment.
+    await db.$transaction(async (tx) => {
+      await runtime.completeAssignment(tx, tenantId, assignments[0].id, executionId)
+    })
+
+    // Link a contribution.
+    const contribId = `contrib-success-${Date.now()}`
+    await db.$transaction(async (tx) => {
+      await runtime.linkContribution(tx, assignments[0].id, contribId)
+    })
+
+    const assignment = await db.executionAssignment.findUnique({ where: { id: assignments[0].id } })
+    expect(assignment!.status).toBe('completed')
+    expect(assignment!.contributionId).toBe(contribId)
+  })
+})

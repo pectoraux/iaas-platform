@@ -1383,7 +1383,6 @@ model Execution {
   sourceType      String
   sourceId        String?
   metadataJson    String   @default("{}")
-  contributionId  String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -1409,7 +1408,6 @@ model ExecutionAssignment {
   assignedQuantity String
   assignedUnit    String
   status          String   @default("assigned")
-  economicStage   String   @default("none")
   actualQuantity  String?
   actualUnit      String?
   verifiedQuantity String?

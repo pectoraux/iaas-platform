@@ -422,3 +422,85 @@ describe('Architecture contract: execution/economics separation (Phase 5.2)', ()
     expect(content).toMatch(/operationalCompleted = true/)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Test 7: Phase 5.3 — Schema cleanup (no vertical economics on generic models)
+// ---------------------------------------------------------------------------
+
+describe('Architecture contract: schema cleanup (Phase 5.3)', () => {
+  it('ExecutionAssignment does NOT have economicStage field', () => {
+    const schemaPath = join(process.cwd(), 'prisma', 'schema.prisma')
+    const content = readFileSync(schemaPath, 'utf-8')
+
+    // Extract the ExecutionAssignment model block.
+    const match = content.match(/model ExecutionAssignment \{[\s\S]*?\}/)
+    expect(match).not.toBeNull()
+    const modelBlock = match![0]
+
+    // economicStage must NOT appear in the generic ExecutionAssignment model.
+    expect(modelBlock).not.toMatch(/economicStage/)
+  })
+
+  it('Execution does NOT have contributionId field', () => {
+    const schemaPath = join(process.cwd(), 'prisma', 'schema.prisma')
+    const content = readFileSync(schemaPath, 'utf-8')
+
+    // Extract the Execution model block.
+    const match = content.match(/model Execution \{[\s\S]*?\}/)
+    expect(match).not.toBeNull()
+    const modelBlock = match![0]
+
+    // contributionId must NOT appear in the generic Execution model.
+    // (The parent Execution doesn't have a single contribution — each
+    // ExecutionAssignment has its own contributionId.)
+    expect(modelBlock).not.toMatch(/contributionId/)
+  })
+
+  it('ExecutionAssignment DOES have contributionId (the link linkContribution sets)', () => {
+    const schemaPath = join(process.cwd(), 'prisma', 'schema.prisma')
+    const content = readFileSync(schemaPath, 'utf-8')
+
+    const match = content.match(/model ExecutionAssignment \{[\s\S]*?\}/)
+    expect(match).not.toBeNull()
+    const modelBlock = match![0]
+
+    // contributionId IS on ExecutionAssignment — it's the link to the
+    // derived economic contribution, set by linkContribution().
+    expect(modelBlock).toMatch(/contributionId\s+String\?/)
+  })
+
+  it('InfrastructureRuntime.completeAssignment does NOT set economicStage', () => {
+    const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
+    const content = readFileSync(infraPath, 'utf-8')
+
+    // Extract the completeAssignment method block.
+    const match = content.match(/async completeAssignment\([\s\S]*?\n  \}/)
+    expect(match).not.toBeNull()
+    const methodBlock = match![0]
+
+    // economicStage must NOT appear as a DATA FIELD assignment (economicStage: '...')
+    // in the generic completeAssignment. Comments mentioning it are fine.
+    expect(methodBlock).not.toMatch(/economicStage\s*:/)
+  })
+
+  it('linkContribution is fenced (CAS: only links if status=completed)', () => {
+    const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
+    const content = readFileSync(infraPath, 'utf-8')
+
+    // linkContribution must use updateMany with a CAS condition
+    // (status: 'completed') — a non-completed assignment cannot have a
+    // contribution linked.
+    expect(content).toMatch(/linkContribution[\s\S]*updateMany[\s\S]*status:\s*'completed'/)
+  })
+
+  it('execution.service updateAssignmentResults does NOT accept economicStage', () => {
+    const execPath = join(process.cwd(), 'src', 'lib', 'kernel', 'execution', 'execution.service.ts')
+    const content = readFileSync(execPath, 'utf-8')
+
+    // The updateAssignmentResults input type must NOT include economicStage.
+    const match = content.match(/export async function updateAssignmentResults[\s\S]*?\)/)
+    expect(match).not.toBeNull()
+    const methodSignature = match![0]
+    expect(methodSignature).not.toMatch(/economicStage/)
+  })
+})

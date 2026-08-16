@@ -273,7 +273,7 @@ describe('VPP-4.2: partial completion does not finalize parent Execution', () =>
       })
       await tx.executionAssignment.update({
         where: { id: first.executionAssignmentId },
-        data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
+        data: { status: 'completed', completedAt: new Date() },
       })
       // Call finalizeExecutionIfTerminal inside the SAME tx (atomic).
       await finalizeExecutionIfTerminal(tx, tenantId, executionId)

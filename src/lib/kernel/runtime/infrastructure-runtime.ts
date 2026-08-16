@@ -121,10 +121,24 @@ export class InfrastructureRuntime implements NetworkRuntime {
     executionAssignmentId: string,
     contributionId: string,
   ): Promise<void> {
-    // Link the economic contribution to the assignment. This is an economic
-    // link, not an operational one — the assignment may already be completed.
-    await tx.executionAssignment.update({
-      where: { id: executionAssignmentId },
+    // Phase 5.3: Fenced + idempotent link.
+    //
+    // FENCED: Uses updateMany with a CAS condition — only links if the
+    // assignment is 'completed'. A non-completed assignment cannot have a
+    // contribution linked (the work isn't verified yet).
+    //
+    // IDEMPOTENT: If the contributionId is already set to the same value,
+    // the updateMany matches 0 rows (the value is unchanged) but that's
+    // not an error — it's a successful no-op. If the contributionId is
+    // set to a DIFFERENT value, the CAS still matches (status is still
+    // 'completed') and overwrites it — this is the vertical's
+    // responsibility to avoid (a contribution should only be linked once).
+    //
+    // This does NOT use a fencing token because the contributionId itself
+    // is the idempotency key: the vertical creates exactly one contribution
+    // per assignment, and linking the same contributionId twice is a no-op.
+    await tx.executionAssignment.updateMany({
+      where: { id: executionAssignmentId, status: 'completed' },
       data: { contributionId },
     })
   }
@@ -140,9 +154,12 @@ export class InfrastructureRuntime implements NetworkRuntime {
     //
     // Phase 5.2: This is OPERATIONAL completion — called after physical
     // execution + verification, NOT after economic settlement.
+    //
+    // Phase 5.3: No economicStage on the generic assignment — that's a
+    // vertical concept. The generic layer only tracks `status`.
     await tx.executionAssignment.update({
       where: { id: executionAssignmentId },
-      data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
+      data: { status: 'completed', completedAt: new Date() },
     })
     await finalizeExecutionIfTerminal(tx, tenantId, executionId)
   }
