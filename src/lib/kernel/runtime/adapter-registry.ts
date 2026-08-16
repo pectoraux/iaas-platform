@@ -99,27 +99,26 @@ export class AdapterRegistry {
   private readonly assetTypeIndex = new Map<string, Set<string>>()
 
   // -------------------------------------------------------------------------
-  // P7.1 — Atomic registration
+  // P7.1 — Shared descriptor validation (used by register + registerBatch)
   // -------------------------------------------------------------------------
 
   /**
-   * Register an adapter with its supported asset types and capabilities.
+   * Validate a single descriptor completely. This is the SHARED validation
+   * path used by both `register()` and `registerBatch()`.
    *
-   * ATOMIC (P7.1): This method validates the ENTIRE registration before
-   * committing ANY of it. If any conflict is found (duplicate adapterType,
-   * or an asset type that would create ambiguity without a way to
-   * disambiguate), the ENTIRE registration is rejected and the registry
-   * is unchanged. No partial mutation.
+   * Checks:
+   *   - adapterType is non-empty
+   *   - supportedAssetTypes is non-empty
+   *   - every supportedAssetType string is non-empty
    *
-   * IDENTITY (P7.2): The adapter's adapterType must be unique. If an
-   * adapter with the same adapterType is already registered, the call
-   * throws.
+   * Does NOT check adapterType uniqueness against the registry or the batch —
+   * those checks are context-specific (single register vs batch) and are
+   * performed by the callers.
    *
-   * @throws if the adapterType is already registered.
-   * @throws if any supportedAssetType is empty.
+   * @throws if any field-level validation fails.
    */
-  register(descriptor: AdapterDescriptor): void {
-    const { adapter, supportedAssetTypes, supportedCapabilities } = descriptor
+  private validateDescriptor(descriptor: AdapterDescriptor): void {
+    const { adapter, supportedAssetTypes } = descriptor
     const adapterType = adapter.adapterType
 
     if (!adapterType) {
@@ -131,17 +130,6 @@ export class AdapterRegistry {
           `An adapter must support at least one asset type.`,
       )
     }
-
-    // --- VALIDATE PHASE (no mutation) ---
-    // Check adapterType uniqueness.
-    if (this.adaptersByType.has(adapterType)) {
-      throw new Error(
-        `Cannot register adapter '${adapterType}': an adapter with this adapterType ` +
-          `is already registered. Adapter identities are unique.`,
-      )
-    }
-
-    // Check for empty asset type strings.
     for (const at of supportedAssetTypes) {
       if (!at) {
         throw new Error(
@@ -149,8 +137,18 @@ export class AdapterRegistry {
         )
       }
     }
+  }
 
-    // --- COMMIT PHASE (all validations passed) ---
+  /**
+   * Commit a descriptor to the registry. This is the SHARED commit path.
+   * It assumes validation has ALREADY been performed — it does NOT validate.
+   * Called by both `register()` and `registerBatch()` after their respective
+   * validation phases pass.
+   */
+  private commitDescriptor(descriptor: AdapterDescriptor): void {
+    const { adapter, supportedAssetTypes, supportedCapabilities } = descriptor
+    const adapterType = adapter.adapterType
+
     // Store the descriptor.
     this.adaptersByType.set(adapterType, {
       adapter,
@@ -170,20 +168,65 @@ export class AdapterRegistry {
   }
 
   // -------------------------------------------------------------------------
-  // P7.1 — Atomic batch registration (convenience)
+  // P7.1 — Atomic single registration
   // -------------------------------------------------------------------------
 
   /**
-   * Register multiple adapters atomically. If ANY registration in the batch
-   * fails, the ENTIRE batch is rolled back and the registry is unchanged.
+   * Register an adapter with its supported asset types and capabilities.
+   *
+   * ATOMIC (P7.1): Validates the ENTIRE descriptor before committing. If any
+   * validation fails, the registry is unchanged.
+   *
+   * IDENTITY (P7.2): The adapter's adapterType must be unique. If an adapter
+   * with the same adapterType is already registered, the call throws.
+   *
+   * @throws if adapterType is empty.
+   * @throws if supportedAssetTypes is empty or contains empty strings.
+   * @throws if the adapterType is already registered.
+   */
+  register(descriptor: AdapterDescriptor): void {
+    // --- VALIDATE PHASE (no mutation) ---
+    this.validateDescriptor(descriptor)
+    const adapterType = descriptor.adapter.adapterType
+    if (this.adaptersByType.has(adapterType)) {
+      throw new Error(
+        `Cannot register adapter '${adapterType}': an adapter with this adapterType ` +
+          `is already registered. Adapter identities are unique.`,
+      )
+    }
+
+    // --- COMMIT PHASE (all validations passed) ---
+    this.commitDescriptor(descriptor)
+  }
+
+  // -------------------------------------------------------------------------
+  // P7.1 — Atomic batch registration
+  // -------------------------------------------------------------------------
+
+  /**
+   * Register multiple adapters atomically. If ANY descriptor in the batch
+   * fails validation, the ENTIRE batch is rejected and the registry is
+   * unchanged. No partial mutation.
    *
    * This is important for bootstrap: registering all adapters for a vertical
    * is all-or-nothing. If the compute adapter conflicts, the energy adapters
    * are not partially committed.
+   *
+   * Phase 7.1 fix: The batch validates ALL descriptors completely (field
+   * validation + uniqueness within batch + uniqueness against registry)
+   * BEFORE committing ANY of them. The commit phase uses commitDescriptor()
+   * directly — it does NOT call register(), so there is no possibility of a
+   * mid-batch throw after partial commitment.
    */
   registerBatch(descriptors: AdapterDescriptor[]): void {
-    // --- VALIDATE PHASE ---
-    // Check for internal duplicates within the batch first.
+    // --- VALIDATE PHASE (no mutation) ---
+    // 1. Field-validate every descriptor (adapterType non-empty, supportedAssetTypes
+    //    non-empty, no empty asset type strings).
+    for (const desc of descriptors) {
+      this.validateDescriptor(desc)
+    }
+
+    // 2. Check for internal duplicates within the batch.
     const seenInBatch = new Set<string>()
     for (const desc of descriptors) {
       const at = desc.adapter.adapterType
@@ -195,7 +238,7 @@ export class AdapterRegistry {
       seenInBatch.add(at)
     }
 
-    // Check for conflicts with the existing registry.
+    // 3. Check for conflicts with the existing registry.
     for (const desc of descriptors) {
       const at = desc.adapter.adapterType
       if (this.adaptersByType.has(at)) {
@@ -203,20 +246,15 @@ export class AdapterRegistry {
           `Cannot register batch: adapterType '${at}' is already registered.`,
         )
       }
-      if (desc.supportedAssetTypes.length === 0) {
-        throw new Error(
-          `Cannot register batch: adapter '${at}' has empty supportedAssetTypes.`,
-        )
-      }
     }
 
     // --- COMMIT PHASE (all validations passed) ---
-    // We commit by calling register() one by one. Since we've already
-    // validated, none of these will throw. If one somehow does (a logic
-    // bug), the registry may be partially mutated — but the validate phase
-    // makes this practically impossible.
+    // Commit directly via commitDescriptor() — NOT via register(). This
+    // guarantees no mid-batch throw: all validation is done, so commitDescriptor
+    // cannot throw. The registry is mutated only after every descriptor is
+    // validated.
     for (const desc of descriptors) {
-      this.register(desc)
+      this.commitDescriptor(desc)
     }
   }
 

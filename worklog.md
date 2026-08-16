@@ -2285,3 +2285,27 @@ Stage Summary:
   - State inspection is immutable (listAdapters returns metadata, not instances).
 - An asset type can now have multiple adapters (battery → simulated_der, tesla_powerwall). Resolution is deterministic when adapterType is specified.
 - Phase 7 is complete. Phase 8 (Compute reference network) is ready — it will register a compute adapter in bootstrap/adapters.ts and prove the architecture is genuinely reusable for a non-energy domain.
+
+---
+Task ID: Phase-7.1-Atomic-Registration-Fix
+Agent: orchestrator
+Task: Fix the concrete correctness defect in registerBatch(): the batch validated adapterType uniqueness and empty supportedAssetTypes array, but did NOT check empty adapterType or empty strings within supportedAssetTypes. The commit phase delegated to register(), which checks those — so a mid-batch throw after partial commitment was possible.
+
+Work Log:
+- ROOT CAUSE: registerBatch() had a separate validation path from register(). It checked: (1) internal adapterType duplicates, (2) existing-registry adapterType conflicts, (3) empty supportedAssetTypes array. But register() additionally checked: (1) empty adapterType, (2) empty strings within supportedAssetTypes. The batch's commit phase called register() one-by-one — so if the second descriptor had an empty adapterType or an empty asset type string, register() would throw AFTER the first descriptor was already committed. The registry was partially mutated.
+- FIX — SHARED VALIDATION PATH:
+  - Extracted `private validateDescriptor(descriptor)` — the shared field-level validation used by BOTH register() and registerBatch(). Checks: adapterType non-empty, supportedAssetTypes non-empty, no empty strings in supportedAssetTypes.
+  - Extracted `private commitDescriptor(descriptor)` — the shared commit path. Assumes validation is already done; does NOT validate. Stores the descriptor + updates the index.
+  - register() now: validateDescriptor → check registry uniqueness → commitDescriptor.
+  - registerBatch() now: validateDescriptor for ALL descriptors → check internal duplicates → check registry conflicts → commitDescriptor for all (does NOT call register()). The commit phase uses commitDescriptor() directly, so there is zero possibility of a mid-batch throw after partial commitment.
+- REGRESSION TESTS (5 new):
+  - register with empty adapterType throws
+  - register with empty string in supportedAssetTypes throws
+  - registerBatch with later empty adapterType leaves registry unchanged (the valid first descriptor is NOT committed)
+  - registerBatch with later empty supportedAssetType string leaves registry unchanged
+  - registerBatch with later empty supportedAssetTypes array leaves registry unchanged
+- VERIFICATION: bun run lint clean. tsc: 102 errors (all pre-existing, zero new). 102 non-DB tests pass (59 regex architecture + 43 runtime resolution/adapter, 5 new regression tests, 0 fail, 128ms). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- registerBatch() is now genuinely atomic. All descriptors are validated completely (field validation + batch uniqueness + registry uniqueness) BEFORE any descriptor is committed. The commit phase uses commitDescriptor() directly — it cannot throw, so no partial mutation is possible.
+- Phase 7.1 is now correct. Phase 7 is closed. Phase 8 (Compute reference network) is ready.

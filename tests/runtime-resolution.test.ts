@@ -334,6 +334,81 @@ describe('Phase 7.1: atomic registration', () => {
       reg.register({ adapter, supportedAssetTypes: [], supportedCapabilities: [] })
     }).toThrow(/supportedAssetTypes is empty/)
   })
+
+  it('register with empty adapterType throws', () => {
+    const reg = new AdapterRegistry()
+    const adapter = mockAdapter('', ['battery'], ['energy_discharge'])
+    expect(() => {
+      reg.register({ adapter, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    }).toThrow(/adapterType is empty/)
+  })
+
+  it('register with empty string in supportedAssetTypes throws', () => {
+    const reg = new AdapterRegistry()
+    const adapter = mockAdapter('test', ['battery', ''], ['energy_discharge'])
+    expect(() => {
+      reg.register({ adapter, supportedAssetTypes: ['battery', ''], supportedCapabilities: ['energy_discharge'] })
+    }).toThrow(/empty string/)
+  })
+
+  // Phase 7.1 regression: the batch must validate ALL descriptors before
+  // committing ANY. A later descriptor with an empty adapterType or empty
+  // supportedAssetType must leave the registry completely unchanged —
+  // the first (valid) descriptor must NOT be committed.
+  it('registerBatch with later empty adapterType leaves registry unchanged (regression)', () => {
+    const reg = new AdapterRegistry()
+    const validAdapter = mockAdapter('valid_adapter', ['battery'], ['energy_discharge'])
+    const badAdapter = mockAdapter('', ['solar_inverter'], ['energy_discharge']) // empty adapterType
+
+    expect(() => {
+      reg.registerBatch([
+        { adapter: validAdapter, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] },
+        { adapter: badAdapter, supportedAssetTypes: ['solar_inverter'], supportedCapabilities: ['energy_discharge'] },
+      ])
+    }).toThrow(/adapterType is empty/)
+
+    // CRITICAL: the valid adapter was NOT committed — the registry is unchanged.
+    expect(reg.hasAdapter('valid_adapter')).toBe(false)
+    expect(reg.has('battery')).toBe(false)
+    expect(reg.registeredAdapterTypes().length).toBe(0)
+    expect(reg.registeredAssetTypes().length).toBe(0)
+  })
+
+  it('registerBatch with later empty supportedAssetType string leaves registry unchanged (regression)', () => {
+    const reg = new AdapterRegistry()
+    const validAdapter = mockAdapter('valid_adapter', ['battery'], ['energy_discharge'])
+    const badAdapter = mockAdapter('bad_adapter', ['solar_inverter', ''], ['energy_discharge']) // empty string in asset types
+
+    expect(() => {
+      reg.registerBatch([
+        { adapter: validAdapter, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] },
+        { adapter: badAdapter, supportedAssetTypes: ['solar_inverter', ''], supportedCapabilities: ['energy_discharge'] },
+      ])
+    }).toThrow(/empty string/)
+
+    // CRITICAL: the valid adapter was NOT committed — the registry is unchanged.
+    expect(reg.hasAdapter('valid_adapter')).toBe(false)
+    expect(reg.hasAdapter('bad_adapter')).toBe(false)
+    expect(reg.has('battery')).toBe(false)
+    expect(reg.registeredAdapterTypes().length).toBe(0)
+  })
+
+  it('registerBatch with later empty supportedAssetTypes array leaves registry unchanged (regression)', () => {
+    const reg = new AdapterRegistry()
+    const validAdapter = mockAdapter('valid_adapter', ['battery'], ['energy_discharge'])
+    const badAdapter = mockAdapter('bad_adapter', [], ['energy_discharge']) // empty array
+
+    expect(() => {
+      reg.registerBatch([
+        { adapter: validAdapter, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] },
+        { adapter: badAdapter, supportedAssetTypes: [], supportedCapabilities: ['energy_discharge'] },
+      ])
+    }).toThrow(/supportedAssetTypes is empty/)
+
+    // CRITICAL: the valid adapter was NOT committed — the registry is unchanged.
+    expect(reg.hasAdapter('valid_adapter')).toBe(false)
+    expect(reg.has('battery')).toBe(false)
+  })
 })
 
 describe('Phase 7.2: explicit adapter identity', () => {
