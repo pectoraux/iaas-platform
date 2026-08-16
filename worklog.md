@@ -1653,3 +1653,21 @@ Stage Summary:
 - The kernel now has three subdirectories: concurrency/ (lease/fencing), execution/ (lifecycle), adapters/ (infrastructure interface).
 - Architecture contract tests enforce that none of these kernel modules import VPP.
 - NEXT: Refactor VppDispatch to wrap Execution, refactor DERAdapter to implement InfrastructureAdapter, then Phase 4 (runtime-selectable NetworkVersion).
+
+---
+Task ID: VPP-4-Execution-Migration
+Agent: orchestrator
+Task: Wire VPP dispatch creation and execution to use the generic Execution/ExecutionAssignment models — making the generic execution runtime authoritative, not just present.
+
+Work Log:
+1. DISPATCH CREATION: createDispatch now creates a generic Execution record inside the same transaction as VppDispatch. The Execution is linked via sourceType='vpp_dispatch', sourceId=dispatch.id. It uses generic quantity/unit (requestedKwh → requestedQuantity, 'kWh' → requestedUnit). Each VppDispatchAssignment also creates a corresponding ExecutionAssignment with generic assignedQuantity/assignedUnit.
+2. EXECUTION RESULTS: executeDispatchAssignment now updates the generic ExecutionAssignment with results after VPP-specific verification: actualKwh → actualQuantity, verifiedPerformanceKwh → verifiedQuantity, eventId, contributionId, status, economicStage. This makes the generic assignment the kernel-level record of "this asset delivered this much verified work."
+3. ASSIGNMENT COMPLETION: When a VPP assignment reaches 'completed', the generic ExecutionAssignment is also updated to 'completed' with economicStage='completed'. This synchronizes the generic and VPP-specific lifecycles.
+4. SCOPE: The `execution` variable is looked up via findExecutionBySource() at the point where results are recorded, so it's available for the completion update in the same try block scope.
+5. VERIFICATION: `bun run lint` clean. `tsc --no-Emit` zero new errors (15 before = 15 after — all pre-existing in vpp.service.ts). Dev server: / route HTTP 200. VPP API compiles with new kernel imports. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- The generic Execution model is now AUTHORITATIVE — VPP dispatch creation produces both VppDispatch and Execution records atomically. VPP execution results flow to both VppDispatchAssignment and ExecutionAssignment.
+- The VPP-specific fields (baselineKwh, performanceKwh, kW/kWh) remain on VPP models. The generic models use quantity/unit (kWh). VPP wraps the generic model; it doesn't duplicate it.
+- The architectural direction is now: VPP → Execution → ExecutionAssignment → (generic pipeline), not VPP → VPP-specific everything.
+- NEXT: Update architecture contract test to verify VPP creates Execution records. Then Phase 5 (runtime-selectable NetworkVersion), Phase 6 (InfrastructureRuntime extraction), Phase 7 (adapter registry).
