@@ -79,17 +79,56 @@ describe('Architecture contract: kernel boundary', () => {
     }
   })
 
-  it('generic kernel directory exists and is separate from services', () => {
+  it('kernel execution module does not import VPP', () => {
+    const execServicePath = join(process.cwd(), 'src', 'lib', 'kernel', 'execution', 'execution.service.ts')
+    let content: string
+    try {
+      content = readFileSync(execServicePath, 'utf-8')
+    } catch {
+      return
+    }
+    for (const pattern of VPP_IMPORT_PATTERNS) {
+      expect(content.match(pattern)).toBeNull()
+    }
+  })
+
+  it('kernel adapter interface does not import VPP', () => {
+    const adapterPath = join(process.cwd(), 'src', 'lib', 'kernel', 'adapters', 'infrastructure-adapter.ts')
+    let content: string
+    try {
+      content = readFileSync(adapterPath, 'utf-8')
+    } catch {
+      return
+    }
+    for (const pattern of VPP_IMPORT_PATTERNS) {
+      expect(content.match(pattern)).toBeNull()
+    }
+  })
+
+  it('generic kernel directory has concurrency, execution, and adapters', () => {
     const kernelDir = join(process.cwd(), 'src', 'lib', 'kernel')
     let entries: string[]
     try {
       entries = readdirSync(kernelDir)
     } catch {
-      // kernel directory doesn't exist yet — that's ok for now
       return
     }
-    // The kernel directory should exist and contain at least the concurrency module.
-    expect(entries.length).toBeGreaterThan(0)
+    expect(entries).toContain('concurrency')
+    expect(entries).toContain('execution')
+    expect(entries).toContain('adapters')
+  })
+
+  it('generic Execution model exists in schema', () => {
+    const schemaPath = join(process.cwd(), 'prisma', 'schema.prisma')
+    const content = readFileSync(schemaPath, 'utf-8')
+    expect(content).toMatch(/model Execution [{]/)
+    expect(content).toMatch(/model ExecutionAssignment [{]/)
+    expect(content).toMatch(/requestedQuantity/)
+    expect(content).toMatch(/requestedUnit/)
+    expect(content).toMatch(/assignedQuantity/)
+    expect(content).toMatch(/assignedUnit/)
+    expect(content).toMatch(/actualQuantity/)
+    expect(content).toMatch(/verifiedQuantity/)
   })
 })
 

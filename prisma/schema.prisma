@@ -66,6 +66,8 @@ model Tenant {
   vppBaselines   VppBaseline[]
   vppPortfolioCommitments VppPortfolioCommitment[]
   vppBuyerSettlements VppBuyerSettlement[]
+  executions     Execution[]
+  executionAssignments ExecutionAssignment[]
   capacityResources CapacityResource[]
   capacityReservations CapacityReservation[]
   capacityCommitments CapacityCommitment[]
@@ -106,6 +108,7 @@ model NetworkDefinition {
   versions  NetworkVersion[]
   assetAssignments AssetNetworkAssignment[]
   vppPrograms    VppBuyerProgram[]
+  executions     Execution[]
   capacityResources CapacityResource[]
 
   @@unique([tenantId, slug])
@@ -161,6 +164,7 @@ model Operator {
   settlements   Settlement[]
   vppReservations VppCapacityReservation[]
   vppAssignments VppDispatchAssignment[]
+  executionAssignments ExecutionAssignment[]
 
   @@index([tenantId])
   @@index([organizationId])
@@ -191,6 +195,7 @@ model Asset {
   contributions Contribution[]
   vppReservations VppCapacityReservation[]
   vppAssignments VppDispatchAssignment[]
+  executionAssignments ExecutionAssignment[]
   capacityResources CapacityResource[]
 
   @@index([tenantId])
@@ -1316,5 +1321,71 @@ model VppBuyerSettlement {
 
   @@index([tenantId])
   @@index([dispatchId])
+  @@index([status])
+}
+
+// =============================================================================
+// GENERIC EXECUTION RUNTIME (Protocol Runtime Phase 2)
+// =============================================================================
+// Vertical-agnostic execution lifecycle extracted from VppDispatch.
+// VPP wraps this; future verticals (storage, compute, wireless) do the same.
+// =============================================================================
+
+model Execution {
+  id              String   @id @default(cuid())
+  tenantId        String
+  networkId       String
+  requestedQuantity String
+  requestedUnit    String
+  startTime       DateTime
+  endTime         DateTime
+  status          String   @default("created")
+  sourceType      String
+  sourceId        String?
+  metadataJson    String   @default("{}")
+  contributionId  String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  network     NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
+  assignments ExecutionAssignment[]
+
+  @@unique([sourceType, sourceId])
+  @@index([tenantId])
+  @@index([networkId])
+  @@index([status])
+  @@index([sourceType, sourceId])
+}
+
+model ExecutionAssignment {
+  id              String   @id @default(cuid())
+  tenantId        String
+  executionId     String
+  assetId         String
+  operatorId      String
+  capabilityType  String
+  assignedQuantity String
+  assignedUnit    String
+  status          String   @default("assigned")
+  economicStage   String   @default("none")
+  actualQuantity  String?
+  actualUnit      String?
+  verifiedQuantity String?
+  verifiedUnit    String?
+  eventId         String?
+  contributionId  String?
+  capacityCommitmentId String?
+  createdAt       DateTime @default(now())
+  completedAt     DateTime?
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  execution  Execution  @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  asset      Asset      @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  operator   Operator   @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([executionId])
+  @@index([assetId])
   @@index([status])
 }
