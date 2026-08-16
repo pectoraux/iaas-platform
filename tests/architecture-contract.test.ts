@@ -504,3 +504,57 @@ describe('Architecture contract: schema cleanup (Phase 5.3)', () => {
     expect(methodSignature).not.toMatch(/economicStage/)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Test 8: Phase 5.4 — linkContribution write-once + single write authority
+// ---------------------------------------------------------------------------
+
+describe('Architecture contract: linkContribution write-once (Phase 5.4)', () => {
+  it('RuntimeAssignmentResults does NOT contain contributionId', () => {
+    const typesPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'types.ts')
+    const content = readFileSync(typesPath, 'utf-8')
+
+    // Extract the RuntimeAssignmentResults interface block.
+    const match = content.match(/export interface RuntimeAssignmentResults \{[\s\S]*?\}/)
+    expect(match).not.toBeNull()
+    const interfaceBlock = match![0]
+
+    // contributionId must NOT appear in RuntimeAssignmentResults — the only
+    // way to link a contribution is via linkContribution().
+    expect(interfaceBlock).not.toMatch(/contributionId/)
+  })
+
+  it('recordAssignmentResults does NOT write contributionId', () => {
+    const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
+    const content = readFileSync(infraPath, 'utf-8')
+
+    // Extract the recordAssignmentResults method block.
+    const match = content.match(/async recordAssignmentResults\([\s\S]*?\n  \}/)
+    expect(match).not.toBeNull()
+    const methodBlock = match![0]
+
+    // contributionId must NOT appear as a DATA FIELD assignment (contributionId: '...')
+    // in recordAssignmentResults. Comments mentioning it are fine.
+    expect(methodBlock).not.toMatch(/contributionId\s*:/)
+  })
+
+  it('linkContribution is write-once (CAS: NULL or same value, not different)', () => {
+    const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
+    const content = readFileSync(infraPath, 'utf-8')
+
+    // The linkContribution CAS must include the OR condition:
+    //   contributionId IS NULL OR contributionId = ?
+    // This makes it write-once — a different contributionId is rejected.
+    expect(content).toMatch(/linkContribution[\s\S]*OR:\s*\[[\s\S]*contributionId:\s*null[\s\S]*contributionId:\s*contributionId/)
+  })
+
+  it('linkContribution throws on rejection (not silent no-op)', () => {
+    const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
+    const content = readFileSync(infraPath, 'utf-8')
+
+    // The linkContribution method must throw when count=0 (CAS rejected).
+    // It must distinguish "not completed" from "already linked to different".
+    expect(content).toMatch(/Cannot link contribution.*not completed/)
+    expect(content).toMatch(/Cannot link contribution.*already linked/)
+  })
+})

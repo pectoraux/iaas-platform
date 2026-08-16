@@ -2032,3 +2032,43 @@ Stage Summary:
 - linkContribution is fenced (CAS: only links if completed) and idempotent (same contributionId twice = no-op).
 - VPP-specific economicStage on VppDispatchAssignment is untouched.
 - Phase 5.3 is complete. Phase 6 (InfrastructureRuntime extraction) is ready to begin.
+
+---
+Task ID: Phase-5.4-LinkContribution-WriteOnce
+Agent: orchestrator
+Task: Fix two correctness issues from the Phase 5.3 audit: (1) linkContribution was fenced by status but NOT write-once (a stale worker could replace an existing contribution). (2) recordAssignmentResults could bypass linkContribution via the contributionId field in RuntimeAssignmentResults.
+
+Work Log:
+- ISSUE 1 — linkContribution not write-once:
+  - The Phase 5.3 CAS was `WHERE id = ? AND status = 'completed'`. This allowed C1 → C2 (replacing an existing contribution) as long as the assignment was completed.
+  - FIX: Changed the CAS to `WHERE id = ? AND status = 'completed' AND (contributionId IS NULL OR contributionId = ?)`. This enforces:
+    - NULL → C1: allowed (first link)
+    - C1 → C1: idempotent no-op (CAS matches, value unchanged)
+    - C1 → C2: REJECTED (CAS doesn't match — contributionId is already C1)
+    - non-completed → REJECTED (CAS doesn't match — status is not 'completed')
+  - EXPLICIT ERRORS: When count=0, the method reads the assignment to determine the reason and throws a specific error:
+    - "not found" if the assignment doesn't exist
+    - "not completed" if the status isn't 'completed'
+    - "already linked to contribution X (cannot replace with Y)" if the contributionId is already set to a different value
+  - The CAS is the authority (prevents race conditions); the read is only for error reporting.
+- ISSUE 2 — recordAssignmentResults can bypass linkContribution:
+  - `RuntimeAssignmentResults` had `contributionId?: string`, and `InfrastructureRuntime.recordAssignmentResults` wrote it. This bypassed the single-write-authority invariant — a vertical could set the contribution link during operational results, before operational completion.
+  - FIX: Removed `contributionId` from `RuntimeAssignmentResults` entirely. Removed `contributionId` handling from `InfrastructureRuntime.recordAssignmentResults`. The ONLY way to set `ExecutionAssignment.contributionId` is now via `linkContribution()`.
+  - Updated the contract documentation to explicitly state that `contributionId` is intentionally absent from `RuntimeAssignmentResults`.
+- ARCHITECTURE TESTS (4 new regex tests):
+  - RuntimeAssignmentResults does NOT contain contributionId
+  - recordAssignmentResults does NOT write contributionId (as a data field)
+  - linkContribution is write-once (CAS: NULL or same value, not different)
+  - linkContribution throws on rejection (not silent no-op, distinguishes reasons)
+- DB-BACKED INTEGRATION TESTS (4 tests, replacing the old 3 Phase 5.3 tests):
+  - NULL → C1: first link succeeds (allowed)
+  - C1 → C1: idempotent re-link of the same contribution is a no-op
+  - C1 → C2: replacing a contribution is REJECTED (write-once) — verifies the contributionId stays C1, not C2
+  - non-completed → REJECTED: cannot link before operational completion — verifies the contributionId stays NULL
+- VERIFICATION: bun run lint clean. tsc: 102 errors (all pre-existing, zero new). 57 non-DB tests pass (39 regex architecture + 18 runtime resolution, 4 new Phase 5.4 regex tests). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- linkContribution is now genuinely write-once: NULL→C1 allowed, C1→C1 no-op, C1→C2 rejected, non-completed rejected. The kernel enforces this — the vertical does not need to.
+- recordAssignmentResults can no longer set contributionId — the only write path is linkContribution().
+- Single write authority: linkContribution() is the ONLY way to set ExecutionAssignment.contributionId.
+- Phase 5.4 is complete. Phase 5 is now genuinely clean. Phase 6 (InfrastructureRuntime extraction) is ready to begin.

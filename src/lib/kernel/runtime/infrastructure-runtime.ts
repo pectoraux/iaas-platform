@@ -103,6 +103,9 @@ export class InfrastructureRuntime implements NetworkRuntime {
     executionAssignmentId: string,
     results: RuntimeAssignmentResults,
   ): Promise<void> {
+    // Phase 5.4: contributionId is NOT written here. The only way to link
+    // a contribution is via linkContribution(), which enforces write-once
+    // semantics. recordAssignmentResults records OPERATIONAL results only.
     await tx.executionAssignment.update({
       where: { id: executionAssignmentId },
       data: {
@@ -111,7 +114,6 @@ export class InfrastructureRuntime implements NetworkRuntime {
         ...(results.verifiedQuantity ? { verifiedQuantity: results.verifiedQuantity } : {}),
         ...(results.verifiedUnit ? { verifiedUnit: results.verifiedUnit } : {}),
         ...(results.eventId ? { eventId: results.eventId } : {}),
-        ...(results.contributionId ? { contributionId: results.contributionId } : {}),
       },
     })
   }
@@ -121,26 +123,57 @@ export class InfrastructureRuntime implements NetworkRuntime {
     executionAssignmentId: string,
     contributionId: string,
   ): Promise<void> {
-    // Phase 5.3: Fenced + idempotent link.
+    // Phase 5.4: Write-once CAS.
     //
-    // FENCED: Uses updateMany with a CAS condition — only links if the
-    // assignment is 'completed'. A non-completed assignment cannot have a
-    // contribution linked (the work isn't verified yet).
+    // The CAS condition is:
+    //   id = ? AND status = 'completed' AND (contributionId IS NULL OR contributionId = ?)
     //
-    // IDEMPOTENT: If the contributionId is already set to the same value,
-    // the updateMany matches 0 rows (the value is unchanged) but that's
-    // not an error — it's a successful no-op. If the contributionId is
-    // set to a DIFFERENT value, the CAS still matches (status is still
-    // 'completed') and overwrites it — this is the vertical's
-    // responsibility to avoid (a contribution should only be linked once).
+    // This enforces:
+    //   NULL → C1   allowed (first link)
+    //   C1  → C1   no-op (idempotent — updateMany matches but value is unchanged)
+    //   C1  → C2   REJECTED (CAS doesn't match — contributionId is already C1)
+    //   non-completed → REJECTED (CAS doesn't match — status is not 'completed')
     //
-    // This does NOT use a fencing token because the contributionId itself
-    // is the idempotency key: the vertical creates exactly one contribution
-    // per assignment, and linking the same contributionId twice is a no-op.
-    await tx.executionAssignment.updateMany({
-      where: { id: executionAssignmentId, status: 'completed' },
+    // If count=0, we read the assignment to determine the reason and throw
+    // an explicit error. The CAS is the authority (prevents race conditions);
+    // the read is only for error reporting.
+    const result = await tx.executionAssignment.updateMany({
+      where: {
+        id: executionAssignmentId,
+        status: 'completed',
+        OR: [
+          { contributionId: null },
+          { contributionId: contributionId },
+        ],
+      },
       data: { contributionId },
     })
+
+    if (result.count > 0) {
+      return // success (new link or idempotent re-link)
+    }
+
+    // count=0: determine the reason for the rejection.
+    const assignment = await tx.executionAssignment.findUnique({
+      where: { id: executionAssignmentId },
+      select: { status: true, contributionId: true },
+    })
+
+    if (!assignment) {
+      throw new Error(`Cannot link contribution: assignment ${executionAssignmentId} not found`)
+    }
+    if (assignment.status !== 'completed') {
+      throw new Error(
+        `Cannot link contribution: assignment ${executionAssignmentId} is not completed (status: ${assignment.status}). ` +
+          `A contribution can only be linked to a completed assignment.`,
+      )
+    }
+    // status is 'completed' but CAS didn't match → already linked to a different contribution.
+    throw new Error(
+      `Cannot link contribution: assignment ${executionAssignmentId} is already linked to contribution ` +
+        `${assignment.contributionId} (cannot replace with ${contributionId}). ` +
+        `A contribution link is write-once — it cannot be replaced.`,
+    )
   }
 
   async completeAssignment(

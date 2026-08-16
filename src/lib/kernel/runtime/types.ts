@@ -81,6 +81,12 @@ export interface RuntimeCreateAssignmentInput {
 
 /**
  * Verified results from executing an assignment.
+ *
+ * Phase 5.4: contributionId is intentionally ABSENT from this type. The
+ * only way to link a contribution to an assignment is via linkContribution(),
+ * which enforces write-once semantics. recordAssignmentResults() records
+ * OPERATIONAL results only (actuals, verified quantity, event) — it cannot
+ * set the economic contribution link.
  */
 export interface RuntimeAssignmentResults {
   actualQuantity?: string
@@ -88,7 +94,6 @@ export interface RuntimeAssignmentResults {
   verifiedQuantity?: string
   verifiedUnit?: string
   eventId?: string
-  contributionId?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +179,23 @@ export interface NetworkRuntime {
    * (which depends on the verified results). This is an economic link,
    * not an operational one — the assignment is already completed by this
    * point.
+   *
+   * Phase 5.4 — WRITE-ONCE SEMANTICS:
+   * The kernel guarantees that a contribution link is immutable once set:
+   *
+   *   NULL → C1   allowed (first link)
+   *   C1  → C1   no-op (idempotent re-link of the same contribution)
+   *   C1  → C2   REJECTED (cannot replace an existing contribution)
+   *   non-completed → REJECTED (cannot link before operational completion)
+   *
+   * This prevents a stale or duplicated economic worker from relinking a
+   * completed assignment to a different contribution. The vertical does not
+   * need to implement this safety — the runtime enforces it.
+   *
+   * THROWS on rejection (count=0 after CAS). The error distinguishes:
+   *   - assignment not found
+   *   - assignment not completed
+   *   - assignment already linked to a different contribution
    */
   linkContribution(
     tx: RuntimeClient,
