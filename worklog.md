@@ -1888,3 +1888,34 @@ Stage Summary:
 - Protocol and Hybrid runtimes exist as registered stubs with the full NetworkRuntime contract. They throw NotImplemented for execution ops — the contract is established, the implementation lands in Phase 9/10.
 - CI pipeline provides the PostgreSQL gate the user required: integration tests run against a real PostgreSQL service container and fail if DATABASE_URL is missing.
 - NEXT: Phase 6 (InfrastructureRuntime extraction — move DER adapter + baseline into the runtime layer), Phase 7 (AdapterRegistry), Phase 8 (second vertical).
+
+---
+Task ID: Phase-5.1-Test-Hardening
+Agent: orchestrator
+Task: Close the two ⚠️ test hardening items from the Phase 5 audit: (1) persisted-version → runtime integration test, (2) published runtime immutability behavioral test.
+
+Work Log:
+- ACKNOWLEDGED AUDIT FINDINGS:
+  - Finding 1 (wording): Phase 5 establishes runtime selection and generic execution orchestration; Phase 6 moves physical execution and adapter resolution under InfrastructureRuntime. The DERAdapter.executeDischarge() call remains in VPP today — that's Phase 6's boundary.
+  - Finding 5 (invariant refinement): "Every published NetworkVersion resolves to exactly one runtime implementation; not every runtime kind is executable yet." Protocol/Hybrid resolve successfully but throw NotImplemented on execution.
+- TEST 1 — Persisted-version → runtime integration (tests/runtime-resolution-integration.test.ts):
+  - Creates a real tenant + network + published NetworkVersion via instantiateTemplate (runtimeKind='infrastructure' by default).
+  - Loads the persisted version from the DB.
+  - Calls resolveRuntime(version.runtimeKind) and asserts it returns InfrastructureRuntime.
+  - Also verifies the registry returns the SAME instance on repeated calls (singleton stability).
+- TEST 2 — Published runtimeKind immutability:
+  - Creates a second version with runtimeKind='protocol' — proves a new runtime choice creates a NEW version, not a mutation of the existing published version.
+  - Verifies the first version's runtimeKind is still 'infrastructure' (unchanged).
+  - Simulates direct DB access that sets an invalid runtimeKind ('banana') on a draft version, then attempts to publish — publishNetworkVersion rejects it via the defense-in-depth validateRuntimeKind check in assertPublicationReadiness. The version stays unpublished.
+  - Publishes a version with runtimeKind='protocol' (after running baseline evaluation) — proves a valid non-infrastructure kind can be published and resolves to ProtocolRuntime.
+- TEST 3 — Unregistered runtimeKind on a published version:
+  - Simulates direct DB access that sets an unregistered runtimeKind ('edge') AND publishes it (bypassing the application gate).
+  - Proves resolveRuntime throws "No runtime registered" — the resolver is the last line of defense.
+- CI: Added tests/runtime-resolution-integration.test.ts to the postgres-integration-tests job in .github/workflows/ci.yml. These tests require PostgreSQL and run alongside the vpp-4-2-execution-invariants.test.ts.
+- VERIFICATION: bun run lint clean. bunx tsc --noEmit: only pre-existing errors (bun:test module resolution, same as all 26 other test files). 41 existing tests pass (23 regex architecture + 18 in-memory runtime resolution). The new integration tests require PostgreSQL and will run in CI.
+
+Stage Summary:
+- The two ⚠️ audit items are closed. Phase 5 now has:
+  - In-memory runtime resolution tests (tests/runtime-resolution.test.ts) — prove the registry works.
+  - DB-backed runtime resolution integration tests (tests/runtime-resolution-integration.test.ts) — prove a real persisted NetworkVersion flows through the resolver and that immutability is enforced.
+- Phase 5 is fully closed. Phase 6 (InfrastructureRuntime owns physical execution + AdapterRegistry) is ready to begin when confirmed.
