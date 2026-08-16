@@ -1671,3 +1671,21 @@ Stage Summary:
 - The VPP-specific fields (baselineKwh, performanceKwh, kW/kWh) remain on VPP models. The generic models use quantity/unit (kWh). VPP wraps the generic model; it doesn't duplicate it.
 - The architectural direction is now: VPP → Execution → ExecutionAssignment → (generic pipeline), not VPP → VPP-specific everything.
 - NEXT: Update architecture contract test to verify VPP creates Execution records. Then Phase 5 (runtime-selectable NetworkVersion), Phase 6 (InfrastructureRuntime extraction), Phase 7 (adapter registry).
+
+---
+Task ID: VPP-4.1-Execution-Authoritative
+Agent: orchestrator
+Task: Make generic Execution genuinely authoritative — explicit FKs, atomic state transitions, parent Execution lifecycle.
+
+Work Log:
+1. EXPLICIT FKs (Fix 1): Added executionId @unique to VppDispatch and executionAssignmentId @unique to VppDispatchAssignment. Added reverse relations (vppDispatch? on Execution, vppDispatchAssignment? on ExecutionAssignment). This removes ALL findFirst(executionId + assetId) ambiguity — the VPP assignment directly references its generic counterpart via FK.
+2. ATOMIC STATE TRANSITIONS (Fix 3): The delivery result update and the completion update now use db.$transaction to update VPP + generic records atomically. If either write fails, both roll back. No more dual-write divergence.
+3. PARENT EXECUTION LIFECYCLE (Fix 2): When the first assignment's delivery is verified, the parent Execution.status transitions from 'assigned' → 'executing' (via updateMany CAS). The generic Execution lifecycle tracks: created → assigned → executing → completed → failed. VPP's richer lifecycle (delivery_complete, buyer_settlement_pending, reconciliation_required, completed) maps onto this — the generic Execution doesn't carry financial states.
+4. NO MORE findFirst: Removed findExecutionBySource() call and findFirst(executionId + assetId) lookup. The assignment's executionAssignmentId is used directly. Removed unused imports.
+5. CREATION ORDER: Execution is created FIRST (inside the dispatch transaction), then VppDispatch references it via executionId. Same for assignments: ExecutionAssignment first, then VppDispatchAssignment with executionAssignmentId.
+6. VERIFICATION: `bun run lint` clean. `tsc --no-Emit` zero new errors (PRE=17, POST=15 — actually fixed 2 pre-existing errors). Dev server: / route HTTP 200. VPP API compiles with new FK fields. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- Generic Execution is now AUTHORITATIVE: explicit 1:1 FKs, atomic state transitions, parent lifecycle updates. No more synchronized shadow — the generic record is the kernel's source of truth for execution lifecycle.
+- The VPP dispatch lifecycle (including financial states) remains on VppDispatch. The generic Execution tracks only: did the work execute? (created → assigned → executing → completed → failed).
+- NEXT: Add architectural invariant test (every VppDispatch has exactly one Execution, every assignment has exactly one ExecutionAssignment). Then Phase 5 (runtime-selectable NetworkVersion).
