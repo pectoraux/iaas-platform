@@ -2203,3 +2203,26 @@ Stage Summary:
 - A future compute vertical can register its adapters in bootstrap/adapters.ts without VPP importing or initializing anything.
 - The system no longer depends on import ordering — the registry is populated at server startup, not by whichever vertical service happens to execute first.
 - Phase 6.2 is complete. Phase 6 is now architecturally closed. Phase 7 (AdapterRegistry hardening) is ready.
+
+---
+Task ID: Phase-6.3-No-Implicit-Side-Effects
+Agent: orchestrator
+Task: Remove the last implicit initialization side-effect. bootstrap/index.ts had a module-scope `initializeBootstrap()` call — importing the module auto-registered adapters. The invariant should be: importing a module does not implicitly mutate global runtime state.
+
+Work Log:
+- ROOT CAUSE: bootstrap/index.ts contained `initializeBootstrap()` at module scope (line 61 in the previous version). This meant importing the bootstrap module — even just to access a helper — would mutate the global AdapterRegistry. The system had moved the side-effect from VPP → bootstrap/adapters to any-importer → bootstrap/index, which was better but not yet a pure explicit composition root.
+- FIX — REMOVE MODULE-SCOPE CALL:
+  - Removed the `initializeBootstrap()` call at the end of bootstrap/index.ts.
+  - Kept `export function initializeBootstrap()` — it is still the explicit init function, idempotent.
+  - Importing the module is now a pure import: it does NOT register adapters. The caller MUST explicitly call `initializeBootstrap()`.
+- NO CHANGES NEEDED to instrumentation.ts — it already calls `initializeBootstrap()` explicitly inside `register()`.
+- TEST FIX: runtime-resolution.test.ts now calls `initializeBootstrap()` explicitly in a `beforeAll()` block, instead of relying on the side-effect import. This mirrors how the production application (instrumentation.ts) explicitly calls it. Tests are their own composition root.
+- ARCHITECTURE TEST (1 new):
+  - bootstrap/index.ts does NOT invoke registration at module scope (Phase 6.3) — reads the file, strips comment lines, checks that no bare `initializeBootstrap()` call exists at module scope. This proves importing the module is a pure import.
+- VERIFICATION: bun run lint clean. tsc: 102 errors (all pre-existing, zero new). 76 non-DB tests pass (53 regex architecture + 23 runtime resolution/adapter, 1 new Phase 6.3 regex test, 0 fail, 127ms). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The composition root is now genuinely explicit. Importing bootstrap/index.ts does NOT mutate global state. The ONLY way to register adapters is to explicitly call `initializeBootstrap()`.
+- The production caller is instrumentation.ts (Next.js server startup). Tests call it in beforeAll(). No other code path triggers registration.
+- A future worker, CLI, migration, or test helper that merely imports the bootstrap to access a helper will NOT mutate the global adapter registry.
+- Phase 6.3 is complete. Phase 6 is now architecturally closed. Phase 7 (AdapterRegistry hardening) is ready.

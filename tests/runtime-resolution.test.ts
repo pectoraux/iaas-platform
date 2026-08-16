@@ -15,11 +15,12 @@
  *
  * Run: bun test tests/runtime-resolution.test.ts --timeout 30000
  */
-import { describe, it, expect } from 'bun:test'
-// Phase 6.2: Tests are their own composition root. The application (via
-// instrumentation.ts) owns registry initialization in production; tests
-// import the bootstrap directly to register adapters before running.
-import '../src/lib/bootstrap'
+import { describe, it, expect, beforeAll } from 'bun:test'
+// Phase 6.3: Tests are their own composition root. They explicitly call
+// initializeBootstrap() — importing the bootstrap module alone does NOT
+// register adapters (no implicit side effects). This mirrors how the
+// production application (instrumentation.ts) explicitly calls it.
+import { initializeBootstrap } from '../src/lib/bootstrap'
 import {
   resolveRuntime,
   runtimeRegistry,
@@ -32,6 +33,12 @@ import {
 import { InfrastructureRuntime } from '../src/lib/kernel/runtime/infrastructure-runtime'
 import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
 import { HybridRuntime } from '../src/lib/kernel/runtime/hybrid-runtime'
+
+// Explicitly initialize the bootstrap before tests run.
+// This is the test's composition root — same pattern as instrumentation.ts.
+beforeAll(() => {
+  initializeBootstrap()
+})
 
 // ---------------------------------------------------------------------------
 // Test 1: Each runtimeKind resolves to the correct runtime implementation

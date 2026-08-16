@@ -1,15 +1,14 @@
 // =============================================================================
-// Bootstrap: Application Composition Root (Phase 6.2)
+// Bootstrap: Application Composition Root (Phase 6.3)
 // =============================================================================
-// This is the APPLICATION-LEVEL composition root. It is called once at
-// application startup (via src/instrumentation.ts in production, or imported
-// directly by tests). It registers all concrete adapters with the generic
-// AdapterRegistry.
+// This is the APPLICATION-LEVEL composition root. It provides an explicit
+// `initializeBootstrap()` function that registers all concrete adapters with
+// the generic AdapterRegistry.
 //
 // DEPENDENCY DIRECTION:
 //   kernel (AdapterRegistry, InfrastructureAdapter interface)
 //     ↑
-//   bootstrap/index.ts (THIS — calls registerAdapters())
+//   bootstrap/index.ts (THIS — exports initializeBootstrap)
 //     ↑
 //   instrumentation.ts (Next.js server startup) / tests
 //
@@ -17,11 +16,21 @@
 // unaware that an adapter registry needs initialization. The application
 // (not the vertical) owns composition.
 //
-// This is the explicit initialization graph:
+// Phase 6.3 — NO IMPLICIT SIDE EFFECTS:
+//   Importing this module does NOT register adapters. The registration only
+//   happens when `initializeBootstrap()` is explicitly called. This eliminates
+//   the last hidden initialization coupling: a worker, CLI, migration, or test
+//   helper that merely imports the bootstrap to access a helper will NOT
+//   mutate the global adapter registry.
 //
-//   Application startup (instrumentation.ts)
+//   The ONLY production caller is src/instrumentation.ts (Next.js server
+//   startup). Tests call it explicitly as their own composition root.
+//
+// Explicit initialization graph:
+//
+//   Application startup (instrumentation.ts → register())
 //       ↓
-//   bootstrap/index.ts (initializeBootstrap)
+//   bootstrap/index.ts (initializeBootstrap — explicit call)
 //       ↓
 //   adapters.ts (registerAdapters)
 //       ↓
@@ -47,6 +56,7 @@ let initialized = false
  * NOT called by:
  *   - vertical services (VPP, future compute/storage verticals)
  *   - the kernel/runtime layer
+ *   - merely importing this module (Phase 6.3: no implicit side effects)
  */
 export function initializeBootstrap(): void {
   if (initialized) return
@@ -54,8 +64,7 @@ export function initializeBootstrap(): void {
   initialized = true
 }
 
-// Auto-initialize on module load. This ensures that any code path that
-// imports this module (directly or via instrumentation) gets a populated
-// registry. Tests and instrumentation.ts can also call initializeBootstrap()
-// explicitly to express intent.
-initializeBootstrap()
+// Phase 6.3: NO module-scope call to initializeBootstrap().
+// Importing this module is a pure import — it does not mutate global state.
+// The caller MUST explicitly call initializeBootstrap().
+

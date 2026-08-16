@@ -735,4 +735,39 @@ describe('Architecture contract: physical execution boundary (Phase 6)', () => {
     // Must call initializeBootstrap.
     expect(content).toMatch(/initializeBootstrap/)
   })
+
+  it('bootstrap/index.ts does NOT invoke registration at module scope (Phase 6.3)', () => {
+    const indexPath = join(process.cwd(), 'src', 'lib', 'bootstrap', 'index.ts')
+    const content = readFileSync(indexPath, 'utf-8')
+
+    // The module must export initializeBootstrap.
+    expect(content).toMatch(/export function initializeBootstrap/)
+
+    // Phase 6.3: there must be NO module-scope call to initializeBootstrap().
+    // Importing the module should be a pure import — it must NOT mutate
+    // global state. The caller must explicitly call initializeBootstrap().
+    //
+    // Match a bare `initializeBootstrap()` call that is NOT inside a function
+    // body. We check that the only occurrence is inside the export (the
+    // function definition) or in comments, not a standalone call at module
+    // scope.
+    //
+    // Remove comment lines, then check for a bare call.
+    const withoutComments = content
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+
+    // The function definition line is `export function initializeBootstrap(): void {`
+    // A module-scope call would be a bare `initializeBootstrap()` on its own line
+    // (not preceded by `function` or inside a block). We check that no bare
+    // call exists outside of a function body.
+    //
+    // Simple heuristic: after removing comments, there should be no line that
+    // is exactly `initializeBootstrap()` (the module-scope auto-call).
+    const bareCallPattern = /^initializeBootstrap\(\)\s*$/
+    const lines = withoutComments.split('\n')
+    const bareCalls = lines.filter((line) => bareCallPattern.test(line.trim()))
+    expect(bareCalls.length).toBe(0) // no module-scope auto-call
+  })
 })
