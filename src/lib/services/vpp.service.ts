@@ -42,10 +42,7 @@ import { SimulatedDERAdapter, type DERAdapter } from './der-adapter.service'
 
 // VPP-4: Generic execution model — VPP wraps the kernel's Execution/ExecutionAssignment.
 import {
-  createExecution as createGenericExecution,
-  createExecutionAssignment as createGenericExecutionAssignment,
   updateAssignmentResults as updateGenericAssignmentResults,
-  findExecutionBySource,
 } from '@/lib/kernel/execution/execution.service'
 
 const derAdapter: DERAdapter = new SimulatedDERAdapter()
@@ -389,11 +386,34 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
       )
     }
 
-    // Create the dispatch.
+    // VPP-4.1: Create the generic Execution FIRST, then VppDispatch with explicit FK.
+    // The Execution is the vertical-agnostic lifecycle record; VppDispatch
+    // adds energy-specific fields (programId, kW/kWh) and references it via executionId.
+    const execution = await tx.execution.create({
+      data: {
+        tenantId,
+        networkId: program.networkId,
+        requestedQuantity: input.requestedKwh,
+        requestedUnit: 'kWh',
+        startTime,
+        endTime,
+        status: 'assigned',
+        sourceType: 'vpp_dispatch',
+        sourceId: null, // will be set after VppDispatch is created
+        metadataJson: JSON.stringify({
+          requestedKw: input.requestedKw,
+          programId: input.programId,
+          reason: input.reason ?? null,
+        }),
+      },
+    })
+
+    // Create the dispatch with explicit executionId FK.
     const created = await tx.vppDispatch.create({
       data: {
         tenantId,
         programId: input.programId,
+        executionId: execution.id,
         requestedKw: input.requestedKw,
         requestedKwh: input.requestedKwh,
         startTime,
@@ -403,27 +423,10 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
       },
     })
 
-    // VPP-4: Create the generic Execution record that this dispatch wraps.
-    // The Execution is the vertical-agnostic lifecycle record; VppDispatch
-    // adds energy-specific fields (programId, kW/kWh). The generic
-    // Execution is linked back via sourceType='vpp_dispatch', sourceId=dispatch.id.
-    const execution = await tx.execution.create({
-      data: {
-        tenantId,
-        networkId: program.networkId,
-        requestedQuantity: input.requestedKwh,  // energy is the primary quantity
-        requestedUnit: 'kWh',
-        startTime,
-        endTime,
-        status: 'assigned',
-        sourceType: 'vpp_dispatch',
-        sourceId: created.id,
-        metadataJson: JSON.stringify({
-          requestedKw: input.requestedKw,
-          programId: input.programId,
-          reason: input.reason ?? null,
-        }),
-      },
+    // Link the Execution back to the dispatch via sourceId.
+    await tx.execution.update({
+      where: { id: execution.id },
+      data: { sourceId: created.id },
     })
 
     // Assign assets proportionally + create capacity commitments (atomic).
@@ -455,33 +458,31 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
         commitmentId = commitment.commitmentId
       }
 
-      // Store the commitmentId on the assignment for direct lookup.
-      await tx.vppDispatchAssignment.create({
-        data: {
-          tenantId,
-          dispatchId: created.id,
-          assetId: reservation.assetId,
-          operatorId: reservation.operatorId,
-          capabilityType: reservation.capabilityType,
-          assignedKw: assignedKw.toFixed(8),
-          assignedKwh: assignedKwh.toFixed(8),
-          capacityCommitmentId: commitmentId,
-        },
-      })
-
-      // VPP-4: Create the generic ExecutionAssignment alongside the VPP assignment.
-      // The generic assignment uses quantity/unit (not kW/kWh); VPP wraps it
-      // with energy-specific fields. The generic assignment is the kernel's
-      // record of "this asset was assigned this much work in this execution."
-      await tx.executionAssignment.create({
+      // VPP-4.1: Create generic ExecutionAssignment FIRST, then VppDispatchAssignment with explicit FK.
+      const genericAssignment = await tx.executionAssignment.create({
         data: {
           tenantId,
           executionId: execution.id,
           assetId: reservation.assetId,
           operatorId: reservation.operatorId,
           capabilityType: reservation.capabilityType,
-          assignedQuantity: assignedKwh.toFixed(8),  // energy is the primary quantity
+          assignedQuantity: assignedKwh.toFixed(8),
           assignedUnit: 'kWh',
+          capacityCommitmentId: commitmentId,
+        },
+      })
+
+      // Create VPP assignment with explicit executionAssignmentId FK.
+      await tx.vppDispatchAssignment.create({
+        data: {
+          tenantId,
+          dispatchId: created.id,
+          executionAssignmentId: genericAssignment.id,
+          assetId: reservation.assetId,
+          operatorId: reservation.operatorId,
+          capabilityType: reservation.capabilityType,
+          assignedKw: assignedKw.toFixed(8),
+          assignedKwh: assignedKwh.toFixed(8),
           capacityCommitmentId: commitmentId,
         },
       })
@@ -826,40 +827,42 @@ export async function executeDispatchAssignment(
       `vpp-baseline-${baseline.id}`,
     )
 
-    // Persist delivery results + stage = delivery_verified.
-    await db.vppDispatchAssignment.update({
-      where: { id: assignmentId },
-      data: {
-        economicStage: 'delivery_verified',
-        actualKwh: actualKwh.toString(),
-        baselineKwh: baselineKwh.toString(),
-        performanceKwh: verifiedPerformanceKwh.toString(),
-        eventId: event.id,
-        contributionId: contribution.id,
-      },
-    })
-
-    // VPP-4: Update the generic ExecutionAssignment with results.
-    // The generic assignment stores quantity/unit (not energy-specific fields).
-    // VPP maps: actualKwh → actualQuantity, verifiedPerformanceKwh → verifiedQuantity.
-    const execution = await findExecutionBySource(tenantId, 'vpp_dispatch', assignment.dispatchId)
-    if (execution) {
-      const genericAssignment = await db.executionAssignment.findFirst({
-        where: { executionId: execution.id, assetId: assignment.assetId },
+    // VPP-4.1: Update VPP + generic ExecutionAssignment atomically in one transaction.
+    // Use the explicit executionAssignmentId FK — no findFirst ambiguity.
+    await db.$transaction(async (tx) => {
+      // VPP assignment update.
+      await tx.vppDispatchAssignment.update({
+        where: { id: assignmentId },
+        data: {
+          economicStage: 'delivery_verified',
+          actualKwh: actualKwh.toString(),
+          baselineKwh: baselineKwh.toString(),
+          performanceKwh: verifiedPerformanceKwh.toString(),
+          eventId: event.id,
+          contributionId: contribution.id,
+        },
       })
-      if (genericAssignment) {
-        await updateGenericAssignmentResults(tenantId, genericAssignment.id, {
+
+      // Generic ExecutionAssignment update (same transaction).
+      await tx.executionAssignment.update({
+        where: { id: assignment.executionAssignmentId },
+        data: {
           actualQuantity: actualKwh.toString(),
           actualUnit: 'kWh',
           verifiedQuantity: verifiedPerformanceKwh.toString(),
           verifiedUnit: 'kWh',
           eventId: event.id,
           contributionId: contribution.id,
-          status: 'dispatching',
           economicStage: 'delivery_verified',
-        })
-      }
-    }
+        },
+      })
+
+      // Update parent Execution status to 'executing' (if not already).
+      await tx.execution.updateMany({
+        where: { id: assignment.dispatch.executionId, status: 'assigned' },
+        data: { status: 'executing' },
+      })
+    })
 
     // --- RECORD USAGE BEFORE ANY IRREVERSIBLE FINANCIAL SETTLEMENT ---
     if (assignment.capacityCommitmentId) {
@@ -901,23 +904,18 @@ export async function executeDispatchAssignment(
     }
 
     // --- COMPLETED (only reached if settlement succeeded) ---
-    await db.vppDispatchAssignment.update({
-      where: { id: assignmentId },
-      data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
-    })
-
-    // VPP-4: Update the generic ExecutionAssignment to completed.
-    if (execution) {
-      const genericAssignment = await db.executionAssignment.findFirst({
-        where: { executionId: execution.id, assetId: assignment.assetId },
+    // VPP-4.1: Update VPP + generic assignment atomically.
+    await db.$transaction(async (tx) => {
+      await tx.vppDispatchAssignment.update({
+        where: { id: assignmentId },
+        data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
       })
-      if (genericAssignment) {
-        await updateGenericAssignmentResults(tenantId, genericAssignment.id, {
-          status: 'completed',
-          economicStage: 'completed',
-        })
-      }
-    }
+
+      await tx.executionAssignment.update({
+        where: { id: assignment.executionAssignmentId },
+        data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
+      })
+    })
 
     // VPP-2D-4: canonical finalization. Checks if ALL assignments are
     // terminal (completed | failed | reconciliation_required). If so,

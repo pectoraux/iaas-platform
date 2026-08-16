@@ -998,6 +998,10 @@ model VppDispatch {
   id              String   @id @default(cuid())
   tenantId        String
   programId       String
+  // VPP-4.1: Explicit link to the generic Execution record.
+  // This is a 1:1 relationship — every VppDispatch has exactly one Execution.
+  // Removes the need for findFirst(sourceType + sourceId) lookups.
+  executionId     String   @unique
   // The dispatch request.
   requestedKw     String   // decimal as string — total power requested
   requestedKwh    String   // decimal as string — total energy to deliver
@@ -1015,6 +1019,15 @@ model VppDispatch {
   // "buyer_settlement_pending" = delivery complete + portfolio evaluated, buyer charge pending.
   // "reconciliation_required" = delivery complete, but one+ assignments have unresolved financial recovery.
   // "completed" = portfolio obligation finalized + buyer settlement processed + all financial recovery done.
+  //
+  // VPP-4.1: The VPP dispatch status includes financial states (buyer_settlement_pending,
+  // reconciliation_required) that are ABOVE the generic Execution layer. The generic
+  // Execution.status tracks only: created → assigned → executing → completed → failed.
+  // VPP maps its richer lifecycle onto the generic one:
+  //   VPP delivery_complete → Execution completed
+  //   VPP buyer_settlement_pending → Execution completed (already)
+  //   VPP reconciliation_required → Execution completed (already) or failed
+  //   VPP completed → Execution completed (already)
   status          String   @default("created") // created | assigned | dispatching | delivery_complete | buyer_settlement_pending | reconciliation_required | completed | cancelled | failed
   // Dispatch metadata
   reason          String?  // e.g. "grid_frequency_event", "price_peak", "manual"
@@ -1024,12 +1037,14 @@ model VppDispatch {
 
   tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   program     VppBuyerProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
+  execution   Execution       @relation(fields: [executionId], references: [id])
   assignments VppDispatchAssignment[]
   portfolioCommitment VppPortfolioCommitment?
   buyerSettlement     VppBuyerSettlement?
 
   @@index([tenantId])
   @@index([programId])
+  @@index([executionId])
   @@index([status])
 }
 
@@ -1041,6 +1056,10 @@ model VppDispatchAssignment {
   id              String   @id @default(cuid())
   tenantId        String
   dispatchId      String
+  // VPP-4.1: Explicit link to the generic ExecutionAssignment.
+  // 1:1 — every VppDispatchAssignment has exactly one ExecutionAssignment.
+  // Removes findFirst(executionId + assetId) ambiguity.
+  executionAssignmentId String @unique
   assetId         String
   operatorId      String
   capabilityType  String   // energy_discharge | frequency_response
@@ -1048,8 +1067,6 @@ model VppDispatchAssignment {
   assignedKwh     String   // decimal as string — energy assigned to this asset
   status          String   @default("assigned") // assigned | dispatching | completed | failed | reconciliation_required | reconciling
   // Durable economic stage tracking for resumable recovery.
-  // Each stage is set as the assignment progresses through the economic pipeline.
-  // On failure after usage, reconcileAssignment() resumes from the first missing stage.
   economicStage   String   @default("none") // none | delivery_verified | usage_recorded | reward_calculated | ledger_posted | settlement_pending | completed
   // After completion: actual vs baseline (computed by the baseline engine).
   actualKwh       String?  // decimal as string — measured energy delivered
@@ -1059,20 +1076,20 @@ model VppDispatchAssignment {
   eventId         String?  // the generic Event created by the asset's discharge telemetry
   contributionId  String?  // the generic Contribution created from the performance
   // Fix 1: explicit link to the capacity commitment (1:1 per assignment).
-  // This prevents multi-asset dispatch ambiguity where all assignments shared
-  // the same (sourceType=vpp_dispatch, sourceId=dispatchId) lookup.
   capacityCommitmentId String?
   createdAt       DateTime @default(now())
   completedAt     DateTime?
 
-  tenant     Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  dispatch   VppDispatch  @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
-  asset      Asset        @relation(fields: [assetId], references: [id], onDelete: Cascade)
-  operator   Operator     @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  tenant     Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  dispatch   VppDispatch        @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
+  executionAssignment ExecutionAssignment @relation(fields: [executionAssignmentId], references: [id])
+  asset      Asset              @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  operator   Operator           @relation(fields: [operatorId], references: [id], onDelete: Cascade)
   baseline   VppBaseline?
 
   @@index([tenantId])
   @@index([dispatchId])
+  @@index([executionAssignmentId])
   @@index([assetId])
 }
 
@@ -1350,6 +1367,7 @@ model Execution {
   tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   network     NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
   assignments ExecutionAssignment[]
+  vppDispatch VppDispatch?    // VPP-4.1: reverse relation (1:1)
 
   @@unique([sourceType, sourceId])
   @@index([tenantId])
@@ -1383,6 +1401,7 @@ model ExecutionAssignment {
   execution  Execution  @relation(fields: [executionId], references: [id], onDelete: Cascade)
   asset      Asset      @relation(fields: [assetId], references: [id], onDelete: Cascade)
   operator   Operator   @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  vppDispatchAssignment VppDispatchAssignment?  // VPP-4.1: reverse relation (1:1)
 
   @@index([tenantId])
   @@index([executionId])
