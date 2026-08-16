@@ -148,6 +148,13 @@ export async function createAndExecuteComputeJob(
   const startTime = new Date()
   const endTime = new Date(startTime.getTime() + input.durationSeconds * 1000)
 
+  // Phase 8C: Stable source ID for the entire job lifecycle.
+  // Used consistently for reservation, commitment, usage, audit, and
+  // failure cleanup (releaseCommitment). Previous code used Date.now()
+  // in multiple places, producing different IDs — releaseCommitment
+  // could never find the commitment.
+  const computeJobId = `compute-job-${Date.now()}`
+
   const reservation = await createCapacityReservation({
     tenantId,
     assetId: input.assetId,
@@ -157,7 +164,7 @@ export async function createAndExecuteComputeJob(
     startTime,
     endTime,
     sourceType: 'compute_job',
-    sourceId: `compute-job-${Date.now()}`,
+    sourceId: computeJobId,
   })
 
   const commitment = await createCapacityCommitment({
@@ -168,7 +175,7 @@ export async function createAndExecuteComputeJob(
     startTime,
     endTime,
     sourceType: 'compute_job',
-    sourceId: `compute-job-${Date.now()}`,
+    sourceId: computeJobId,
   })
 
   // --- 1. Create Execution + ExecutionAssignment via the runtime ---
@@ -221,7 +228,10 @@ export async function createAndExecuteComputeJob(
     await db.$transaction(async (tx) => {
       await runtime.failAssignment(tx, tenantId, execution.executionAssignmentId, execution.executionId)
     })
-    await releaseCommitment(tenantId, 'compute_job', `compute-job-${Date.now()}`)
+    // Phase 8C: Release capacity using the SAME computeJobId used for
+    // reservation + commitment. Previous code used Date.now() here,
+    // producing a different ID — releaseCommitment could never find it.
+    await releaseCommitment(tenantId, 'compute_job', computeJobId)
     throw new Error(`Compute execution failed: ${executeResult.error}`)
   }
 
@@ -267,7 +277,23 @@ export async function createAndExecuteComputeJob(
 
   const attestation = event.attestations[0]
 
-  // --- 5. Create a Contribution from the verified result ---
+  // --- 5. Record results + complete the assignment (OPERATIONAL COMPLETION) ---
+  // Phase 5.2 / 8C: operational completion happens BEFORE economics.
+  // The generic ExecutionAssignment is completed when the work is verified,
+  // NOT when the contribution/reward/settlement succeeds.
+  await db.$transaction(async (tx) => {
+    await runtime.recordAssignmentResults(tx, execution.executionAssignmentId, {
+      actualQuantity: executeResult.actualQuantity,
+      actualUnit: executeResult.actualUnit,
+      verifiedQuantity: executeResult.actualQuantity,
+      verifiedUnit: executeResult.actualUnit,
+      eventId: event.id,
+    })
+    await runtime.completeAssignment(tx, tenantId, execution.executionAssignmentId, execution.executionId)
+  })
+
+  // --- 6. Create a Contribution from the verified result (ECONOMICS) ---
+  // Phase 8C: Contribution is created AFTER operational completion, not before.
   // The actual GPU-hours delivered becomes the Contribution quantity.
   // This is the SAME generic contribution service VPP uses.
   const contribution = await createContribution(
@@ -279,19 +305,6 @@ export async function createAndExecuteComputeJob(
     },
     `compute-attestation-${attestation.id}`,
   )
-
-  // --- 6. Record results + complete the assignment (operational completion) ---
-  // Phase 5.2: operational completion happens BEFORE economics.
-  await db.$transaction(async (tx) => {
-    await runtime.recordAssignmentResults(tx, execution.executionAssignmentId, {
-      actualQuantity: executeResult.actualQuantity,
-      actualUnit: executeResult.actualUnit,
-      verifiedQuantity: executeResult.actualQuantity,
-      verifiedUnit: executeResult.actualUnit,
-      eventId: event.id,
-    })
-    await runtime.completeAssignment(tx, tenantId, execution.executionAssignmentId, execution.executionId)
-  })
 
   // --- 7. Link the contribution (write-once, after operational completion) ---
   await db.$transaction(async (tx) => {
@@ -307,7 +320,7 @@ export async function createAndExecuteComputeJob(
     startTime,
     endTime,
     sourceType: 'compute_job',
-    sourceId: `compute-job-${Date.now()}`,
+    sourceId: computeJobId,
   })
 
   // --- 9. Calculate Reward (generic reward service) ---

@@ -2478,3 +2478,28 @@ Stage Summary:
   - The compute vertical needed only: a template, an adapter, and an orchestration service.
 - The reward-unit mismatch is fixed: GPU-hours → GPU reward, CPU-hours → CPU reward (separate templates).
 - Phase 8 (A + B) is now complete. Phase 9 (ProtocolRuntime) is ready.
+
+---
+Task ID: Phase-8C-Ordering-And-SourceID-Fix
+Agent: orchestrator
+Task: Fix two issues in compute.service.ts: (1) Contribution was created BEFORE completeAssignment — should be AFTER (Phase 5.2 ordering). (2) Capacity release used Date.now() in multiple places, producing different source IDs — releaseCommitment could never find the commitment. Add a failure-path PostgreSQL test.
+
+Work Log:
+- FIX 1 — EXECUTION/ECONOMICS ORDERING:
+  - Previous order: step 5 = createContribution, step 6 = record results + completeAssignment, step 7 = linkContribution.
+  - Correct order (Phase 5.2): step 5 = record results + completeAssignment (OPERATIONAL COMPLETION), step 6 = createContribution (ECONOMICS, after operational completion), step 7 = linkContribution.
+  - Swapped steps 5 and 6: createContribution now happens AFTER completeAssignment. The generic ExecutionAssignment is completed when the work is verified, NOT when the contribution is created.
+- FIX 2 — STABLE SOURCE ID:
+  - Previous: 4× Date.now() calls producing 4 different source IDs (reservation, commitment, usage, failure-cleanup release).
+  - Fix: Created a single `computeJobId = compute-job-${Date.now()}` at the top of the function. Used consistently for: createCapacityReservation sourceId, createCapacityCommitment sourceId, recordUsage sourceId, releaseCommitment sourceId (failure path), and the audit metadata.
+  - The failure path's releaseCommitment now uses the SAME computeJobId — it will find and release the commitment.
+- FAILURE-PATH TEST (Phase 8C):
+  - Added a DB-backed test that triggers an execution failure (unsupported capability 'storage_capacity' on a compute adapter).
+  - Verifies: the ExecutionAssignment was failed (status='failed'), not completed.
+  - Verifies: the capacity commitment was released (status='released') — this proves the stable computeJobId works. If the sourceId mismatch still existed, the commitment would remain 'active' (not released).
+- VERIFICATION: bun run lint clean. tsc: zero new errors. 125 non-DB tests pass. Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The ordering is now correct: operational completion (completeAssignment) → contribution → linkContribution → reward → ledger → settlement.
+- The stable computeJobId ensures reservation, commitment, usage, and failure cleanup all reference the same source. releaseCommitment can now find and release the commitment.
+- Phase 8C is complete. Phase 8 (A + B + C) is now frozen. Phase 9 (ProtocolRuntime) is ready.

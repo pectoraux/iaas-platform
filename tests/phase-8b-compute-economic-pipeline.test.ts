@@ -210,3 +210,85 @@ describe('Phase 8B: generic pipeline reuse', () => {
     expect(true).toBe(true) // the test above is the proof
   })
 })
+
+// ---------------------------------------------------------------------------
+// Test 3: Phase 8C — Failure path (execution failure releases capacity)
+// ---------------------------------------------------------------------------
+
+describe('Phase 8C: failure path', () => {
+  it('execution failure fails the assignment + releases capacity via stable computeJobId', async () => {
+    // To trigger a failure, we use an asset type that has no adapter
+    // registered. This causes runtime.executeAssignment to throw.
+    //
+    // We need a separate asset that's assigned to the network but whose
+    // assetType has no adapter. We'll use 'compute_node' (which IS registered)
+    // but pass a capability that doesn't match. Actually, the simplest way
+    // is to use an unregistered asset type.
+    //
+    // Instead, we'll create a compute job with an invalid capabilityType
+    // that the adapter doesn't support. The registry will throw
+    // "does not support capability" during executeAssignment.
+
+    // Create a second asset for the failure test.
+    const failAsset = await db.asset.create({
+      data: {
+        tenantId,
+        operatorId,
+        assetType: 'gpu_cluster',
+        name: `GPU Cluster Fail ${Date.now()}`,
+      },
+    })
+
+    await assignAssetToNetwork(tenantId, failAsset.id, networkId, 'gpu_compute', '100', 'GPU-hours')
+
+    const failDevice = await createDevice(tenantId, { assetId: failAsset.id, deviceType: 'compute_controller' })
+
+    // Execute a job with an unsupported capability — the adapter doesn't
+    // support 'storage_capacity', so executeAssignment will throw.
+    await expect(
+      createAndExecuteComputeJob(
+        tenantId,
+        {
+          networkId,
+          assetId: failAsset.id,
+          operatorId,
+          capabilityType: 'storage_capacity', // NOT supported by compute adapter
+          assignedQuantity: '10',
+          assignedUnit: 'GPU-hours',
+          durationSeconds: 3600,
+        },
+        failDevice.provisioningSecret,
+      ),
+    ).rejects.toThrow()
+
+    // Verify: the ExecutionAssignment was failed (not completed).
+    // The execution was created but failed during executeAssignment.
+    const failedExecutions = await db.execution.findMany({
+      where: {
+        tenantId,
+        sourceType: 'compute_job',
+        // The failed execution won't be 'completed'
+      },
+      include: { assignments: true },
+    })
+
+    // At least one execution should have a failed assignment.
+    const hasFailedAssignment = failedExecutions.some(
+      (exec) => exec.assignments.some((a) => a.status === 'failed'),
+    )
+    expect(hasFailedAssignment).toBe(true)
+
+    // Verify: capacity commitment was released (status = 'released').
+    // Phase 8C: The release uses the SAME computeJobId used for reservation
+    // + commitment. If the sourceId mismatch existed, the commitment would
+    // remain 'active' (not released).
+    const releasedCommitments = await db.capacityCommitment.findMany({
+      where: {
+        tenantId,
+        sourceType: 'compute_job',
+        status: 'released',
+      },
+    })
+    expect(releasedCommitments.length).toBeGreaterThan(0)
+  })
+})
