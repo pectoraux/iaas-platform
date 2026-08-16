@@ -698,8 +698,10 @@ describe('Architecture contract: physical execution boundary (Phase 6)', () => {
     expect(content).toMatch(/from\s+['"]@\/lib\/kernel\/runtime\/adapter-registry['"]/)
     // Must export a registerAdapters function (not auto-run).
     expect(content).toMatch(/export function registerAdapters/)
-    // Must register the adapter for energy asset types.
-    expect(content).toMatch(/registerForAssetTypes/)
+    // Phase 7: Must use registerBatch with AdapterDescriptor (not registerForAssetTypes).
+    expect(content).toMatch(/registerBatch/)
+    expect(content).toMatch(/AdapterDescriptor/)
+    // Must register for energy asset types.
     expect(content).toMatch(/battery/)
     expect(content).toMatch(/solar_inverter/)
   })
@@ -769,5 +771,79 @@ describe('Architecture contract: physical execution boundary (Phase 6)', () => {
     const lines = withoutComments.split('\n')
     const bareCalls = lines.filter((line) => bareCallPattern.test(line.trim()))
     expect(bareCalls.length).toBe(0) // no module-scope auto-call
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Test 10: Phase 7 — AdapterRegistry hardening
+// ---------------------------------------------------------------------------
+
+describe('Architecture contract: AdapterRegistry hardening (Phase 7)', () => {
+  it('AdapterRegistry has register (descriptor-based) + registerBatch (atomic)', () => {
+    const registryPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'adapter-registry.ts')
+    const content = readFileSync(registryPath, 'utf-8')
+
+    // Phase 7: descriptor-based registration.
+    expect(content).toMatch(/register\(descriptor:\s*AdapterDescriptor\)/)
+    // Atomic batch registration.
+    expect(content).toMatch(/registerBatch\(descriptors:\s*AdapterDescriptor\[\]\)/)
+  })
+
+  it('AdapterRegistry has deterministic resolve(selection) with adapterType', () => {
+    const registryPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'adapter-registry.ts')
+    const content = readFileSync(registryPath, 'utf-8')
+
+    // Phase 7: resolve takes AdapterSelection (assetType + optional adapterType).
+    expect(content).toMatch(/resolve\(selection:\s*AdapterSelection\)/)
+    // Must throw on ambiguous resolution.
+    expect(content).toMatch(/Ambiguous adapter resolution/)
+    // Must throw on unknown adapter.
+    expect(content).toMatch(/does not support asset type/)
+  })
+
+  it('AdapterRegistry has capability-aware queries', () => {
+    const registryPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'adapter-registry.ts')
+    const content = readFileSync(registryPath, 'utf-8')
+
+    expect(content).toMatch(/findAdaptersForCapability/)
+    // Must check supportedCapabilities during resolution.
+    expect(content).toMatch(/does not support capability/)
+  })
+
+  it('AdapterRegistry has immutable state inspection', () => {
+    const registryPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'adapter-registry.ts')
+    const content = readFileSync(registryPath, 'utf-8')
+
+    // Must expose listAdapters (returns AdapterInfo, not adapter instances).
+    expect(content).toMatch(/listAdapters\(\)/)
+    expect(content).toMatch(/AdapterInfo/)
+    // Must expose registeredAdapterTypes.
+    expect(content).toMatch(/registeredAdapterTypes\(\)/)
+    // Must expose adaptersForAssetType.
+    expect(content).toMatch(/adaptersForAssetType\(/)
+  })
+
+  it('AdapterDescriptor type includes adapter + supportedAssetTypes + supportedCapabilities', () => {
+    const registryPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'adapter-registry.ts')
+    const content = readFileSync(registryPath, 'utf-8')
+
+    const match = content.match(/export interface AdapterDescriptor \{[\s\S]*?\}/)
+    expect(match).not.toBeNull()
+    const block = match![0]
+    expect(block).toMatch(/adapter:\s*InfrastructureAdapter/)
+    expect(block).toMatch(/supportedAssetTypes/)
+    expect(block).toMatch(/supportedCapabilities/)
+  })
+
+  it('registration is atomic — validate phase precedes commit phase', () => {
+    const registryPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'adapter-registry.ts')
+    const content = readFileSync(registryPath, 'utf-8')
+
+    // The register method must have a VALIDATE PHASE comment before mutation.
+    const validateIdx = content.indexOf('VALIDATE PHASE')
+    const commitIdx = content.indexOf('COMMIT PHASE')
+    expect(validateIdx).toBeGreaterThan(-1)
+    expect(commitIdx).toBeGreaterThan(-1)
+    expect(validateIdx).toBeLessThan(commitIdx) // validate before commit
   })
 })

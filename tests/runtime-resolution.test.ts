@@ -274,3 +274,242 @@ describe('Phase 6: adapter resolution', () => {
     ).rejects.toThrow(/No adapter registered/)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Test 8: Phase 7 — AdapterRegistry hardening (behavioral)
+// ---------------------------------------------------------------------------
+
+// We use a fresh AdapterRegistry instance for these tests (not the global
+// singleton) to avoid interference with the bootstrap-registered adapters.
+import { AdapterRegistry } from '../src/lib/kernel/runtime/adapter-registry'
+import type { InfrastructureAdapter, ExecuteCommand, ExecuteResult } from '../src/lib/kernel/adapters/infrastructure-adapter'
+
+// Helper: create a minimal mock adapter for testing.
+function mockAdapter(adapterType: string, assetTypes: string[], capabilities: string[]): InfrastructureAdapter {
+  return {
+    adapterType,
+    async discover() { return [] },
+    async getCapabilities() { return { assetId: 'x', capabilities: [], health: 'healthy' } },
+    async readTelemetry() { return { assetId: 'x', timestamp: new Date(), capabilityType: 'x', payload: {} } },
+    async execute(cmd: ExecuteCommand): Promise<ExecuteResult> {
+      return { assetId: cmd.assetId, actualQuantity: '1', actualUnit: 'unit', telemetry: { payload: {} }, success: true }
+    },
+    async health() { return { assetId: 'x', status: 'healthy' } },
+  }
+}
+
+describe('Phase 7.1: atomic registration', () => {
+  it('registerBatch is all-or-nothing — conflict leaves registry unchanged', () => {
+    const reg = new AdapterRegistry()
+    const adapterA = mockAdapter('adapter_a', ['battery', 'solar_inverter'], ['energy_discharge'])
+    const adapterB = mockAdapter('adapter_b', ['battery'], ['energy_discharge']) // conflicts on 'battery'
+
+    // Register A successfully.
+    reg.register({ adapter: adapterA, supportedAssetTypes: ['battery', 'solar_inverter'], supportedCapabilities: ['energy_discharge'] })
+
+    // Attempt to register B — conflicts on 'battery' (adapterType is different,
+    // but we're testing batch atomicity with a duplicate adapterType).
+    const adapterB2 = mockAdapter('adapter_a', ['ev_charger'], ['energy_discharge']) // same adapterType as A
+
+    expect(() => {
+      reg.registerBatch([
+        { adapter: adapterB, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] },
+        { adapter: adapterB2, supportedAssetTypes: ['ev_charger'], supportedCapabilities: ['energy_discharge'] },
+      ])
+    }).toThrow(/already registered/)
+
+    // Registry is unchanged — B was not committed.
+    expect(reg.hasAdapter('adapter_b')).toBe(false)
+    // A is still there.
+    expect(reg.hasAdapter('adapter_a')).toBe(true)
+    // solar_inverter still resolves to A.
+    const resolved = reg.resolve({ assetType: 'solar_inverter' })
+    expect(resolved.adapterType).toBe('adapter_a')
+  })
+
+  it('register with empty supportedAssetTypes throws', () => {
+    const reg = new AdapterRegistry()
+    const adapter = mockAdapter('test', [], [])
+    expect(() => {
+      reg.register({ adapter, supportedAssetTypes: [], supportedCapabilities: [] })
+    }).toThrow(/supportedAssetTypes is empty/)
+  })
+})
+
+describe('Phase 7.2: explicit adapter identity', () => {
+  it('duplicate adapterType is rejected', () => {
+    const reg = new AdapterRegistry()
+    const adapter1 = mockAdapter('tesla_powerwall', ['battery'], ['energy_discharge'])
+    const adapter2 = mockAdapter('tesla_powerwall', ['battery'], ['energy_discharge'])
+
+    reg.register({ adapter: adapter1, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    expect(() => {
+      reg.register({ adapter: adapter2, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    }).toThrow(/already registered/)
+  })
+
+  it('hasAdapter checks adapterType existence', () => {
+    const reg = new AdapterRegistry()
+    const adapter = mockAdapter('tesla_powerwall', ['battery'], ['energy_discharge'])
+    reg.register({ adapter, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+
+    expect(reg.hasAdapter('tesla_powerwall')).toBe(true)
+    expect(reg.hasAdapter('enphase_battery')).toBe(false)
+  })
+})
+
+describe('Phase 7.3: deterministic selection', () => {
+  it('resolve by assetType alone works when single adapter', () => {
+    const reg = new AdapterRegistry()
+    const adapter = mockAdapter('simulated_der', ['battery'], ['energy_discharge'])
+    reg.register({ adapter, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+
+    const resolved = reg.resolve({ assetType: 'battery' })
+    expect(resolved.adapterType).toBe('simulated_der')
+  })
+
+  it('resolve by assetType + adapterType is deterministic', () => {
+    const reg = new AdapterRegistry()
+    const adapter1 = mockAdapter('simulated_der', ['battery'], ['energy_discharge'])
+    const adapter2 = mockAdapter('tesla_powerwall', ['battery'], ['energy_discharge'])
+    reg.register({ adapter: adapter1, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    reg.register({ adapter: adapter2, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+
+    const resolved1 = reg.resolve({ assetType: 'battery', adapterType: 'simulated_der' })
+    expect(resolved1.adapterType).toBe('simulated_der')
+
+    const resolved2 = reg.resolve({ assetType: 'battery', adapterType: 'tesla_powerwall' })
+    expect(resolved2.adapterType).toBe('tesla_powerwall')
+  })
+
+  it('ambiguous resolution (multiple adapters, no adapterType) throws', () => {
+    const reg = new AdapterRegistry()
+    const adapter1 = mockAdapter('simulated_der', ['battery'], ['energy_discharge'])
+    const adapter2 = mockAdapter('tesla_powerwall', ['battery'], ['energy_discharge'])
+    reg.register({ adapter: adapter1, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    reg.register({ adapter: adapter2, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+
+    expect(() => {
+      reg.resolve({ assetType: 'battery' })
+    }).toThrow(/Ambiguous/)
+  })
+
+  it('unknown adapterType throws', () => {
+    const reg = new AdapterRegistry()
+    const adapter = mockAdapter('simulated_der', ['battery'], ['energy_discharge'])
+    reg.register({ adapter, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+
+    expect(() => {
+      reg.resolve({ assetType: 'battery', adapterType: 'nonexistent' })
+    }).toThrow(/does not support asset type/)
+  })
+
+  it('unknown assetType throws', () => {
+    const reg = new AdapterRegistry()
+    expect(() => {
+      reg.resolve({ assetType: 'nonexistent' })
+    }).toThrow(/No adapter registered/)
+  })
+
+  it('capability check — adapter must support requested capability', () => {
+    const reg = new AdapterRegistry()
+    const adapter = mockAdapter('simulated_der', ['battery'], ['energy_discharge'])
+    reg.register({ adapter, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+
+    // Supported capability works.
+    const resolved = reg.resolve({ assetType: 'battery', capabilityType: 'energy_discharge' })
+    expect(resolved.adapterType).toBe('simulated_der')
+
+    // Unsupported capability throws.
+    expect(() => {
+      reg.resolve({ assetType: 'battery', capabilityType: 'frequency_response' })
+    }).toThrow(/does not support capability/)
+  })
+})
+
+describe('Phase 7.4: capability-aware queries', () => {
+  it('findAdaptersForCapability returns matching adapterTypes', () => {
+    const reg = new AdapterRegistry()
+    reg.register({
+      adapter: mockAdapter('simulated_der', ['battery', 'solar_inverter'], ['energy_discharge', 'frequency_response']),
+      supportedAssetTypes: ['battery', 'solar_inverter'],
+      supportedCapabilities: ['energy_discharge', 'frequency_response'],
+    })
+    reg.register({
+      adapter: mockAdapter('tesla_powerwall', ['battery'], ['energy_discharge']),
+      supportedAssetTypes: ['battery'],
+      supportedCapabilities: ['energy_discharge'],
+    })
+
+    // Both adapters support energy_discharge on battery.
+    const energyAdapters = reg.findAdaptersForCapability('battery', 'energy_discharge')
+    expect(energyAdapters.sort()).toEqual(['simulated_der', 'tesla_powerwall'])
+
+    // Only simulated_der supports frequency_response on battery.
+    const freqAdapters = reg.findAdaptersForCapability('battery', 'frequency_response')
+    expect(freqAdapters).toEqual(['simulated_der'])
+
+    // No adapter supports this capability on solar_inverter.
+    const none = reg.findAdaptersForCapability('solar_inverter', 'frequency_response')
+    expect(none).toEqual(['simulated_der']) // simulated_der supports it on solar_inverter too
+  })
+
+  it('findAdaptersForCapability returns empty for unknown asset type', () => {
+    const reg = new AdapterRegistry()
+    expect(reg.findAdaptersForCapability('nonexistent', 'energy_discharge')).toEqual([])
+  })
+})
+
+describe('Phase 7.5: immutable state inspection', () => {
+  it('listAdapters returns metadata, not adapter instances', () => {
+    const reg = new AdapterRegistry()
+    reg.register({
+      adapter: mockAdapter('simulated_der', ['battery'], ['energy_discharge']),
+      supportedAssetTypes: ['battery'],
+      supportedCapabilities: ['energy_discharge'],
+    })
+
+    const list = reg.listAdapters()
+    expect(list.length).toBe(1)
+    expect(list[0].adapterType).toBe('simulated_der')
+    expect(list[0].supportedAssetTypes).toContain('battery')
+    expect(list[0].supportedCapabilities).toContain('energy_discharge')
+    // AdapterInfo does NOT have an `adapter` property.
+    expect((list[0] as any).adapter).toBeUndefined()
+  })
+
+  it('registeredAdapterTypes returns all adapter types', () => {
+    const reg = new AdapterRegistry()
+    reg.register({
+      adapter: mockAdapter('simulated_der', ['battery'], ['energy_discharge']),
+      supportedAssetTypes: ['battery'],
+      supportedCapabilities: ['energy_discharge'],
+    })
+    reg.register({
+      adapter: mockAdapter('tesla_powerwall', ['battery'], ['energy_discharge']),
+      supportedAssetTypes: ['battery'],
+      supportedCapabilities: ['energy_discharge'],
+    })
+
+    const types = reg.registeredAdapterTypes()
+    expect(types.sort()).toEqual(['simulated_der', 'tesla_powerwall'])
+  })
+
+  it('adaptersForAssetType returns adapter types for an asset type', () => {
+    const reg = new AdapterRegistry()
+    reg.register({
+      adapter: mockAdapter('simulated_der', ['battery'], ['energy_discharge']),
+      supportedAssetTypes: ['battery'],
+      supportedCapabilities: ['energy_discharge'],
+    })
+    reg.register({
+      adapter: mockAdapter('tesla_powerwall', ['battery'], ['energy_discharge']),
+      supportedAssetTypes: ['battery'],
+      supportedCapabilities: ['energy_discharge'],
+    })
+
+    const adapters = reg.adaptersForAssetType('battery')
+    expect(adapters.sort()).toEqual(['simulated_der', 'tesla_powerwall'])
+    expect(reg.adaptersForAssetType('nonexistent')).toEqual([])
+  })
+})

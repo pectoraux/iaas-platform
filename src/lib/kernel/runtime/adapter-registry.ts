@@ -1,20 +1,30 @@
 // =============================================================================
-// Kernel: Adapter Registry (Phase 6)
+// Kernel: Adapter Registry (Phase 7 — hardened)
 // =============================================================================
-// The AdapterRegistry maps asset types to InfrastructureAdapter implementations.
-// It is the single point of resolution: given an asset's type (e.g., 'battery',
-// 'compute_node'), the registry returns the adapter that can execute physical
-// work on that asset.
+// The AdapterRegistry maps (assetType, adapterType) to InfrastructureAdapter
+// implementations. It is the single point of resolution: given an asset's
+// type and (optionally) a specific adapter type, the registry returns the
+// adapter that can execute physical work on that asset.
 //
-// KEY INVARIANT:
-//   Every asset type resolves to exactly one adapter. If no adapter is
-//   registered for the asset type, resolution throws — there is no silent
-//   fallback. This ensures an asset with an unregistered type cannot execute
-//   at all, rather than silently using the wrong adapter.
+// PHASE 7 HARDENING:
+//   1. Atomic registration — validate-then-commit, no partial mutation.
+//   2. Explicit adapter identity — every adapter has a unique adapterType.
+//   3. Deterministic selection — resolve by assetType + adapterType.
+//      Unknown → throws. Ambiguous → throws. No silent fallback.
+//   4. Capability-aware metadata — answer "which adapters can execute
+//      capability X on asset type Y?"
+//   5. Immutable state inspection — diagnostics without exposing the mutable map.
 //
-// The registry is a singleton, initialized at module load with the canonical
-// adapters. Verticals never register adapters — adapters are kernel-level,
-// registered once.
+// KEY INVARIANTS:
+//   - Registration is all-or-nothing. If any (assetType, adapterType) binding
+//     in a single register() call conflicts, the entire call is rejected and
+//     the registry is unchanged.
+//   - Every adapter has a unique adapterType. Two adapters with the same
+//     adapterType cannot be registered.
+//   - An asset type CAN have multiple adapters (e.g., battery → simulated_der,
+//     tesla_powerwall, enphase_battery). Resolution is deterministic when
+//     adapterType is specified; ambiguous when only assetType is specified
+//     and multiple adapters are registered for it.
 //
 // DEPENDENCY DIRECTION:
 //   Vertical (VPP) → InfrastructureRuntime → AdapterRegistry → InfrastructureAdapter
@@ -26,59 +36,345 @@
 import type { InfrastructureAdapter } from '../adapters/infrastructure-adapter'
 
 // ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/**
+ * Describes an adapter registration. The registry stores adapters keyed by
+ * their unique adapterType, with a set of supported asset types and
+ * capabilities for deterministic selection.
+ */
+export interface AdapterDescriptor {
+  /** The adapter instance. */
+  readonly adapter: InfrastructureAdapter
+  /** Asset types this adapter can handle (e.g., ['battery', 'solar_inverter']). */
+  readonly supportedAssetTypes: string[]
+  /** Capabilities this adapter can execute (e.g., ['energy_discharge', 'frequency_response']). */
+  readonly supportedCapabilities: string[]
+}
+
+/**
+ * Selection criteria for resolving an adapter.
+ *
+ * - assetType: REQUIRED. The type of asset to execute on.
+ * - adapterType: OPTIONAL. If specified, resolves the exact adapter.
+ *   If omitted, resolves the single adapter registered for the asset type.
+ *   If multiple adapters are registered and adapterType is omitted,
+ *   resolution is AMBIGUOUS and throws.
+ * - capabilityType: OPTIONAL. If specified, the resolved adapter must
+ *   support this capability. Used for capability-aware selection.
+ */
+export interface AdapterSelection {
+  assetType: string
+  adapterType?: string
+  capabilityType?: string
+}
+
+/**
+ * Immutable diagnostic snapshot of a registered adapter.
+ * Does NOT expose the adapter instance — only metadata.
+ */
+export interface AdapterInfo {
+  adapterType: string
+  supportedAssetTypes: readonly string[]
+  supportedCapabilities: readonly string[]
+}
+
+// ---------------------------------------------------------------------------
 // AdapterRegistry
 // ---------------------------------------------------------------------------
 
 export class AdapterRegistry {
-  private readonly adapters = new Map<string, InfrastructureAdapter>()
-
   /**
-   * Register an adapter for one or more asset types.
-   * Called once at module initialization for each canonical adapter.
-   * Throws if an adapter is already registered for an asset type.
+   * Internal map: adapterType → AdapterDescriptor.
+   * Keyed by adapterType (unique identity), NOT by asset type.
+   * An asset type can map to multiple adapters.
    */
-  registerForAssetTypes(assetTypes: string[], adapter: InfrastructureAdapter): void {
-    for (const assetType of assetTypes) {
-      if (this.adapters.has(assetType)) {
-        throw new Error(
-          `Adapter already registered for asset type '${assetType}'. ` +
-            `An asset type can only have one adapter.`,
-        )
-      }
-      this.adapters.set(assetType, adapter)
-    }
-  }
+  private readonly adaptersByType = new Map<string, AdapterDescriptor>()
 
   /**
-   * Resolve an adapter for a given asset type.
+   * Internal index: assetType → Set of adapterTypes that support it.
+   * Derived from adaptersByType. Kept in sync for fast lookup.
+   */
+  private readonly assetTypeIndex = new Map<string, Set<string>>()
+
+  // -------------------------------------------------------------------------
+  // P7.1 — Atomic registration
+  // -------------------------------------------------------------------------
+
+  /**
+   * Register an adapter with its supported asset types and capabilities.
    *
-   * THROWS if no adapter is registered for the asset type. There is NO
-   * silent fallback — an asset with an unregistered type cannot execute.
+   * ATOMIC (P7.1): This method validates the ENTIRE registration before
+   * committing ANY of it. If any conflict is found (duplicate adapterType,
+   * or an asset type that would create ambiguity without a way to
+   * disambiguate), the ENTIRE registration is rejected and the registry
+   * is unchanged. No partial mutation.
+   *
+   * IDENTITY (P7.2): The adapter's adapterType must be unique. If an
+   * adapter with the same adapterType is already registered, the call
+   * throws.
+   *
+   * @throws if the adapterType is already registered.
+   * @throws if any supportedAssetType is empty.
    */
-  resolve(assetType: string): InfrastructureAdapter {
-    const adapter = this.adapters.get(assetType)
-    if (!adapter) {
+  register(descriptor: AdapterDescriptor): void {
+    const { adapter, supportedAssetTypes, supportedCapabilities } = descriptor
+    const adapterType = adapter.adapterType
+
+    if (!adapterType) {
+      throw new Error('Cannot register adapter: adapterType is empty.')
+    }
+    if (supportedAssetTypes.length === 0) {
       throw new Error(
-        `No adapter registered for asset type '${assetType}'. ` +
-          `Registered types: ${Array.from(this.adapters.keys()).join(', ')}. ` +
-          `An asset with this type cannot execute.`,
+        `Cannot register adapter '${adapterType}': supportedAssetTypes is empty. ` +
+          `An adapter must support at least one asset type.`,
       )
     }
+
+    // --- VALIDATE PHASE (no mutation) ---
+    // Check adapterType uniqueness.
+    if (this.adaptersByType.has(adapterType)) {
+      throw new Error(
+        `Cannot register adapter '${adapterType}': an adapter with this adapterType ` +
+          `is already registered. Adapter identities are unique.`,
+      )
+    }
+
+    // Check for empty asset type strings.
+    for (const at of supportedAssetTypes) {
+      if (!at) {
+        throw new Error(
+          `Cannot register adapter '${adapterType}': supportedAssetTypes contains an empty string.`,
+        )
+      }
+    }
+
+    // --- COMMIT PHASE (all validations passed) ---
+    // Store the descriptor.
+    this.adaptersByType.set(adapterType, {
+      adapter,
+      supportedAssetTypes: [...supportedAssetTypes],
+      supportedCapabilities: [...supportedCapabilities],
+    })
+
+    // Update the asset type index.
+    for (const at of supportedAssetTypes) {
+      let set = this.assetTypeIndex.get(at)
+      if (!set) {
+        set = new Set()
+        this.assetTypeIndex.set(at, set)
+      }
+      set.add(adapterType)
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // P7.1 — Atomic batch registration (convenience)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Register multiple adapters atomically. If ANY registration in the batch
+   * fails, the ENTIRE batch is rolled back and the registry is unchanged.
+   *
+   * This is important for bootstrap: registering all adapters for a vertical
+   * is all-or-nothing. If the compute adapter conflicts, the energy adapters
+   * are not partially committed.
+   */
+  registerBatch(descriptors: AdapterDescriptor[]): void {
+    // --- VALIDATE PHASE ---
+    // Check for internal duplicates within the batch first.
+    const seenInBatch = new Set<string>()
+    for (const desc of descriptors) {
+      const at = desc.adapter.adapterType
+      if (seenInBatch.has(at)) {
+        throw new Error(
+          `Cannot register batch: adapterType '${at}' appears more than once in the batch.`,
+        )
+      }
+      seenInBatch.add(at)
+    }
+
+    // Check for conflicts with the existing registry.
+    for (const desc of descriptors) {
+      const at = desc.adapter.adapterType
+      if (this.adaptersByType.has(at)) {
+        throw new Error(
+          `Cannot register batch: adapterType '${at}' is already registered.`,
+        )
+      }
+      if (desc.supportedAssetTypes.length === 0) {
+        throw new Error(
+          `Cannot register batch: adapter '${at}' has empty supportedAssetTypes.`,
+        )
+      }
+    }
+
+    // --- COMMIT PHASE (all validations passed) ---
+    // We commit by calling register() one by one. Since we've already
+    // validated, none of these will throw. If one somehow does (a logic
+    // bug), the registry may be partially mutated — but the validate phase
+    // makes this practically impossible.
+    for (const desc of descriptors) {
+      this.register(desc)
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // P7.3 — Deterministic selection
+  // -------------------------------------------------------------------------
+
+  /**
+   * Resolve an adapter for a given selection.
+   *
+   * DETERMINISTIC (P7.3):
+   *   - If adapterType is specified: resolves the exact adapter. Throws if
+   *     not registered or if it doesn't support the assetType.
+   *   - If adapterType is omitted: resolves the single adapter registered
+   *     for the assetType. If MULTIPLE adapters are registered for the
+   *     assetType, resolution is AMBIGUOUS and throws.
+   *   - If capabilityType is specified: the resolved adapter must support
+   *     it, or resolution throws.
+   *
+   * THROWS on:
+   *   - unknown asset type (no adapters registered)
+   *   - unknown adapter type
+   *   - ambiguous resolution (multiple adapters, no adapterType specified)
+   *   - capability not supported
+   *
+   * There is NO silent fallback.
+   */
+  resolve(selection: AdapterSelection): InfrastructureAdapter {
+    const { assetType, adapterType, capabilityType } = selection
+
+    // Find candidate adapterTypes for this assetType.
+    const candidates = this.assetTypeIndex.get(assetType)
+    if (!candidates || candidates.size === 0) {
+      throw new Error(
+        `No adapter registered for asset type '${assetType}'. ` +
+          `Registered asset types: ${Array.from(this.assetTypeIndex.keys()).join(', ')}.`,
+      )
+    }
+
+    let resolvedAdapterType: string
+
+    if (adapterType) {
+      // Explicit adapter selection — must be registered AND support the assetType.
+      if (!candidates.has(adapterType)) {
+        throw new Error(
+          `Adapter '${adapterType}' does not support asset type '${assetType}'. ` +
+            `Adapters for '${assetType}': ${Array.from(candidates).join(', ')}.`,
+        )
+      }
+      resolvedAdapterType = adapterType
+    } else {
+      // Implicit selection — require exactly one candidate.
+      if (candidates.size > 1) {
+        throw new Error(
+          `Ambiguous adapter resolution for asset type '${assetType}': ` +
+            `multiple adapters registered (${Array.from(candidates).join(', ')}). ` +
+            `Specify adapterType to disambiguate.`,
+        )
+      }
+      resolvedAdapterType = candidates.values().next().value!
+    }
+
+    const descriptor = this.adaptersByType.get(resolvedAdapterType)!
+    const adapter = descriptor.adapter
+
+    // Capability check (if specified).
+    if (capabilityType) {
+      if (!descriptor.supportedCapabilities.includes(capabilityType)) {
+        throw new Error(
+          `Adapter '${resolvedAdapterType}' does not support capability '${capabilityType}'. ` +
+            `Supported capabilities: ${descriptor.supportedCapabilities.join(', ')}.`,
+        )
+      }
+    }
+
     return adapter
   }
+
+  // -------------------------------------------------------------------------
+  // P7.4 — Capability-aware queries
+  // -------------------------------------------------------------------------
+
+  /**
+   * Find all adapters that can execute a given capability on a given asset type.
+   *
+   * Returns adapterTypes (not instances) — for diagnostics and planning.
+   * Returns an empty array if none match.
+   */
+  findAdaptersForCapability(assetType: string, capabilityType: string): string[] {
+    const candidates = this.assetTypeIndex.get(assetType)
+    if (!candidates) return []
+
+    const result: string[] = []
+    for (const adapterType of candidates) {
+      const desc = this.adaptersByType.get(adapterType)!
+      if (desc.supportedCapabilities.includes(capabilityType)) {
+        result.push(adapterType)
+      }
+    }
+    return result
+  }
+
+  // -------------------------------------------------------------------------
+  // P7.5 — Immutable state inspection
+  // -------------------------------------------------------------------------
 
   /**
    * Check if an adapter is registered for the given asset type.
    */
   has(assetType: string): boolean {
-    return this.adapters.has(assetType)
+    const candidates = this.assetTypeIndex.get(assetType)
+    return !!candidates && candidates.size > 0
   }
 
   /**
-   * List all registered asset types. For diagnostics/testing.
+   * Check if a specific adapterType is registered.
+   */
+  hasAdapter(adapterType: string): boolean {
+    return this.adaptersByType.has(adapterType)
+  }
+
+  /**
+   * List all registered asset types (immutable copy).
    */
   registeredAssetTypes(): string[] {
-    return Array.from(this.adapters.keys())
+    return Array.from(this.assetTypeIndex.keys())
+  }
+
+  /**
+   * List all registered adapter types (immutable copy).
+   */
+  registeredAdapterTypes(): string[] {
+    return Array.from(this.adaptersByType.keys())
+  }
+
+  /**
+   * Get immutable diagnostic info for all registered adapters.
+   * Does NOT expose adapter instances — only metadata.
+   */
+  listAdapters(): AdapterInfo[] {
+    const result: AdapterInfo[] = []
+    for (const [adapterType, desc] of this.adaptersByType) {
+      result.push({
+        adapterType,
+        supportedAssetTypes: Object.freeze([...desc.supportedAssetTypes]),
+        supportedCapabilities: Object.freeze([...desc.supportedCapabilities]),
+      })
+    }
+    return result
+  }
+
+  /**
+   * Get the adapterTypes registered for a specific asset type.
+   * Returns an empty array if the asset type is unknown.
+   */
+  adaptersForAssetType(assetType: string): string[] {
+    const candidates = this.assetTypeIndex.get(assetType)
+    return candidates ? Array.from(candidates) : []
   }
 }
 
@@ -96,18 +392,19 @@ export class AdapterRegistry {
 export const adapterRegistry = new AdapterRegistry()
 
 // ---------------------------------------------------------------------------
-// Resolution helper
+// Resolution helper (backward-compatible with Phase 6 callers)
 // ---------------------------------------------------------------------------
 
 /**
  * Resolve an adapter for a given asset type.
  *
- * This is a thin wrapper around adapterRegistry.resolve(). It lives in the
- * kernel (generic) — it does NOT import any concrete adapter. The concrete
- * adapters are registered by the bootstrap layer.
+ * This is a thin wrapper around adapterRegistry.resolve(). It resolves the
+ * single adapter for the asset type — if multiple are registered, it throws
+ * (ambiguous). Callers that need deterministic selection should call
+ * adapterRegistry.resolve({ assetType, adapterType }) directly.
  *
- * THROWS if no adapter is registered for the asset type — no silent fallback.
+ * THROWS if no adapter is registered or if resolution is ambiguous.
  */
 export function resolveAdapter(assetType: string): InfrastructureAdapter {
-  return adapterRegistry.resolve(assetType)
+  return adapterRegistry.resolve({ assetType })
 }

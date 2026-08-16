@@ -2226,3 +2226,62 @@ Stage Summary:
 - The production caller is instrumentation.ts (Next.js server startup). Tests call it in beforeAll(). No other code path triggers registration.
 - A future worker, CLI, migration, or test helper that merely imports the bootstrap to access a helper will NOT mutate the global adapter registry.
 - Phase 6.3 is complete. Phase 6 is now architecturally closed. Phase 7 (AdapterRegistry hardening) is ready.
+
+---
+Task ID: Phase-7-AdapterRegistry-Hardening
+Agent: orchestrator
+Task: Harden the AdapterRegistry: atomic registration, explicit adapter identity, deterministic selection (assetType + adapterType), capability-aware metadata, immutable state inspection.
+
+Work Log:
+- P7.1 — ATOMIC REGISTRATION:
+  - Old `registerForAssetTypes` looped and mutated the map one asset type at a time — a collision mid-loop left the registry partially mutated.
+  - New `register(descriptor)` has a VALIDATE PHASE (checks adapterType uniqueness, empty asset types) before the COMMIT PHASE (stores the descriptor + updates the index). If validation fails, nothing is committed.
+  - New `registerBatch(descriptors)` validates the entire batch (internal duplicates + existing-registry conflicts) before committing any. If any conflict is found, the entire batch is rejected and the registry is unchanged.
+  - Test: registerBatch with a conflict leaves the registry unchanged — the already-registered adapter is still there, the conflicting one is not.
+- P7.2 — EXPLICIT ADAPTER IDENTITY:
+  - The registry is now keyed by `adapterType` (unique identity), not by asset type. An asset type CAN have multiple adapters (battery → simulated_der, tesla_powerwall, enphase_battery).
+  - Duplicate adapterType registration is rejected: "an adapter with this adapterType is already registered. Adapter identities are unique."
+  - `hasAdapter(adapterType)` checks adapter identity existence.
+- P7.3 — DETERMINISTIC SELECTION:
+  - `resolve(selection: AdapterSelection)` takes `{ assetType, adapterType?, capabilityType? }`.
+  - If adapterType is specified: resolves the exact adapter. Throws if not registered or if it doesn't support the assetType.
+  - If adapterType is omitted: resolves the single adapter for the assetType. If MULTIPLE adapters are registered, resolution is AMBIGUOUS and throws ("Ambiguous adapter resolution for asset type 'battery': multiple adapters registered. Specify adapterType to disambiguate.").
+  - If capabilityType is specified: the resolved adapter must support it, or resolution throws ("does not support capability").
+  - Unknown asset type → throws. Unknown adapterType → throws. No silent fallback.
+  - Backward-compatible `resolveAdapter(assetType)` helper still works (resolves single adapter, throws on ambiguous).
+- P7.4 — CAPABILITY-AWARE METADATA:
+  - `AdapterDescriptor` includes `supportedCapabilities` (e.g., ['energy_discharge', 'frequency_response', 'energy_capacity']).
+  - `findAdaptersForCapability(assetType, capabilityType)` returns all adapterTypes that can execute a given capability on a given asset type. Returns adapterTypes (not instances) — for diagnostics and planning.
+  - The resolve() method checks capability support when capabilityType is specified.
+- P7.5 — IMMUTABLE STATE INSPECTION:
+  - `listAdapters()` returns `AdapterInfo[]` — immutable metadata (adapterType, supportedAssetTypes, supportedCapabilities). Does NOT expose adapter instances.
+  - `registeredAdapterTypes()` returns all registered adapter types.
+  - `adaptersForAssetType(assetType)` returns the adapterTypes registered for an asset type.
+  - `registeredAssetTypes()` returns all registered asset types.
+  - The internal maps (`adaptersByType`, `assetTypeIndex`) are private and never exposed.
+- BOOTSTRAP UPDATE:
+  - bootstrap/adapters.ts now uses `registerBatch([{ adapter, supportedAssetTypes, supportedCapabilities }])` instead of `registerForAssetTypes`. The DER adapter is registered with capabilities ['energy_discharge', 'frequency_response', 'energy_capacity'].
+- ARCHITECTURE TESTS (6 new regex tests):
+  - AdapterRegistry has register (descriptor-based) + registerBatch (atomic)
+  - AdapterRegistry has deterministic resolve(selection) with adapterType
+  - AdapterRegistry has capability-aware queries
+  - AdapterRegistry has immutable state inspection
+  - AdapterDescriptor type includes adapter + supportedAssetTypes + supportedCapabilities
+  - registration is atomic — validate phase precedes commit phase
+- BEHAVIORAL TESTS (15 new in-memory tests):
+  - P7.1 atomic: registerBatch conflict leaves registry unchanged, empty supportedAssetTypes throws
+  - P7.2 identity: duplicate adapterType rejected, hasAdapter works
+  - P7.3 deterministic: resolve by assetType alone (single), resolve by assetType+adapterType, ambiguous throws, unknown adapterType throws, unknown assetType throws, capability check
+  - P7.4 capability: findAdaptersForCapability returns matching, empty for unknown
+  - P7.5 inspection: listAdapters returns metadata not instances, registeredAdapterTypes, adaptersForAssetType
+- VERIFICATION: bun run lint clean. tsc: 102 errors (all pre-existing, zero new). 97 non-DB tests pass (59 regex architecture + 38 runtime resolution/adapter, 21 new Phase 7 tests, 0 fail, 128ms). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The AdapterRegistry is now hardened:
+  - Registration is atomic (validate-then-commit, no partial mutation).
+  - Adapters have explicit identity (unique adapterType).
+  - Selection is deterministic (assetType + adapterType; ambiguous → throws).
+  - The registry is capability-aware (findAdaptersForCapability, capability check on resolve).
+  - State inspection is immutable (listAdapters returns metadata, not instances).
+- An asset type can now have multiple adapters (battery → simulated_der, tesla_powerwall). Resolution is deterministic when adapterType is specified.
+- Phase 7 is complete. Phase 8 (Compute reference network) is ready — it will register a compute adapter in bootstrap/adapters.ts and prove the architecture is genuinely reusable for a non-energy domain.
