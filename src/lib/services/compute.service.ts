@@ -49,6 +49,7 @@ import {
   releaseCommitment,
 } from './capacity.service'
 import { signMessage, deriveSigningKey } from '@/lib/domain/crypto'
+import { randomUUID } from 'crypto'
 import { resolveRuntime, type RuntimeKind } from '@/lib/kernel/runtime'
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,14 @@ export interface CreateComputeJobInput {
   assignedUnit: string // e.g., 'GPU-hours'
   durationSeconds: number
   parameters?: Record<string, unknown> // e.g., { gpuCount: 4 }
+  /**
+   * Phase 8C: Optional explicit adapter selection. If specified, the runtime
+   * resolves the exact adapter via adapterRegistry.resolve({ adapterType }).
+   * If omitted, resolves the single adapter for the asset type.
+   * Used by failure tests to pass a nonexistent adapterType — triggers
+   * adapter resolution failure AFTER capacity + execution are created.
+   */
+  adapterType?: string
 }
 
 export interface ComputeJobResult {
@@ -150,10 +159,9 @@ export async function createAndExecuteComputeJob(
 
   // Phase 8C: Stable source ID for the entire job lifecycle.
   // Used consistently for reservation, commitment, usage, audit, and
-  // failure cleanup (releaseCommitment). Previous code used Date.now()
-  // in multiple places, producing different IDs — releaseCommitment
-  // could never find the commitment.
-  const computeJobId = `compute-job-${Date.now()}`
+  // failure cleanup (releaseCommitment). Uses crypto.randomUUID() for
+  // collision resistance under concurrency.
+  const computeJobId = `compute-job-${randomUUID()}`
 
   const reservation = await createCapacityReservation({
     tenantId,
@@ -213,10 +221,13 @@ export async function createAndExecuteComputeJob(
   // --- 2. Execute the compute job via runtime.executeAssignment ---
   // This resolves the ComputeAdapter via the AdapterRegistry and calls
   // adapter.execute(). The runtime owns physical execution.
+  // Phase 8C: Passes adapterType if specified (for explicit adapter selection
+  // or failure testing with a nonexistent adapterType).
   const executeResult = await runtime.executeAssignment({
     assetId: input.assetId,
     assetType: asset.assetType,
     capabilityType: input.capabilityType,
+    adapterType: input.adapterType,
     assignedQuantity: input.assignedQuantity,
     assignedUnit: input.assignedUnit,
     durationSeconds: input.durationSeconds,
