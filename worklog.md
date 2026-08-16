@@ -1767,3 +1767,36 @@ Stage Summary:
 - The database provider mismatch (postgresql schema vs sqlite environment) that blocked ALL DB-backed testing is fixed. The schema is now sqlite with provider-aware raw SQL that works in both environments (postgres production + sqlite local/test).
 - All 6 required scenarios are proven by database-backed integration tests that call the real createDispatch service + the real finalizeExecutionIfTerminal kernel primitive against the real database.
 - NEXT: Phase 5 (runtime-selectable NetworkVersion with runtimeKind = infrastructure | protocol | hybrid).
+
+---
+Task ID: VPP-4.2-Reconcile
+Agent: orchestrator
+Task: Reconcile repository state — the claimed Phase 4.2 hardening was NOT on GitHub's main. Audit showed 6a5e0eb (published Phase 4.2) had the OLD non-transaction-aware finalizeExecutionIfTerminal(tenantId, executionId) using global db, called outside the assignment transaction. The hardened work (tx-aware primitive, sqlite provider, 12 DB-backed tests) existed only in unpushed local commits.
+
+Work Log:
+- AUDIT: Verified the user's finding against the actual git state.
+  - `git show 6a5e0eb:src/lib/kernel/execution/execution.service.ts` confirmed the OLD signature `(tenantId, executionId)` using global `db`.
+  - `git show 6a5e0eb:src/lib/services/vpp.service.ts` confirmed `finalizeExecutionIfTerminal(tenantId, dispatch.executionId)` called OUTSIDE the assignment transaction (line 1068, in maybeFinalizeDispatch). This IS the race: commit-assignment → crash → Execution stuck in 'executing'.
+  - `6a5e0eb` does NOT contain provider.ts, the sqlite schema, or the 12 DB-backed tests.
+  - `git ls-remote origin main` showed GitHub's main was at 6a5e0eb (the Phase 4 chain WAS on main, contrary to the user's "c0b06f2" audit — likely a stale GitHub web cache — but the substance was correct: the hardened work was not on main).
+- RECONCILIATION: The hardened work existed in unpushed local commits a3e167a (worklog) + 83080c5 (the real hardening). These had garbage UUID commit messages and included accidentally-committed junk (db/custom.db binary, 4 tool-results/*.txt debug files).
+  - `git reset --soft 6a5e0eb` to uncommit both, keeping all working-tree changes.
+  - `git restore --staged .` to unstage everything.
+  - Updated .gitignore to ignore `/tool-results/` and `*.db` / `/db/*.db` (prevents future binary/debug commits).
+  - Selectively staged only the 13 real source/test/schema/worklog files (NOT db/custom.db, NOT tool-results).
+  - Committed as `d507e50` with a descriptive message documenting: the tx-aware primitive, the atomic wiring (3 paths), the explicit parent Execution semantics, the sqlite/provider foundation fix, and the 12 DB-backed tests.
+  - `git push origin main` — fast-forward push (6a5e0eb → d507e50), no force needed.
+- RE-AUDIT against the PUSHED commit d507e50 (not working tree):
+  - `git show d507e50:...execution.service.ts` → `finalizeExecutionIfTerminal(tx: ExecutionClient, tenantId, executionId)` ✅
+  - `git show d507e50:...vpp.service.ts` → 3 calls to `finalizeExecutionIfTerminal(tx, ...)` at lines 596, 620, 959 ✅
+  - `git show d507e50:src/lib/kernel/db/provider.ts` → exists ✅
+  - `git show d507e50:prisma/schema.prisma` → `provider = "sqlite"` ✅
+  - `git show d507e50:tests/vpp-4-2-execution-invariants.test.ts` → 12 tests ✅
+  - `git ls-remote origin main` → `d507e500b84b2f840efa75e462374f91dd17a322` ✅ (local + remote in sync, zero divergence)
+- VERIFICATION: `bun run lint` clean. 28 tests pass (16 regex + 12 DB-backed, 0 fail, 705ms).
+- REMAINING HYGIENE: `db/custom.db` is still tracked (from initial commit, pre-existing). .gitignore now ignores `*.db` for future, but already-tracked files aren't auto-untracked. A separate `git rm --cached db/custom.db` cleanup is warranted but deferred — it's a pre-existing issue, not part of Phase 4.2.
+
+Stage Summary:
+- Repository state is reconciled: GitHub's main is now at d507e50, which contains the ACTUAL hardened Phase 4.2 work — transaction-aware finalizeExecutionIfTerminal(tx, ...), atomic wiring in all 3 VPP terminal paths, explicit parent Execution semantics, sqlite provider foundation, and 12 database-backed integration tests. All auditable against the pushed commit.
+- The user's core finding was correct: the previously-claimed "Phase 4.2 complete" status was not reflected on main. The published 6a5e0eb had the non-transaction-aware primitive (the race we identified). This is now fixed.
+- NEXT: Phase 5 (runtimeKind on NetworkVersion) — NOT started, per the user's instruction to reconcile repo state first.
