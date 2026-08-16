@@ -1616,3 +1616,40 @@ Stage Summary:
 - Phase 0 (kernel boundary) is complete: architecture contract tests enforce that generic services never import VPP. The dependency direction is structurally verified: kernel ← VPP, never VPP → kernel.
 - Phase 1 (universal concurrency) is complete: the lease/fencing primitive is extracted as a kernel service. It provides claimResource(), fencedCommit(), fencedRevert(), and fencedTransition() — the same pattern used in VPP-2D-4/3B, now available as a platform primitive for all worker-owned state transitions.
 - NEXT: Phase 2 (generic execution model), Phase 3 (generic adapter contract), Phase 4 (runtime-selectable NetworkVersion).
+
+---
+Task ID: Protocol-Runtime-Phase-2-3
+Agent: orchestrator
+Task: Extract generic Execution model (Phase 2) + generic InfrastructureAdapter interface (Phase 3).
+
+Work Log:
+1. GENERIC EXECUTION MODEL (Phase 2): Added Execution + ExecutionAssignment models to Prisma schema. These are vertical-agnostic:
+   - Execution: requestedQuantity/Unit, time window, lifecycle status, sourceType/sourceId (links to VppDispatch/etc.), metadataJson, contributionId
+   - ExecutionAssignment: assetId, operatorId, capabilityType, assignedQuantity/Unit, status, economicStage, actualQuantity/Unit, verifiedQuantity/Unit, eventId, contributionId, capacityCommitmentId
+   VPP maps: VppDispatch → wraps Execution (adds programId, energy fields), VppDispatchAssignment → wraps ExecutionAssignment (adds baseline, performance).
+   Future verticals: StorageJob → wraps Execution, ComputeJob → wraps Execution.
+
+2. GENERIC EXECUTION SERVICE: Created src/lib/kernel/execution/execution.service.ts with:
+   - createExecution(), createExecutionAssignment(), updateAssignmentResults(), updateExecutionStatus(), getExecution(), getExecutionResult(), findExecutionBySource()
+   Pure lifecycle management — doesn't know about energy, baselines, or portfolios.
+
+3. GENERIC ADAPTER CONTRACT (Phase 3): Created src/lib/kernel/adapters/infrastructure-adapter.ts with the InfrastructureAdapter interface:
+   - discover(), getCapabilities(), readTelemetry(), execute(), health()
+   - Types: AssetCapabilities, TelemetryReading, ExecuteCommand, ExecuteResult, HealthStatus
+   VPP's DERAdapter becomes a specialization (EnergyInfrastructureAdapter).
+   Future: StorageInfrastructureAdapter, ComputeInfrastructureAdapter, WirelessInfrastructureAdapter.
+
+4. ARCHITECTURE CONTRACT TESTS: Extended tests/architecture-contract.test.ts with 4 new tests:
+   - Kernel execution module does not import VPP
+   - Kernel adapter interface does not import VPP
+   - Generic kernel directory has concurrency, execution, and adapters subdirectories
+   - Generic Execution model exists in schema (with generic quantity/unit fields, not energy-specific)
+
+5. VERIFICATION: `bun run lint` clean. `tsc --no-Emit` zero new errors (only pre-existing bun:test). Dev server: / route HTTP 200. Agent-browser confirms / renders with no console/page errors.
+
+Stage Summary:
+- Phase 2 (generic execution model) is complete: Execution/ExecutionAssignment models + service extracted as kernel primitives. The VPP dispatch lifecycle can now be refactored to wrap these models.
+- Phase 3 (generic adapter contract) is complete: InfrastructureAdapter interface defined. DERAdapter can be refactored to implement this interface.
+- The kernel now has three subdirectories: concurrency/ (lease/fencing), execution/ (lifecycle), adapters/ (infrastructure interface).
+- Architecture contract tests enforce that none of these kernel modules import VPP.
+- NEXT: Refactor VppDispatch to wrap Execution, refactor DERAdapter to implement InfrastructureAdapter, then Phase 4 (runtime-selectable NetworkVersion).
