@@ -41,10 +41,13 @@ import {
 import { SimulatedDERAdapter, type DERAdapter } from './der-adapter.service'
 
 // VPP-4: Generic execution model — VPP wraps the kernel's Execution/ExecutionAssignment.
+// VPP-5: VPP enters through the NetworkRuntime (resolved via RuntimeRegistry).
+//        The vertical NEVER touches Execution records directly — it goes
+//        through the runtime, which owns the generic execution lifecycle.
 import {
-  updateAssignmentResults as updateGenericAssignmentResults,
-  finalizeExecutionIfTerminal,
-} from '@/lib/kernel/execution/execution.service'
+  resolveRuntime,
+  type RuntimeKind,
+} from '@/lib/kernel/runtime'
 
 const derAdapter: DERAdapter = new SimulatedDERAdapter()
 
@@ -341,9 +344,19 @@ export interface CreateDispatchInput {
 export async function createDispatch(tenantId: string, input: CreateDispatchInput, actorId?: string) {
   const program = await db.vppBuyerProgram.findFirst({
     where: { id: input.programId, tenantId },
-    include: { reservations: { where: { status: 'active' }, include: { asset: true } }, network: true },
+    include: { reservations: { where: { status: 'active' }, include: { asset: true } }, network: true, networkVersion: true },
   })
   if (!program) throw new NotFoundError('vpp_buyer_program', input.programId)
+
+  // Phase 5: Resolve the runtime for this program's NetworkVersion.
+  // Every active NetworkVersion resolves to exactly one runtime. VPP dispatch
+  // creation enters through the runtime — it never creates Execution records
+  // directly.
+  const networkVersion = program.networkVersion
+  if (!networkVersion) {
+    throw new NotFoundError('network_version', `program ${input.programId} has no bound network version`)
+  }
+  const runtime = resolveRuntime(networkVersion.runtimeKind as RuntimeKind)
 
   const startTime = new Date(input.startTime)
   const endTime = new Date(input.endTime)
@@ -387,25 +400,23 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
       )
     }
 
-    // VPP-4.1: Create the generic Execution FIRST, then VppDispatch with explicit FK.
-    // The Execution is the vertical-agnostic lifecycle record; VppDispatch
-    // adds energy-specific fields (programId, kW/kWh) and references it via executionId.
-    const execution = await tx.execution.create({
-      data: {
-        tenantId,
-        networkId: program.networkId,
-        requestedQuantity: input.requestedKwh,
-        requestedUnit: 'kWh',
-        startTime,
-        endTime,
-        status: 'assigned',
-        sourceType: 'vpp_dispatch',
-        sourceId: null, // will be set after VppDispatch is created
-        metadataJson: JSON.stringify({
-          requestedKw: input.requestedKw,
-          programId: input.programId,
-          reason: input.reason ?? null,
-        }),
+    // VPP-5: Create the generic Execution via the resolved NetworkRuntime.
+    // The runtime owns the execution lifecycle; VPP never touches Execution
+    // records directly. This enters through InfrastructureRuntime for
+    // runtimeKind='infrastructure'.
+    const execution = await runtime.createExecution(tx, {
+      tenantId,
+      networkId: program.networkId,
+      requestedQuantity: input.requestedKwh,
+      requestedUnit: 'kWh',
+      startTime,
+      endTime,
+      sourceType: 'vpp_dispatch',
+      sourceId: null, // will be set after VppDispatch is created
+      metadataJson: {
+        requestedKw: input.requestedKw,
+        programId: input.programId,
+        reason: input.reason ?? null,
       },
     })
 
@@ -424,11 +435,8 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
       },
     })
 
-    // Link the Execution back to the dispatch via sourceId.
-    await tx.execution.update({
-      where: { id: execution.id },
-      data: { sourceId: created.id },
-    })
+    // Link the Execution back to the dispatch via sourceId (via the runtime).
+    await runtime.linkExecutionSource(tx, execution.id, created.id)
 
     // Assign assets proportionally + create capacity commitments (atomic).
     // Fix 1: each assignment creates its OWN CapacityCommitment (1:1).
@@ -459,18 +467,16 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
         commitmentId = commitment.commitmentId
       }
 
-      // VPP-4.1: Create generic ExecutionAssignment FIRST, then VppDispatchAssignment with explicit FK.
-      const genericAssignment = await tx.executionAssignment.create({
-        data: {
-          tenantId,
-          executionId: execution.id,
-          assetId: reservation.assetId,
-          operatorId: reservation.operatorId,
-          capabilityType: reservation.capabilityType,
-          assignedQuantity: assignedKwh.toFixed(8),
-          assignedUnit: 'kWh',
-          capacityCommitmentId: commitmentId,
-        },
+      // VPP-5: Create generic ExecutionAssignment via the resolved NetworkRuntime.
+      const genericAssignment = await runtime.createExecutionAssignment(tx, {
+        tenantId,
+        executionId: execution.id,
+        assetId: reservation.assetId,
+        operatorId: reservation.operatorId,
+        capabilityType: reservation.capabilityType,
+        assignedQuantity: assignedKwh.toFixed(8),
+        assignedUnit: 'kWh',
+        capacityCommitmentId: commitmentId ?? undefined,
       })
 
       // Create VPP assignment with explicit executionAssignmentId FK.
@@ -533,6 +539,15 @@ export async function executeDispatchAssignment(
   })
   if (!assignment) throw new NotFoundError('vpp_dispatch_assignment', assignmentId)
 
+  // Phase 5: Resolve the runtime for this assignment's NetworkVersion.
+  // Execution enters through the runtime — the vertical never touches
+  // Execution/ExecutionAssignment records directly.
+  const networkVersion = assignment.dispatch.program.networkVersion
+  if (!networkVersion) {
+    throw new NotFoundError('network_version', `program has no bound network version`)
+  }
+  const runtime = resolveRuntime(networkVersion.runtimeKind as RuntimeKind)
+
   // Task 7: idempotency — if already completed, return existing result.
   if (assignment.status === 'completed') {
     // Fetch the reward + settlement linked to this assignment's contribution.
@@ -579,16 +594,10 @@ export async function executeDispatchAssignment(
   const failAssignment = async () => {
     await db.$transaction(async (tx) => {
       await tx.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'failed' } })
-      // VPP-4.2: Synchronize generic ExecutionAssignment → failed (atomic).
-      await tx.executionAssignment.update({
-        where: { id: assignment.executionAssignmentId },
-        data: { status: 'failed' },
-      })
-      // VPP-4.2: Atomically finalize the parent Execution if this was the
-      // last non-terminal assignment. Same tx as the failure transition —
-      // guarantees the parent doesn't get stuck in 'executing' if the
-      // assignment failed.
-      await finalizeExecutionIfTerminal(tx, tenantId, assignment.dispatch.executionId)
+      // VPP-5: Fail the generic assignment via the runtime (atomic with
+      // parent finalization). The vertical never touches ExecutionAssignment
+      // directly.
+      await runtime.failAssignment(tx, tenantId, assignment.executionAssignmentId, assignment.dispatch.executionId)
     })
     await releaseAssignmentCapacity()
   }
@@ -601,18 +610,11 @@ export async function executeDispatchAssignment(
         where: { id: assignmentId },
         data: { status: 'reconciliation_required' },
       })
-      // VPP-4.2: Synchronize generic ExecutionAssignment → failed (atomic).
-      // The generic execution layer treats reconciliation_required as 'failed'
-      // for execution purposes — the work did not complete successfully.
-      // The VPP layer retains the richer 'reconciliation_required' state
-      // for financial recovery.
-      await tx.executionAssignment.update({
-        where: { id: assignment.executionAssignmentId },
-        data: { status: 'failed' },
-      })
-      // VPP-4.2: Atomically finalize the parent Execution. Same tx as the
-      // failure transition — symmetric with the success path.
-      await finalizeExecutionIfTerminal(tx, tenantId, assignment.dispatch.executionId)
+      // VPP-5: Fail the generic assignment via the runtime. The generic layer
+      // treats reconciliation_required as 'failed' for execution purposes —
+      // the work did not complete successfully. The VPP layer retains the
+      // richer 'reconciliation_required' state for financial recovery.
+      await runtime.failAssignment(tx, tenantId, assignment.executionAssignmentId, assignment.dispatch.executionId)
     })
     await appendAudit({
       tenantId, actorId,
@@ -854,10 +856,11 @@ export async function executeDispatchAssignment(
       `vpp-baseline-${baseline.id}`,
     )
 
-    // VPP-4.1: Update VPP + generic ExecutionAssignment atomically in one transaction.
-    // Use the explicit executionAssignmentId FK — no findFirst ambiguity.
+    // VPP-5: Update VPP assignment + record generic results via the runtime.
+    // The vertical owns the VPP-specific fields (baseline, performance);
+    // the runtime owns the generic ExecutionAssignment lifecycle.
     await db.$transaction(async (tx) => {
-      // VPP assignment update.
+      // VPP assignment update (vertical-specific fields).
       await tx.vppDispatchAssignment.update({
         where: { id: assignmentId },
         data: {
@@ -870,25 +873,18 @@ export async function executeDispatchAssignment(
         },
       })
 
-      // Generic ExecutionAssignment update (same transaction).
-      await tx.executionAssignment.update({
-        where: { id: assignment.executionAssignmentId },
-        data: {
-          actualQuantity: actualKwh.toString(),
-          actualUnit: 'kWh',
-          verifiedQuantity: verifiedPerformanceKwh.toString(),
-          verifiedUnit: 'kWh',
-          eventId: event.id,
-          contributionId: contribution.id,
-          economicStage: 'delivery_verified',
-        },
+      // Generic ExecutionAssignment results via the runtime.
+      await runtime.recordAssignmentResults(tx, assignment.executionAssignmentId, {
+        actualQuantity: actualKwh.toString(),
+        actualUnit: 'kWh',
+        verifiedQuantity: verifiedPerformanceKwh.toString(),
+        verifiedUnit: 'kWh',
+        eventId: event.id,
+        contributionId: contribution.id,
       })
 
-      // Update parent Execution status to 'executing' (if not already).
-      await tx.execution.updateMany({
-        where: { id: assignment.dispatch.executionId, status: 'assigned' },
-        data: { status: 'executing' },
-      })
+      // Transition parent Execution → 'executing' via the runtime.
+      await runtime.beginAssignmentExecution(tx, assignment.dispatch.executionId, assignment.executionAssignmentId)
     })
 
     // --- RECORD USAGE BEFORE ANY IRREVERSIBLE FINANCIAL SETTLEMENT ---
@@ -931,27 +927,17 @@ export async function executeDispatchAssignment(
     }
 
     // --- COMPLETED (only reached if settlement succeeded) ---
-    // VPP-4.2: Update VPP + generic assignment atomically, AND finalize the
-    // parent Execution in the SAME transaction. This guarantees:
-    //   - If the assignment transition commits → the parent finalization commits.
-    //   - If it rolls back → both roll back (no partial state).
-    // The parent Execution finalization is idempotent, so if this is NOT the
-    // last terminal assignment, finalizeExecutionIfTerminal is a no-op.
+    // VPP-5: Complete the VPP assignment + complete the generic assignment via
+    // the runtime (atomic with parent finalization). The runtime owns the
+    // generic Execution lifecycle; the vertical owns the VPP-specific state.
     await db.$transaction(async (tx) => {
       await tx.vppDispatchAssignment.update({
         where: { id: assignmentId },
         data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
       })
 
-      await tx.executionAssignment.update({
-        where: { id: assignment.executionAssignmentId },
-        data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
-      })
-
-      // Atomically finalize the parent Execution if all assignments are now
-      // terminal. Uses the SAME tx — the finalization commits or rolls back
-      // with the assignment transition above.
-      await finalizeExecutionIfTerminal(tx, tenantId, assignment.dispatch.executionId)
+      // Complete the generic assignment + finalize parent atomically via runtime.
+      await runtime.completeAssignment(tx, tenantId, assignment.executionAssignmentId, assignment.dispatch.executionId)
     })
 
     // VPP-2D-4: canonical finalization. Checks if ALL assignments are
@@ -1074,23 +1060,19 @@ async function maybeFinalizeDispatch(
     return
   }
 
-  // VPP-4.2: Finalize the generic Execution now that all assignments are terminal.
-  // The generic Execution lifecycle (created → assigned → executing → completed)
-  // is separate from VPP's richer commercial lifecycle. The Execution is
-  // 'completed' when the work finished, regardless of buyer settlement state.
-  //
-  // NOTE: The primary atomic finalization already happened inside each
-  // assignment's terminal transition transaction (success / failAssignment /
-  // markReconciliationRequired). This call is a DEFENSIVE idempotent fallback
-  // for edge cases (e.g., legacy dispatches, or if the in-transition call was
-  // somehow skipped). It uses `db` (no transaction) — safe because
-  // finalizeExecutionIfTerminal is idempotent.
+  // VPP-5: Finalize the generic Execution via the runtime (defensive fallback).
+  // The primary atomic finalization already happened inside each assignment's
+  // terminal transition transaction (runtime.completeAssignment /
+  // runtime.failAssignment). This call is a DEFENSIVE idempotent fallback
+  // for edge cases (e.g., legacy dispatches). It uses `db` (no transaction)
+  // — safe because finalizeIfTerminal is idempotent.
   const dispatch = await db.vppDispatch.findUnique({
     where: { id: dispatchId },
-    select: { executionId: true },
+    select: { executionId: true, program: { select: { networkVersion: { select: { runtimeKind: true } } } } },
   })
   if (dispatch) {
-    await finalizeExecutionIfTerminal(db, tenantId, dispatch.executionId)
+    const runtime = resolveRuntime(dispatch.program.networkVersion.runtimeKind as RuntimeKind)
+    await runtime.finalizeIfTerminal(db, tenantId, dispatch.executionId)
   }
 
   // All assignments are performance-terminal.

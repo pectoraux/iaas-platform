@@ -1,0 +1,124 @@
+# =============================================================================
+# CI Pipeline — Phase 5 CI Gate
+# =============================================================================
+# Runs on every push to main and every PR. The pipeline has four stages:
+#
+#   1. lint           — ESLint code quality
+#   2. typecheck      — TypeScript strict compilation
+#   3. architecture   — Regex architecture contract tests (no DB needed)
+#   4. integration    — PostgreSQL-backed integration tests (requires PG)
+#
+# CRITICAL: The integration stage FAILS if DATABASE_URL is missing or if the
+# PostgreSQL service is unhealthy. The integration tests are NOT skippable —
+# they are the CI gate that proves the Phase 4.2 execution invariants and the
+# Phase 5 runtime resolution actually work against a real database.
+#
+# The PostgreSQL service container provides a postgres:16-alpine instance.
+# Prisma migrations are applied via `prisma db push` before running tests.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/iaas_test?schema=public
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bunx prisma generate
+      - run: bunx tsc --noEmit
+
+  architecture-tests:
+    name: Architecture Contract Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bunx prisma generate
+      - name: Architecture + runtime resolution tests (no DB)
+        run: bun test tests/architecture-contract.test.ts tests/runtime-resolution.test.ts --timeout 30000
+
+  postgres-integration-tests:
+    name: PostgreSQL Integration Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: iaas_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d iaas_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+
+      - name: Verify DATABASE_URL is set (fail if missing)
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "ERROR: DATABASE_URL is not set. Integration tests require PostgreSQL."
+            exit 1
+          fi
+          echo "DATABASE_URL is set."
+
+      - name: Wait for PostgreSQL to be healthy
+        run: |
+          echo "Waiting for PostgreSQL..."
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U postgres -d iaas_test; then
+              echo "PostgreSQL is ready."
+              break
+            fi
+            echo "Attempt $i: PostgreSQL not ready yet..."
+            sleep 2
+          done
+
+      - name: Generate Prisma client
+        run: bunx prisma generate
+
+      - name: Push schema to PostgreSQL
+        run: bunx prisma db push --accept-data-loss
+
+      - name: Run all integration tests
+        run: bun test tests/vpp-4-2-execution-invariants.test.ts --timeout 120000
+
+      - name: Run runtime resolution tests
+        run: bun test tests/runtime-resolution.test.ts --timeout 30000

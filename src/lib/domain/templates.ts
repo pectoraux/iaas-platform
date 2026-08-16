@@ -40,6 +40,9 @@ export interface NetworkTemplate {
   capabilities: CapabilityTemplate[]
   verification: VerificationPolicyTemplate
   reward: RewardPolicyTemplate
+  // Phase 5: which runtime executes work for this network.
+  // Defaults to 'infrastructure' if not specified.
+  runtimeKind?: 'infrastructure' | 'protocol' | 'hybrid'
 }
 
 export const NETWORK_TEMPLATES: NetworkTemplate[] = [

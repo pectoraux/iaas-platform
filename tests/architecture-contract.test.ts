@@ -196,22 +196,27 @@ describe('Architecture contract: VPP-Execution invariant', () => {
     expect(content).not.toMatch(/findFirst.*executionId.*assetId/)
   })
 
-  it('VPP service finalizes generic Execution via kernel function', () => {
+  it('VPP service finalizes generic Execution via the runtime (not direct kernel call)', () => {
     const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
     const content = readFileSync(vppServicePath, 'utf-8')
 
-    // The VPP service should call finalizeExecutionIfTerminal.
-    expect(content).toMatch(/finalizeExecutionIfTerminal/)
+    // Phase 5: VPP goes through the runtime, not direct finalizeExecutionIfTerminal.
+    // The runtime's completeAssignment/failAssignment calls finalizeIfTerminal internally.
+    expect(content).toMatch(/runtime\.completeAssignment/)
+    expect(content).toMatch(/runtime\.failAssignment/)
+    expect(content).toMatch(/runtime\.finalizeIfTerminal/)
   })
 
-  it('VPP service synchronizes failure states to generic ExecutionAssignment', () => {
+  it('VPP service synchronizes failure states via runtime.failAssignment', () => {
     const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
     const content = readFileSync(vppServicePath, 'utf-8')
 
-    // The failAssignment function should update ExecutionAssignment → failed.
-    // Use [\s\S]* (matches across newlines) because the .update() call and
-    // the status: 'failed' field are on separate lines.
-    expect(content).toMatch(/executionAssignment[\s\S]*update[\s\S]*status:\s*'failed'/)
+    // Phase 5: both failAssignment and markReconciliationRequired call
+    // runtime.failAssignment(tx, ...) — the runtime handles the generic
+    // ExecutionAssignment → failed transition + parent finalization.
+    const failCalls = content.match(/runtime\.failAssignment\(tx,/g)
+    expect(failCalls).not.toBeNull()
+    expect(failCalls!.length).toBeGreaterThanOrEqual(2) // failAssignment + markReconciliationRequired
   })
 
   it('kernel execution service has finalizeExecutionIfTerminal', () => {
@@ -228,11 +233,13 @@ describe('Architecture contract: VPP-Execution invariant', () => {
     // The function signature must accept a transaction client as the first
     // argument, enabling atomic finalization with the assignment transition.
     expect(content).toMatch(/finalizeExecutionIfTerminal\(\s*tx/)
-    // The VPP service must pass `tx` (not just tenantId) when calling it
-    // inside a transaction.
-    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
-    const vppContent = readFileSync(vppServicePath, 'utf-8')
-    expect(vppContent).toMatch(/finalizeExecutionIfTerminal\(tx,/)
+
+    // Phase 5: The InfrastructureRuntime (not VPP directly) calls
+    // finalizeExecutionIfTerminal(tx, ...) inside completeAssignment and
+    // failAssignment. VPP calls the runtime, the runtime calls the kernel.
+    const infraRuntimePath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
+    const infraContent = readFileSync(infraRuntimePath, 'utf-8')
+    expect(infraContent).toMatch(/finalizeExecutionIfTerminal\(tx,/)
   })
 
   it('parent Execution does not carry VPP financial states', () => {
@@ -247,5 +254,95 @@ describe('Architecture contract: VPP-Execution invariant', () => {
     expect(content).toMatch(/data:\s*\{\s*status:\s*'completed'\s*\}/)
     // The semantics doc must state 'completed' = lifecycle ended.
     expect(content).toMatch(/ONE terminal parent state/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Test 5: Phase 5 — Runtime boundary and resolution (Phase 5)
+// ---------------------------------------------------------------------------
+
+describe('Architecture contract: runtime boundary (Phase 5)', () => {
+  it('kernel runtime module does not import VPP', () => {
+    const runtimeDir = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime')
+    let entries: string[]
+    try {
+      entries = readdirSync(runtimeDir)
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith('.ts')) continue
+      const filePath = join(runtimeDir, entry)
+      const content = readFileSync(filePath, 'utf-8')
+      for (const pattern of VPP_IMPORT_PATTERNS) {
+        expect(content.match(pattern)).toBeNull()
+      }
+    }
+  })
+
+  it('kernel runtime directory has registry, types, and three runtime implementations', () => {
+    const runtimeDir = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime')
+    let entries: string[]
+    try {
+      entries = readdirSync(runtimeDir)
+    } catch {
+      return
+    }
+    expect(entries).toContain('types.ts')
+    expect(entries).toContain('registry.ts')
+    expect(entries).toContain('infrastructure-runtime.ts')
+    expect(entries).toContain('protocol-runtime.ts')
+    expect(entries).toContain('hybrid-runtime.ts')
+    expect(entries).toContain('index.ts')
+  })
+
+  it('VPP service resolves runtime via RuntimeRegistry (not direct execution.service)', () => {
+    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
+    const content = readFileSync(vppServicePath, 'utf-8')
+
+    // VPP must import resolveRuntime from the kernel runtime module.
+    expect(content).toMatch(/from\s+['"]@\/lib\/kernel\/runtime['"]/)
+    expect(content).toMatch(/resolveRuntime/)
+
+    // VPP must NOT import finalizeExecutionIfTerminal directly (goes through runtime).
+    expect(content).not.toMatch(/from\s+['"]@\/lib\/kernel\/execution\/execution\.service['"]/)
+
+    // VPP must NOT directly write to Execution/ExecutionAssignment (goes through runtime).
+    expect(content).not.toMatch(/tx\.execution\.create\(/)
+    expect(content).not.toMatch(/tx\.execution\.update\(/)
+    expect(content).not.toMatch(/tx\.executionAssignment\.create\(/)
+    expect(content).not.toMatch(/tx\.executionAssignment\.update\(/)
+  })
+
+  it('NetworkVersion has runtimeKind field in schema', () => {
+    const schemaPath = join(process.cwd(), 'prisma', 'schema.prisma')
+    const content = readFileSync(schemaPath, 'utf-8')
+
+    expect(content).toMatch(/runtimeKind\s+String\s+@default\("infrastructure"\)/)
+  })
+
+  it('runtimeKind allowed values are infrastructure | protocol | hybrid', () => {
+    const typesPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'types.ts')
+    const content = readFileSync(typesPath, 'utf-8')
+
+    expect(content).toMatch(/\[.infrastructure.,\s*.protocol.,\s*.hybrid.\]/)
+  })
+
+  it('RuntimeRegistry throws on unregistered kind (no silent fallback)', () => {
+    const registryPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'registry.ts')
+    const content = readFileSync(registryPath, 'utf-8')
+
+    // The resolve method must throw if no runtime is registered.
+    expect(content).toMatch(/throw new Error\([^)]*No runtime registered/)
+  })
+
+  it('ProtocolRuntime and HybridRuntime are stubs that throw NotImplemented', () => {
+    const protocolPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol-runtime.ts')
+    const protocolContent = readFileSync(protocolPath, 'utf-8')
+    expect(protocolContent).toMatch(/ProtocolRuntimeNotImplementedError/)
+
+    const hybridPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'hybrid-runtime.ts')
+    const hybridContent = readFileSync(hybridPath, 'utf-8')
+    expect(hybridContent).toMatch(/HybridRuntimeNotImplementedError/)
   })
 })

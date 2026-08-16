@@ -142,6 +142,12 @@ model NetworkVersion {
   // Contains: selectedStrategy, evaluationId, evaluatedAt, criteria, metrics, status.
   // NULL if no baseline evaluation has been run for this version.
   baselinePolicyJson String?
+  // Phase 5: Runtime selection contract.
+  // Determines which NetworkRuntime implementation executes work for this
+  // version. Immutable after publication (a new runtime choice requires a
+  // new NetworkVersion). The RuntimeRegistry resolves this to a concrete
+  // InfrastructureRuntime | ProtocolRuntime | HybridRuntime.
+  runtimeKind       String    @default("infrastructure") // infrastructure | protocol | hybrid
   publishedAt       DateTime?
   createdAt         DateTime  @default(now())
 

@@ -1833,3 +1833,58 @@ Stage Summary:
 - Phase 4.2 hardening is fully intact: the transaction-aware `finalizeExecutionIfTerminal(tx, ...)`, the atomic wiring in all 3 VPP terminal paths, the explicit parent Execution semantics, the 12 DB-backed integration tests, and the 16 regex architecture tests.
 - The repository is now architecturally consistent: schema says PostgreSQL, service code uses PostgreSQL raw SQL unconditionally, tests target PostgreSQL. No ambiguity.
 - NEXT: Phase 5 (runtimeKind on NetworkVersion) — NOT started.
+
+---
+Task ID: Phase-5-Runtime-Selection
+Agent: orchestrator
+Task: Phase 5 — runtimeKind on NetworkVersion + RuntimeRegistry + InfrastructureRuntime. Make VPP dispatch execution enter through the runtime, not directly through execution.service. Add protocol/hybrid stubs. Add CI with PostgreSQL gate.
+
+Work Log:
+- SCHEMA: Added `runtimeKind String @default("infrastructure")` to NetworkVersion. Immutable after publication (a new runtime choice requires a new NetworkVersion — enforced structurally by the existing publishedAt immutability gate). Added defense-in-depth validation in both createNetworkVersion and assertPublicationReadiness.
+- KERNEL RUNTIME MODULE (src/lib/kernel/runtime/):
+  - types.ts: RuntimeKind type (infrastructure | protocol | hybrid), NetworkRuntime interface with 8 transaction-aware methods (createExecution, linkExecutionSource, createExecutionAssignment, beginAssignmentExecution, recordAssignmentResults, completeAssignment, failAssignment, finalizeIfTerminal). validateRuntimeKind() + isRuntimeKind() helpers.
+  - registry.ts: RuntimeRegistry class — register() + resolve(). resolve() THROWS on unregistered kind (no silent fallback — a version with an unregistered runtimeKind cannot execute). Singleton runtimeRegistry.
+  - infrastructure-runtime.ts: InfrastructureRuntime — fully implemented, wraps execution.service.ts. All methods accept tx (Prisma.TransactionClient). completeAssignment/failAssignment call finalizeExecutionIfTerminal(tx, ...) atomically.
+  - protocol-runtime.ts: ProtocolRuntime — stub, throws ProtocolRuntimeNotImplementedError for all execution ops. Contract established; implementation lands in Phase 9.
+  - hybrid-runtime.ts: HybridRuntime — stub, throws HybridRuntimeNotImplementedError. Contract established; implementation lands in Phase 10.
+  - index.ts: Barrel export + auto-registration of all 3 runtimes. Exports resolveRuntime() — the ONLY function verticals call.
+- VPP WIRING (vpp.service.ts): VPP dispatch execution now ENTERS THROUGH THE RUNTIME. Zero direct Execution/ExecutionAssignment writes remain:
+  - createDispatch: resolves runtime via resolveRuntime(version.runtimeKind), calls runtime.createExecution(tx, ...) + runtime.createExecutionAssignment(tx, ...) + runtime.linkExecutionSource(tx, ...) instead of tx.execution.create/update.
+  - executeDispatchAssignment: resolves runtime, calls runtime.recordAssignmentResults(tx, ...) + runtime.beginAssignmentExecution(tx, ...) for delivery-verified, runtime.completeAssignment(tx, ...) for success, runtime.failAssignment(tx, ...) for both failAssignment and markReconciliationRequired.
+  - maybeFinalizeDispatch: calls runtime.finalizeIfTerminal(db, ...) as defensive fallback.
+  - Removed direct import of finalizeExecutionIfTerminal — VPP goes through the runtime, the runtime calls the kernel.
+- NETWORK SERVICE (network.service.ts): createNetworkVersion accepts runtimeKind parameter (default 'infrastructure'), validates via validateRuntimeKind. instantiateTemplate passes template.runtimeKind. publishNetworkVersion locked-row query includes runtimeKind; assertPublicationReadiness validates it (defense-in-depth).
+- TEMPLATES (templates.ts): Added optional runtimeKind field to NetworkTemplate (defaults to 'infrastructure').
+- ARCHITECTURE CONTRACT TESTS (architecture-contract.test.ts): Added 7 new regex tests for the runtime boundary:
+  - kernel runtime module does not import VPP
+  - kernel runtime directory has registry, types, and 3 runtime implementations
+  - VPP service resolves runtime via RuntimeRegistry (not direct execution.service)
+  - VPP service does NOT directly write to Execution/ExecutionAssignment
+  - NetworkVersion has runtimeKind field in schema
+  - runtimeKind allowed values are infrastructure | protocol | hybrid
+  - RuntimeRegistry throws on unregistered kind (no silent fallback)
+  - Protocol/Hybrid runtimes are stubs that throw NotImplemented
+  Updated 2 existing tests to reflect the runtime indirection (VPP calls runtime.completeAssignment, not finalizeExecutionIfTerminal directly).
+- RUNTIME RESOLUTION TESTS (tests/runtime-resolution.test.ts): 18 behavioral tests proving:
+  - infrastructure → InfrastructureRuntime, protocol → ProtocolRuntime, hybrid → HybridRuntime
+  - Unknown kind throws (no silent fallback)
+  - validateRuntimeKind/isRuntimeKind work correctly
+  - Registry has exactly 3 registered kinds
+  - Protocol/Hybrid stubs throw NotImplemented for all execution ops
+  - InfrastructureRuntime implements the full NetworkRuntime contract (8 methods)
+- CI WORKFLOW (.github/workflows/ci.yml): 4-stage pipeline:
+  1. lint (ESLint)
+  2. typecheck (tsc --noEmit)
+  3. architecture tests (no DB)
+  4. PostgreSQL integration tests (postgres:16-alpine service container, prisma db push, vpp-4-2-execution-invariants + runtime-resolution tests)
+  CRITICAL: integration stage FAILS if DATABASE_URL is missing. The integration tests are NOT skippable.
+- VERIFICATION: bun run lint clean. bunx tsc --noEmit: 99 errors (all pre-existing, zero new). 41 tests pass (23 regex architecture + 18 runtime resolution, 0 fail, 166ms). Dev server: / route HTTP 200 (23KB HTML), no errors. Agent-browser confirms page renders.
+
+Stage Summary:
+- Phase 5 is complete. The runtime selection contract is operational:
+  NetworkVersion(runtimeKind) → RuntimeRegistry → NetworkRuntime → Execution → InfrastructureAdapter → Asset
+- VPP dispatch execution enters through the InfrastructureRuntime. The vertical NEVER touches Execution records directly — it goes through the runtime, which owns the generic execution lifecycle.
+- The dependency direction is: VPP → RuntimeRegistry → InfrastructureRuntime → execution.service → Execution. Kernel ← runtime ← vertical (never vertical → kernel).
+- Protocol and Hybrid runtimes exist as registered stubs with the full NetworkRuntime contract. They throw NotImplemented for execution ops — the contract is established, the implementation lands in Phase 9/10.
+- CI pipeline provides the PostgreSQL gate the user required: integration tests run against a real PostgreSQL service container and fail if DATABASE_URL is missing.
+- NEXT: Phase 6 (InfrastructureRuntime extraction — move DER adapter + baseline into the runtime layer), Phase 7 (AdapterRegistry), Phase 8 (second vertical).

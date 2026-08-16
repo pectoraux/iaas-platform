@@ -16,6 +16,7 @@ import {
 } from '@/lib/domain/templates'
 import { createCapability } from './registry.service'
 import { createRewardRule } from './reward.service'
+import { validateRuntimeKind, type RuntimeKind } from '@/lib/kernel/runtime'
 
 export interface CreateNetworkInput {
   name: string
@@ -75,8 +76,13 @@ export async function createNetworkVersion(
   networkId: string,
   configuration: VersionConfiguration,
   actorId?: string,
+  runtimeKind: RuntimeKind = 'infrastructure',
 ) {
   await getNetwork(tenantId, networkId) // scoping + 404
+  // Phase 5: validate runtimeKind at creation. A new runtime choice requires
+  // a new NetworkVersion — runtimeKind is immutable after publication.
+  validateRuntimeKind(runtimeKind)
+
   const last = await db.networkVersion.findFirst({
     where: { networkId },
     orderBy: { version: 'desc' },
@@ -87,6 +93,7 @@ export async function createNetworkVersion(
       networkId,
       version,
       configurationJson: JSON.stringify(configuration),
+      runtimeKind,
     },
   })
   return created
@@ -138,10 +145,11 @@ export async function publishNetworkVersion(
       version: number
       configurationJson: string
       baselinePolicyJson: string | null
+      runtimeKind: string
       publishedAt: Date | null
     }>>`
       SELECT "id", "networkId", "version", "configurationJson",
-             "baselinePolicyJson", "publishedAt"
+             "baselinePolicyJson", "runtimeKind", "publishedAt"
       FROM "NetworkVersion"
       WHERE "id" = ${versionId}::text
       FOR UPDATE
@@ -165,6 +173,11 @@ export async function publishNetworkVersion(
     // policy snapshot we check here is exactly the one that gets published.
     // This closes the race where Writer B mutates baselinePolicyJson between
     // a pre-transaction validation and the publish commit.
+    //
+    // Phase 5: runtimeKind is also validated here (defense-in-depth). It was
+    // already validated at createNetworkVersion, but this check ensures a
+    // version that somehow has an invalid runtimeKind (e.g., direct DB access)
+    // cannot be published.
     assertPublicationReadiness(network.vertical, version)
 
     const config: VersionConfiguration = JSON.parse(version.configurationJson)
@@ -272,8 +285,13 @@ export async function publishNetworkVersion(
  */
 function assertPublicationReadiness(
   vertical: string,
-  version: { id: string; version: number; baselinePolicyJson: string | null },
+  version: { id: string; version: number; baselinePolicyJson: string | null; runtimeKind: string },
 ): void {
+  // Phase 5: runtimeKind must be a valid value. This was validated at creation,
+  // but this defense-in-depth check ensures a version with an invalid runtimeKind
+  // (e.g., set via direct DB access) cannot be published.
+  validateRuntimeKind(version.runtimeKind)
+
   switch (vertical) {
     case 'energy_vpp': {
       // An energy_vpp NetworkVersion MUST have an accepted baseline policy
@@ -372,7 +390,13 @@ export async function instantiateTemplate(
     verification: template.verification,
     reward: template.reward,
   }
-  const version = await createNetworkVersion(tenantId, network.id, configuration, actorId)
+  const version = await createNetworkVersion(
+    tenantId,
+    network.id,
+    configuration,
+    actorId,
+    template.runtimeKind ?? 'infrastructure',
+  )
 
   // VPP-2C strict-baseline rule (option A): an energy_vpp NetworkVersion
   // MUST have an accepted baseline policy before it is published. This makes
