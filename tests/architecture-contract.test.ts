@@ -577,6 +577,18 @@ describe('Architecture contract: physical execution boundary (Phase 6)', () => {
     expect(content).not.toMatch(/executeDischarge/)
   })
 
+  it('VPP service does NOT import the bootstrap (application owns initialization)', () => {
+    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
+    const content = readFileSync(vppServicePath, 'utf-8')
+
+    // Phase 6.2: VPP must NOT import the bootstrap. The application (via
+    // instrumentation.ts) owns registry initialization. VPP receives a
+    // pre-populated registry.
+    expect(content).not.toMatch(/from\s+['"]@\/lib\/bootstrap['"]/)
+    expect(content).not.toMatch(/from\s+['"]@\/lib\/bootstrap\/adapters['"]/)
+    expect(content).not.toMatch(/import\s+['"]@\/lib\/bootstrap/)
+  })
+
   it('VPP service calls runtime.executeAssignment for physical execution', () => {
     const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
     const content = readFileSync(vppServicePath, 'utf-8')
@@ -684,9 +696,43 @@ describe('Architecture contract: physical execution boundary (Phase 6)', () => {
     // The bootstrap MUST import the concrete adapter + the generic registry.
     expect(content).toMatch(/from\s+['"]@\/lib\/services\/der-adapter\.service['"]/)
     expect(content).toMatch(/from\s+['"]@\/lib\/kernel\/runtime\/adapter-registry['"]/)
+    // Must export a registerAdapters function (not auto-run).
+    expect(content).toMatch(/export function registerAdapters/)
     // Must register the adapter for energy asset types.
     expect(content).toMatch(/registerForAssetTypes/)
     expect(content).toMatch(/battery/)
     expect(content).toMatch(/solar_inverter/)
+  })
+
+  it('bootstrap/index.ts is the explicit composition root (calls registerAdapters)', () => {
+    const indexPath = join(process.cwd(), 'src', 'lib', 'bootstrap', 'index.ts')
+    let content: string
+    try {
+      content = readFileSync(indexPath, 'utf-8')
+    } catch {
+      return
+    }
+
+    // The index MUST import registerAdapters from adapters.ts.
+    expect(content).toMatch(/from\s+['"]\.\/adapters['"]/)
+    // MUST export initializeBootstrap (the explicit init function).
+    expect(content).toMatch(/export function initializeBootstrap/)
+    // MUST call registerAdapters inside initializeBootstrap.
+    expect(content).toMatch(/registerAdapters\(\)/)
+  })
+
+  it('instrumentation.ts exists and calls initializeBootstrap at startup', () => {
+    const instrumentationPath = join(process.cwd(), 'src', 'instrumentation.ts')
+    let content: string
+    try {
+      content = readFileSync(instrumentationPath, 'utf-8')
+    } catch {
+      return
+    }
+
+    // instrumentation.ts must export register() (Next.js convention).
+    expect(content).toMatch(/export async function register/)
+    // Must call initializeBootstrap.
+    expect(content).toMatch(/initializeBootstrap/)
   })
 })

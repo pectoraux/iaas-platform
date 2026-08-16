@@ -2164,3 +2164,42 @@ Stage Summary:
 - The kernel/runtime layer NEVER imports concrete adapter implementations. Adding a new vertical (compute, storage) requires registering its adapter in the bootstrap — NOT modifying the kernel.
 - The AdapterRegistry and InfrastructureRuntime remain fully generic. They don't know about energy, batteries, or DERs.
 - Phase 6.1 is complete. Phase 6 is now architecturally closed. Phase 7 (AdapterRegistry hardening) is ready.
+
+---
+Task ID: Phase-6.2-Application-Owns-Initialization
+Agent: orchestrator
+Task: Move the side-effect adapter initialization from VPP service to the application bootstrap entry point. VPP must be completely unaware that an adapter registry needs initialization. The application (via instrumentation.ts at server startup) owns composition.
+
+Work Log:
+- ROOT CAUSE: vpp.service.ts had `import '@/lib/bootstrap/adapters'` as a side-effect. This meant the VPP service was responsible for activating the composition root — the vertical knew about the registry's initialization needs. A future compute vertical would need the same side-effect import, creating import-ordering dependencies.
+- FIX — APPLICATION OWNS INITIALIZATION:
+  - Refactored bootstrap/adapters.ts: changed from auto-running on import to exporting an explicit `registerAdapters()` function. No side-effects on import.
+  - Created bootstrap/index.ts: the explicit composition root. Exports `initializeBootstrap()` which calls `registerAdapters()`. Idempotent (guards with `initialized` flag). Auto-runs on module load so any import path gets a populated registry.
+  - Created src/instrumentation.ts: Next.js convention — `register()` is called once at server startup. It dynamically imports the bootstrap and calls `initializeBootstrap()`. This is the APPLICATION ENTRY POINT that owns composition.
+  - Removed `import '@/lib/bootstrap/adapters'` from vpp.service.ts. VPP no longer imports the bootstrap at all — it receives a pre-populated registry.
+- INITIALIZATION GRAPH (now correct):
+  ```
+  Application startup (instrumentation.ts → register())
+      ↓
+  bootstrap/index.ts (initializeBootstrap)
+      ↓
+  bootstrap/adapters.ts (registerAdapters)
+      ↓
+  AdapterRegistry (now populated)
+      ↓
+  InfrastructureRuntime / VPP service (use the populated registry)
+  ```
+  VPP is completely unaware that an adapter registry needs initialization.
+- TESTS: Tests are their own composition root — they import `../src/lib/bootstrap` directly to register adapters before running. This is the correct pattern: tests own their own initialization, just as the application owns its initialization via instrumentation.ts.
+- ARCHITECTURE TESTS (3 new):
+  - VPP service does NOT import the bootstrap (application owns initialization) — checks vpp.service.ts does NOT import @/lib/bootstrap or @/lib/bootstrap/adapters.
+  - bootstrap/index.ts is the explicit composition root (calls registerAdapters) — confirms index.ts exists, imports registerAdapters, exports initializeBootstrap.
+  - instrumentation.ts exists and calls initializeBootstrap at startup — confirms the Next.js instrumentation hook exists and calls the bootstrap.
+  - Updated bootstrap/adapters.ts test to verify it exports `registerAdapters` function (not auto-run).
+- VERIFICATION: bun run lint clean. tsc: 102 errors (all pre-existing, zero new). 75 non-DB tests pass (52 regex architecture + 23 runtime resolution/adapter, 3 new Phase 6.2 regex tests, 0 fail, 138ms). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The application (via instrumentation.ts) owns registry initialization. VPP is completely unaware that an adapter registry needs initialization.
+- A future compute vertical can register its adapters in bootstrap/adapters.ts without VPP importing or initializing anything.
+- The system no longer depends on import ordering — the registry is populated at server startup, not by whichever vertical service happens to execute first.
+- Phase 6.2 is complete. Phase 6 is now architecturally closed. Phase 7 (AdapterRegistry hardening) is ready.

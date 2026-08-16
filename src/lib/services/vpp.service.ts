@@ -46,10 +46,9 @@ import {
 // VPP-6: VPP does NOT import or instantiate DERAdapter. Physical execution
 //        enters through runtime.executeAssignment(), which resolves the adapter
 //        via the AdapterRegistry.
-// VPP-6.1: The concrete adapter is registered by the bootstrap layer (not the
-//          kernel). VPP imports the bootstrap as a side-effect to ensure
-//          adapters are registered before dispatch execution.
-import '@/lib/bootstrap/adapters'
+// VPP-6.2: VPP does NOT import the bootstrap either. The application owns
+//          registry initialization (via src/instrumentation.ts at server
+//          startup). VPP receives a pre-populated registry.
 import {
   resolveRuntime,
   type RuntimeKind,
