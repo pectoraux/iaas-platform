@@ -2380,3 +2380,47 @@ Stage Summary:
 - The 5 multi-adapter tests use the REAL InfrastructureRuntime — no test wrapper. They prove the actual production path: InfrastructureRuntime → AdapterRegistry → adapter.
 - Runtime registration moved from the kernel to the bootstrap (composition root). The kernel exports the registry; the bootstrap owns construction.
 - Phase 7.3 is complete. Phase 7 is now fully hardened (registry + runtime + DI). Phase 8 (Compute reference network) is ready.
+
+---
+Task ID: Phase-8-Compute-Reference-Network
+Agent: orchestrator
+Task: Phase 8 — the Compute reference network. Prove the architecture is a Network Operating System, not a well-factored VPP application. The SAME InfrastructureRuntime, AdapterRegistry, Execution, and economic pipeline that serves energy-vpp serves compute — with zero kernel modifications.
+
+Work Log:
+- COMPUTE-NETWORK TEMPLATE (src/lib/domain/templates.ts):
+  - Added 'compute-network' template alongside 'energy-vpp' and 'generic-resource-network'.
+  - vertical: 'compute'
+  - asset_types: compute_node, gpu_cluster
+  - capabilities: gpu_compute (GPU-hours), cpu_compute (CPU-hours)
+  - verification: same generic checks as energy-vpp (device_signature, timestamp_window, replay_protection, schema_validation, numeric_range)
+  - reward: fixed_rate $0.50/GPU-hours (same economic primitive as energy-vpp)
+  - runtimeKind: 'infrastructure' (default — same runtime as energy)
+  - No baseline policy requirement (that's energy_vpp-specific; compute skips it)
+- SIMULATED COMPUTE ADAPTER (src/lib/services/compute-adapter.service.ts):
+  - SimulatedComputeAdapter implements the generic InfrastructureAdapter interface (same interface as SimulatedDERAdapter).
+  - execute(): simulates GPU/CPU jobs at ~95% utilization efficiency. Returns actualHours + telemetry payload (gpu_count, gpu_utilization_pct, memory_gb for GPU; cpu_cores, cpu_utilization_pct, memory_gb for CPU).
+  - adapterType: 'simulated_compute'
+  - The adapter does NOT know about the kernel, the economic pipeline, or VPP. It only produces telemetry.
+- BOOTSTRAP REGISTRATION (src/lib/bootstrap/adapters.ts):
+  - Added computeDescriptor alongside derDescriptor.
+  - Both register atomically via registerBatch — if either conflicts, neither is committed.
+  - computeDescriptor: supportedAssetTypes ['compute_node', 'gpu_cluster'], supportedCapabilities ['gpu_compute', 'cpu_compute'].
+  - The kernel (InfrastructureRuntime, AdapterRegistry) does NOT know about compute — it just resolves adapters by asset type.
+- TESTS (tests/phase-8-compute-reference.test.ts, 15 tests):
+  - Template: compute-network exists, has compute asset types + capabilities, uses generic verification + reward pipeline.
+  - Registration: compute adapter registered for compute_node + gpu_cluster, resolveAdapter returns compute adapter, advertises compute capabilities.
+  - Execution via REAL InfrastructureRuntime: GPU job returns 9.5 GPU-hours (95% of 10) + telemetry, CPU job returns 19 CPU-hours + telemetry, explicit adapterType selection works, capability mismatch throws (gpu_compute not supported by DER adapter).
+  - Isolated execution: fresh AdapterRegistry + compute adapter + InfrastructureRuntime works end-to-end without global state.
+  - KERNEL UNCHANGED PROOF: InfrastructureRuntime source does NOT mention compute/gpu/cpu, AdapterRegistry source does NOT mention compute/gpu/cpu, compute adapter uses the SAME InfrastructureAdapter interface as DER.
+- UPDATED EXISTING TESTS: Two tests in runtime-resolution.test.ts that used 'compute_node' as an example of an "unregistered" asset type were updated to use 'storage_node' instead — compute_node is now registered (that's the whole point of Phase 8).
+- VERIFICATION: bun run lint clean. tsc: 102 errors (all pre-existing, zero new). 124 non-DB tests pass (62 regex architecture + 47 runtime resolution/adapter + 15 Phase 8 compute, 0 fail, 134ms). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The Compute reference network is the first non-energy vertical. It proves:
+  - The SAME InfrastructureRuntime (unchanged) executes compute jobs.
+  - The SAME AdapterRegistry (unchanged) resolves the compute adapter.
+  - The SAME Execution/Contribution/Reward/Settlement pipeline (unchanged) processes compute work.
+  - The compute adapter uses the SAME InfrastructureAdapter interface as the DER adapter.
+  - Zero kernel modifications — no compute-specific economic primitives, no VPP-specific kernel changes.
+- The architecture is a Network Operating System: adding a new vertical requires only a template + an adapter + a registration line in the bootstrap. The kernel is genuinely reusable.
+- Phase 8 is complete. Phase 9 (ProtocolRuntime) and Phase 10 (Hybrid reference) are ready.

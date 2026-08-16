@@ -29,6 +29,7 @@
 
 import { adapterRegistry, type AdapterDescriptor } from '@/lib/kernel/runtime/adapter-registry'
 import { SimulatedDERAdapter } from '@/lib/services/der-adapter.service'
+import { SimulatedComputeAdapter } from '@/lib/services/compute-adapter.service'
 
 /**
  * Register all concrete adapters with the generic AdapterRegistry.
@@ -39,9 +40,9 @@ import { SimulatedDERAdapter } from '@/lib/services/der-adapter.service'
  * Idempotent — safe to call multiple times (bootstrap/index.ts guards with
  * an `initialized` flag; the registry itself throws on duplicate adapterType).
  *
- * Phase 7: Uses AdapterDescriptor with capabilities. The simulated DER adapter
- * supports energy_discharge, frequency_response, and energy_capacity on all
- * energy asset types.
+ * Phase 7: Uses AdapterDescriptor with capabilities.
+ * Phase 8: Added the compute adapter alongside the DER adapter. Both register
+ * atomically via registerBatch — if either conflicts, neither is committed.
  */
 export function registerAdapters(): void {
   const derDescriptor: AdapterDescriptor = {
@@ -50,7 +51,15 @@ export function registerAdapters(): void {
     supportedCapabilities: ['energy_discharge', 'frequency_response', 'energy_capacity'],
   }
 
+  const computeDescriptor: AdapterDescriptor = {
+    adapter: new SimulatedComputeAdapter(),
+    supportedAssetTypes: ['compute_node', 'gpu_cluster'],
+    supportedCapabilities: ['gpu_compute', 'cpu_compute'],
+  }
+
   // Phase 7: registerBatch is atomic — if this fails, no adapters are committed.
-  // Phase 8 will add a compute adapter here (for compute_node, gpu_cluster).
-  adapterRegistry.registerBatch([derDescriptor])
+  // Phase 8: Both energy + compute adapters register together. The kernel
+  // (InfrastructureRuntime, AdapterRegistry) does NOT know about compute —
+  // it just resolves adapters by asset type.
+  adapterRegistry.registerBatch([derDescriptor, computeDescriptor])
 }

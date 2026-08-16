@@ -237,8 +237,10 @@ describe('Phase 6: adapter resolution', () => {
   })
 
   it('resolveAdapter throws for unregistered asset types', () => {
-    expect(() => resolveAdapter('compute_node')).toThrow(/No adapter registered/)
+    // Phase 8: compute_node is NOW registered (via the compute adapter).
+    // Use truly unregistered types for this test.
     expect(() => resolveAdapter('storage_node')).toThrow(/No adapter registered/)
+    expect(() => resolveAdapter('wireless_ap')).toThrow(/No adapter registered/)
     expect(() => resolveAdapter('')).toThrow(/No adapter registered/)
   })
 
@@ -274,8 +276,8 @@ describe('Phase 6: adapter resolution', () => {
     await expect(
       runtime.executeAssignment({
         assetId: 'test-asset',
-        assetType: 'compute_node',
-        capabilityType: 'gpu_compute',
+        assetType: 'storage_node', // Phase 8: compute_node is now registered; use storage_node
+        capabilityType: 'storage_capacity',
         assignedQuantity: '10',
         assignedUnit: 'GPU',
         durationSeconds: 3600,

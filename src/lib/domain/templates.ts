@@ -129,6 +129,54 @@ export const NETWORK_TEMPLATES: NetworkTemplate[] = [
       platform_fee_pct: 5,
     },
   },
+  // -------------------------------------------------------------------------
+  // compute-network — Phase 8: first non-energy vertical.
+  // Proves the architecture is a Network Operating System, not a VPP app.
+  // GPU/CPU nodes execute compute jobs; GPU-hours delivered becomes a
+  // Contribution rewarded at a fixed rate. Uses the SAME generic pipeline
+  // as energy-vpp — no kernel changes, no compute-specific economic primitives.
+  // -------------------------------------------------------------------------
+  {
+    key: 'compute-network',
+    name: 'Compute Network',
+    slug: 'compute-network',
+    vertical: 'compute',
+    description:
+      'Decentralized compute network. GPU and CPU nodes execute compute jobs; GPU-hours delivered becomes a Contribution rewarded at a fixed rate. Uses only generic platform primitives — the same kernel, runtime, and economic pipeline as energy-vpp.',
+    asset_types: ['compute_node', 'gpu_cluster'],
+    capabilities: [
+      {
+        type: 'gpu_compute',
+        unit: 'GPU-hours',
+        schemaVersion: 1,
+        fields: { gpu_count: 'number', gpu_utilization_pct: 'number', memory_gb: 'number', duration_seconds: 'number' },
+      },
+      {
+        type: 'cpu_compute',
+        unit: 'CPU-hours',
+        schemaVersion: 1,
+        fields: { cpu_cores: 'number', cpu_utilization_pct: 'number', memory_gb: 'number', duration_seconds: 'number' },
+      },
+    ],
+    verification: {
+      checks: ['device_signature', 'timestamp_window', 'replay_protection', 'schema_validation', 'numeric_range'],
+      numeric_ranges: {
+        gpu_count: { min: 0, max: 1000 },
+        gpu_utilization_pct: { min: 0, max: 100 },
+        cpu_cores: { min: 0, max: 10000 },
+        cpu_utilization_pct: { min: 0, max: 100 },
+        memory_gb: { min: 0, max: 100000 },
+      },
+      timestamp_window_seconds: 300,
+    },
+    reward: {
+      type: 'fixed_rate',
+      rate: '0.50',
+      unit: 'GPU-hours',
+      currency: 'USD',
+      platform_fee_pct: 10,
+    },
+  },
 ]
 
 export function getTemplate(key: string): NetworkTemplate | undefined {
