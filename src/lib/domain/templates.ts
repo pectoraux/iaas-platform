@@ -130,19 +130,22 @@ export const NETWORK_TEMPLATES: NetworkTemplate[] = [
     },
   },
   // -------------------------------------------------------------------------
-  // compute-network — Phase 8: first non-energy vertical.
+  // compute-gpu-network — Phase 8: first non-energy vertical.
   // Proves the architecture is a Network Operating System, not a VPP app.
-  // GPU/CPU nodes execute compute jobs; GPU-hours delivered becomes a
-  // Contribution rewarded at a fixed rate. Uses the SAME generic pipeline
-  // as energy-vpp — no kernel changes, no compute-specific economic primitives.
+  // GPU nodes execute compute jobs; GPU-hours delivered becomes a Contribution
+  // rewarded at a fixed rate. Uses the SAME generic pipeline as energy-vpp.
+  //
+  // Phase 8B: Split into GPU-only and CPU-only templates to avoid the
+  // reward-unit mismatch (GPU-hours vs CPU-hours). Each template has a
+  // single capability whose unit matches the reward policy unit.
   // -------------------------------------------------------------------------
   {
-    key: 'compute-network',
-    name: 'Compute Network',
-    slug: 'compute-network',
+    key: 'compute-gpu-network',
+    name: 'Compute GPU Network',
+    slug: 'compute-gpu-network',
     vertical: 'compute',
     description:
-      'Decentralized compute network. GPU and CPU nodes execute compute jobs; GPU-hours delivered becomes a Contribution rewarded at a fixed rate. Uses only generic platform primitives — the same kernel, runtime, and economic pipeline as energy-vpp.',
+      'Decentralized GPU compute network. GPU nodes execute compute jobs; GPU-hours delivered becomes a Contribution rewarded at a fixed rate. Uses only generic platform primitives — the same kernel, runtime, and economic pipeline as energy-vpp.',
     asset_types: ['compute_node', 'gpu_cluster'],
     capabilities: [
       {
@@ -151,6 +154,38 @@ export const NETWORK_TEMPLATES: NetworkTemplate[] = [
         schemaVersion: 1,
         fields: { gpu_count: 'number', gpu_utilization_pct: 'number', memory_gb: 'number', duration_seconds: 'number' },
       },
+    ],
+    verification: {
+      checks: ['device_signature', 'timestamp_window', 'replay_protection', 'schema_validation', 'numeric_range'],
+      numeric_ranges: {
+        gpu_count: { min: 0, max: 1000 },
+        gpu_utilization_pct: { min: 0, max: 100 },
+        memory_gb: { min: 0, max: 100000 },
+      },
+      timestamp_window_seconds: 300,
+    },
+    reward: {
+      type: 'fixed_rate',
+      rate: '0.50',
+      unit: 'GPU-hours',
+      currency: 'USD',
+      platform_fee_pct: 10,
+    },
+  },
+  // -------------------------------------------------------------------------
+  // compute-cpu-network — Phase 8B: CPU compute network.
+  // Separate template because CPU-hours and GPU-hours are different units.
+  // Each capability's unit matches its reward policy unit.
+  // -------------------------------------------------------------------------
+  {
+    key: 'compute-cpu-network',
+    name: 'Compute CPU Network',
+    slug: 'compute-cpu-network',
+    vertical: 'compute',
+    description:
+      'Decentralized CPU compute network. CPU nodes execute compute jobs; CPU-hours delivered becomes a Contribution rewarded at a fixed rate. Uses only generic platform primitives.',
+    asset_types: ['compute_node'],
+    capabilities: [
       {
         type: 'cpu_compute',
         unit: 'CPU-hours',
@@ -161,8 +196,6 @@ export const NETWORK_TEMPLATES: NetworkTemplate[] = [
     verification: {
       checks: ['device_signature', 'timestamp_window', 'replay_protection', 'schema_validation', 'numeric_range'],
       numeric_ranges: {
-        gpu_count: { min: 0, max: 1000 },
-        gpu_utilization_pct: { min: 0, max: 100 },
         cpu_cores: { min: 0, max: 10000 },
         cpu_utilization_pct: { min: 0, max: 100 },
         memory_gb: { min: 0, max: 100000 },
@@ -171,8 +204,8 @@ export const NETWORK_TEMPLATES: NetworkTemplate[] = [
     },
     reward: {
       type: 'fixed_rate',
-      rate: '0.50',
-      unit: 'GPU-hours',
+      rate: '0.10',
+      unit: 'CPU-hours',
       currency: 'USD',
       platform_fee_pct: 10,
     },

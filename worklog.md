@@ -2424,3 +2424,57 @@ Stage Summary:
   - Zero kernel modifications — no compute-specific economic primitives, no VPP-specific kernel changes.
 - The architecture is a Network Operating System: adding a new vertical requires only a template + an adapter + a registration line in the bootstrap. The kernel is genuinely reusable.
 - Phase 8 is complete. Phase 9 (ProtocolRuntime) and Phase 10 (Hybrid reference) are ready.
+
+---
+Task ID: Phase-8B-Compute-Economic-Pipeline
+Agent: orchestrator
+Task: Phase 8B — the actual graduation test. Prove a complete Compute workload flows through the ENTIRE generic economic pipeline (Execution → Event → Verification → Attestation → Contribution → Reward → Ledger → Settlement), with capacity, and fix the reward-unit mismatch.
+
+Work Log:
+- FIX — REWARD-UNIT MISMATCH (Finding 2):
+  - Split compute-network into two templates: compute-gpu-network (GPU-hours → $0.50/GPU-hours) and compute-cpu-network (CPU-hours → $0.10/CPU-hours). Each template has a single capability whose unit matches the reward policy unit. No silent GPU-hours↔CPU-hours conversion.
+- COMPUTE SERVICE (src/lib/services/compute.service.ts):
+  - createAndExecuteComputeJob: orchestrates a complete compute job through the generic economic pipeline.
+  - The pipeline:
+    1. Resolve InfrastructureRuntime from the network's NetworkVersion (runtimeKind=infrastructure)
+    2. Create Execution + ExecutionAssignment via the runtime (generic models)
+    3. Execute the compute job via runtime.executeAssignment (→ AdapterRegistry → ComputeAdapter)
+    4. Sign + submit telemetry as a generic Event (ingestEvent)
+    5. Process the event through generic verification → attestation (processEventOutbox)
+    6. Create a Contribution from the verified result (createContribution)
+    7. Record results + complete the assignment (runtime.recordAssignmentResults + runtime.completeAssignment — operational completion before economics, per Phase 5.2)
+    8. Link the contribution (runtime.linkContribution — write-once, per Phase 5.4)
+    9. Record capacity usage (recordUsage — generic capacity kernel)
+    10. Calculate Reward (calculateReward — generic reward service)
+    11. Post to Ledger (postRewardToLedger — generic double-entry accounting)
+    12. Create + process Settlement (createSettlement + processSettlementForReward)
+  - Capacity: exercises CapacityResource → Reservation → Commitment → Usage (the generic capacity kernel, same as VPP)
+  - No VPP-specific logic. No baseline engine. No portfolio. No buyer settlement. Just the generic pipeline.
+  - The ONLY compute-specific additions: the template, the adapter, and this orchestration service.
+- DB-BACKED INTEGRATION TEST (tests/phase-8b-compute-economic-pipeline.test.ts):
+  - Instantiates a persisted compute-gpu-network (NetworkDefinition + published NetworkVersion)
+  - Creates an operator + GPU cluster asset + device + network assignment
+  - Executes a 10 GPU-hour compute job via createAndExecuteComputeJob
+  - Verifies EVERY stage of the pipeline produced a record:
+    - Execution (status=completed, requestedUnit=GPU-hours)
+    - ExecutionAssignment (status=completed, actualQuantity=9.5 GPU-hours @ 95% efficiency)
+    - Event (status=verified)
+    - Attestation (status=verified)
+    - Contribution (quantity=9.5, unit=GPU-hours — derived from verified result)
+    - Reward ($0.50 × 9.5 = $4.75)
+    - Settlement (status=completed)
+    - LedgerPosting (double-entry: operator credit + platform fee)
+  - Verifies capacity was exercised: reservation + commitment (consumed) + usage (GPU-hours)
+  - Verifies NO compute-specific economic models were created — all records are in generic tables
+- CI: Added phase-8b-compute-economic-pipeline.test.ts to the postgres-integration-tests job.
+- UPDATED Phase 8 tests: Updated phase-8-compute-reference.test.ts to use compute-gpu-network (instead of compute-network) and added a test verifying reward-unit matches capability-unit for both GPU and CPU templates.
+- VERIFICATION: bun run lint clean. tsc: only pre-existing errors (bun:test pattern in new test file, zero real new errors). 125 non-DB tests pass (62 regex architecture + 48 runtime resolution/adapter + 15 Phase 8 compute, 0 fail, 134ms). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- Phase 8B proves the architecture is a Network Operating System:
+  - A complete Compute workload flows through the ENTIRE generic economic pipeline.
+  - Execution → Event → Verification → Attestation → Contribution → Reward → Ledger → Settlement — all generic services, zero compute-specific economic primitives.
+  - Capacity: Resource → Reservation → Commitment → Usage — the generic capacity kernel serves GPU-hours.
+  - The compute vertical needed only: a template, an adapter, and an orchestration service.
+- The reward-unit mismatch is fixed: GPU-hours → GPU reward, CPU-hours → CPU reward (separate templates).
+- Phase 8 (A + B) is now complete. Phase 9 (ProtocolRuntime) is ready.

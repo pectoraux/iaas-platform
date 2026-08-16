@@ -43,33 +43,43 @@ beforeAll(() => {
 })
 
 // ---------------------------------------------------------------------------
-// Test 1: The compute-network template exists and is correctly configured
+// Test 1: The compute-gpu-network template exists and is correctly configured
 // ---------------------------------------------------------------------------
 
-describe('Phase 8: compute-network template', () => {
-  it('the compute-network template exists', () => {
-    const template = getTemplate('compute-network')
+describe('Phase 8: compute-gpu-network template', () => {
+  it('the compute-gpu-network template exists', () => {
+    const template = getTemplate('compute-gpu-network')
     expect(template).toBeDefined()
     expect(template!.vertical).toBe('compute')
     expect(template!.runtimeKind ?? 'infrastructure').toBe('infrastructure')
   })
 
-  it('compute-network has compute asset types and capabilities', () => {
-    const template = getTemplate('compute-network')!
+  it('compute-gpu-network has compute asset types and gpu_compute capability', () => {
+    const template = getTemplate('compute-gpu-network')!
     expect(template.asset_types).toContain('compute_node')
     expect(template.asset_types).toContain('gpu_cluster')
     expect(template.capabilities.map(c => c.type)).toContain('gpu_compute')
-    expect(template.capabilities.map(c => c.type)).toContain('cpu_compute')
   })
 
-  it('compute-network uses the generic verification + reward pipeline', () => {
-    const template = getTemplate('compute-network')!
+  it('compute-gpu-network uses the generic verification + reward pipeline', () => {
+    const template = getTemplate('compute-gpu-network')!
     // Same verification checks as energy-vpp (generic pipeline).
     expect(template.verification.checks).toContain('device_signature')
     expect(template.verification.checks).toContain('schema_validation')
     // Fixed-rate reward (same economic primitive as energy-vpp).
     expect(template.reward.type).toBe('fixed_rate')
     expect(template.reward.unit).toBe('GPU-hours')
+  })
+
+  it('Phase 8B: reward unit matches capability unit (no mismatch)', () => {
+    const gpuTemplate = getTemplate('compute-gpu-network')!
+    const cpuTemplate = getTemplate('compute-cpu-network')!
+
+    // GPU: capability unit = GPU-hours, reward unit = GPU-hours ✅
+    expect(gpuTemplate.capabilities[0].unit).toBe(gpuTemplate.reward.unit)
+
+    // CPU: capability unit = CPU-hours, reward unit = CPU-hours ✅
+    expect(cpuTemplate.capabilities[0].unit).toBe(cpuTemplate.reward.unit)
   })
 })
 
