@@ -1460,3 +1460,34 @@ model ProtocolStateSnapshot {
   @@index([networkVersionId])
   @@index([stateHash])
 }
+
+/// Phase 9B.1: Protocol Transition Journal — records each state transition.
+/// This is the bridge between deterministic execution and consensus:
+/// consensus needs something to agree on, and transitions are that thing.
+///
+/// Each row records:
+///   - the transaction that was executed (transactionHash)
+///   - the state before (previousStateHash)
+///   - the state after (resultStateHash)
+///   - the resulting version
+///
+/// This is append-only — transitions are immutable once recorded.
+/// The journal enables:
+///   - deterministic replay (re-execute transitions in order)
+///   - consensus proof (validators agree on transition order)
+///   - audit trail (who did what, when)
+///   - crash recovery (reconstruct state from journal)
+model ProtocolTransition {
+  id                  String   @id @default(cuid())
+  networkVersionId    String
+  version             Int      // the resulting state version (N+1)
+  transactionHash     String   // hash of the executed transaction
+  previousStateHash   String   // state hash before the transition
+  resultStateHash     String   // state hash after the transition
+  createdAt           DateTime @default(now())
+
+  @@unique([networkVersionId, version])
+  @@index([networkVersionId])
+  @@index([transactionHash])
+  @@index([previousStateHash])
+}

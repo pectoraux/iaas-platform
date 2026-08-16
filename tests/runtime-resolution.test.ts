@@ -52,7 +52,7 @@ function createProtocolRuntime() {
   const stateStore = new InMemoryProtocolStateStore('test-nv')
   const deps: ProtocolRuntimeDeps = {
     stateStore,
-    executor: new DeterministicTransactionExecutor(stateStore),
+    executor: new DeterministicTransactionExecutor(),
     validatorRegistry: new StubValidatorRegistry(),
     consensusEngine: new StubConsensusEngine(),
   }

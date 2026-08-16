@@ -79,7 +79,7 @@ export class InMemoryProtocolStateStore implements ProtocolStateStore {
     this.stagedEntries.set(key, null) // null = delete
   }
 
-  async commit(expectedVersion: number): Promise<ProtocolStateSnapshot> {
+  async commit(expectedVersion: number, _transactionHash?: string): Promise<ProtocolStateSnapshot> {
     // Optimistic concurrency check: the expected version must match.
     if (expectedVersion !== this.version) {
       throw new StaleVersionError(expectedVersion, this.version)

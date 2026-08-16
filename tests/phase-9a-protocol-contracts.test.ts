@@ -40,7 +40,7 @@ function createProtocolRuntime(): ProtocolRuntime {
   const stateStore = new InMemoryProtocolStateStore('test-nv')
   const deps: ProtocolRuntimeDeps = {
     stateStore,
-    executor: new DeterministicTransactionExecutor(stateStore),
+    executor: new DeterministicTransactionExecutor(),
     validatorRegistry: new StubValidatorRegistry(),
     consensusEngine: new StubConsensusEngine(),
   }
@@ -196,79 +196,98 @@ describe('Phase 9A: deterministic state store', () => {
 // In-memory tests: deterministic executor
 // ---------------------------------------------------------------------------
 
-describe('Phase 9A: deterministic transaction executor', () => {
-  it('mint transaction creates balance', async () => {
+describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', () => {
+  it('apply: mint transaction calculates new balance', async () => {
     const store = new InMemoryProtocolStateStore('nv1')
-    const executor = new DeterministicTransactionExecutor(store)
+    const executor = new DeterministicTransactionExecutor()
+    const state = await store.getState()
     const tx = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
 
-    const result = await executor.execute(tx)
-    expect(result.success).toBe(true)
-    expect(result.resultingState.entries.get('balance:alice')).toBe('100')
-    expect(result.receipt.beforeStateHash).not.toBe(result.receipt.afterStateHash)
+    const calc = executor.apply(tx, state)
+    expect(calc.valid).toBe(true)
+    expect(calc.newEntries.get('balance:alice')).toBe('100')
   })
 
-  it('transfer transaction moves balance', async () => {
-    const store = new InMemoryProtocolStateStore('nv1')
-    const executor = new DeterministicTransactionExecutor(store)
+  it('apply: transfer transaction calculates balance movement', async () => {
+    const store = new InMemoryProtocolStateStore('nv1', { 'balance:alice': '100' })
+    const executor = new DeterministicTransactionExecutor()
+    const state = await store.getState()
+    const tx = createTransaction('nv1', 'alice', 0, 'transfer', { from: 'alice', to: 'bob', amount: '30' })
 
-    // Mint initial balance.
-    await executor.execute(createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' }))
-
-    // Transfer 30 from alice to bob.
-    const transferTx = createTransaction('nv1', 'alice', 1, 'transfer', { from: 'alice', to: 'bob', amount: '30' })
-    const result = await executor.execute(transferTx)
-
-    expect(result.success).toBe(true)
-    expect(result.resultingState.entries.get('balance:alice')).toBe('70')
-    expect(result.resultingState.entries.get('balance:bob')).toBe('30')
+    const calc = executor.apply(tx, state)
+    expect(calc.valid).toBe(true)
+    expect(calc.newEntries.get('balance:alice')).toBe('70')
+    expect(calc.newEntries.get('balance:bob')).toBe('30')
   })
 
-  it('insufficient balance rejects the transaction (state unchanged)', async () => {
+  it('apply: insufficient balance returns invalid (pure — no store mutation)', async () => {
     const store = new InMemoryProtocolStateStore('nv1')
-    const executor = new DeterministicTransactionExecutor(store)
-
-    // Alice has 0 balance — transfer should fail.
+    const executor = new DeterministicTransactionExecutor()
+    const state = await store.getState()
     const tx = createTransaction('nv1', 'alice', 0, 'transfer', { from: 'alice', to: 'bob', amount: '10' })
-    const result = await executor.execute(tx)
 
-    expect(result.success).toBe(false)
-    expect(result.error).toMatch(/Insufficient balance/)
-    // State unchanged.
-    expect(result.receipt.beforeStateHash).toBe(result.receipt.afterStateHash)
+    const calc = executor.apply(tx, state)
+    expect(calc.valid).toBe(false)
+    expect(calc.error).toMatch(/Insufficient balance/)
   })
 
-  it('invalid nonce rejects the transaction (replay protection)', async () => {
-    const store = new InMemoryProtocolStateStore('nv1')
-    const executor = new DeterministicTransactionExecutor(store)
+  it('validate: invalid nonce rejected', async () => {
+    const store = new InMemoryProtocolStateStore('nv1', { 'nonce:alice': '1' })
+    const executor = new DeterministicTransactionExecutor()
+    const state = await store.getState()
+    const tx = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
 
-    // Mint with nonce 0.
-    await executor.execute(createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' }))
-
-    // Try mint again with nonce 0 (replay) — should fail (expected nonce is 1).
-    const replayTx = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
-    const result = await executor.execute(replayTx)
-
-    expect(result.success).toBe(false)
-    expect(result.error).toMatch(/Invalid nonce/)
+    const error = executor.validate(tx, state)
+    expect(error).toMatch(/Invalid nonce/)
   })
 
-  it('deterministic: same state + transaction → same result', async () => {
-    // Execute the same transaction in two separate stores with the same initial state.
+  it('deterministic: same state + transaction → same calculated entries', async () => {
     const store1 = new InMemoryProtocolStateStore('nv1')
     const store2 = new InMemoryProtocolStateStore('nv1')
-    const executor1 = new DeterministicTransactionExecutor(store1)
-    const executor2 = new DeterministicTransactionExecutor(store2)
-
+    const executor = new DeterministicTransactionExecutor()
+    const state1 = await store1.getState()
+    const state2 = await store2.getState()
     const tx = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
 
-    const result1 = await executor1.execute(tx)
-    const result2 = await executor2.execute(tx)
+    const calc1 = executor.apply(tx, state1)
+    const calc2 = executor.apply(tx, state2)
 
-    // Same state hash after execution.
-    expect(result1.resultingState.hash).toBe(result2.resultingState.hash)
-    // Same receipt (except the receipt is deterministic too).
-    expect(result1.receipt.afterStateHash).toBe(result2.receipt.afterStateHash)
+    // Same resulting entries.
+    expect(calc1.valid).toBe(calc2.valid)
+    // Compare entries (maps don't have structural equality, so compare keys).
+    const keys1 = Array.from(calc1.newEntries.keys()).sort()
+    const keys2 = Array.from(calc2.newEntries.keys()).sort()
+    expect(keys1).toEqual(keys2)
+    for (const key of keys1) {
+      expect(calc1.newEntries.get(key)).toBe(calc2.newEntries.get(key))
+    }
+  })
+
+  it('Phase 9B.1: executor does NOT import or use ProtocolStateStore', () => {
+    // The executor is a pure calculator — it should NOT take a store in
+    // its constructor or import the store type.
+    const executor = new DeterministicTransactionExecutor()
+    expect(typeof executor.validate).toBe('function')
+    expect(typeof executor.apply).toBe('function')
+  })
+
+  it('Phase 9B.1: executor source does NOT import ProtocolStateStore', () => {
+    const executorPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol', 'executor.ts')
+    const content = readFileSync(executorPath, 'utf-8')
+    // The executor must NOT import the state store — it's a pure calculator.
+    expect(content).not.toMatch(/import.*ProtocolStateStore/)
+    expect(content).not.toMatch(/import.*state-store/)
+  })
+
+  it('Phase 9B.1: ProtocolRuntime coordinates load → validate → apply → commit (not executor)', () => {
+    // The runtime's executeTransaction should call executor.apply (pure)
+    // and stateStore.commit (async) — NOT delegate entirely to the executor.
+    const runtimePath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol-runtime.ts')
+    const content = readFileSync(runtimePath, 'utf-8')
+    // The runtime must call executor.apply (not executor.execute).
+    expect(content).toMatch(/executor\.apply\(/)
+    // The runtime must call stateStore.commit (not the executor).
+    expect(content).toMatch(/stateStore\.commit\(/)
   })
 })
 

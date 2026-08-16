@@ -41,7 +41,9 @@ import type {
   ProtocolRuntimeDeps,
   ProtocolTransaction,
   ProtocolExecutionResult,
+  ProtocolReceipt,
 } from './protocol/types'
+import { StaleVersionError } from './protocol/types'
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -99,19 +101,96 @@ export class ProtocolRuntime implements NetworkRuntime {
   /**
    * Execute a protocol transaction against the current state.
    *
-   * This is the protocol runtime's primary entry point. It delegates to
-   * the deterministic executor, which:
-   *   1. Reads the current state (async)
-   *   2. Validates the transaction
-   *   3. Applies the state transition (staged)
-   *   4. Commits with optimistic concurrency (async, version-checked)
-   *   5. Returns the execution result + receipt
+   * Phase 9B.1: The RUNTIME coordinates the flow — the executor is a pure
+   * calculator and does NOT own persistence:
    *
-   * DETERMINISTIC: Given the same state + transaction, the result is identical.
-   * ASYNC: Phase 9B — the state store is async (supports persistent backends).
+   *   1. Load current state (async, from store)
+   *   2. Validate the transaction (pure, via executor)
+   *   3. Calculate the transition (pure, via executor.apply)
+   *   4. Stage the calculated entries on the store
+   *   5. Commit with optimistic concurrency (async, version-checked)
+   *   6. Build the receipt
+   *
+   * DETERMINISTIC: The calculation (steps 2-3) is pure — same input → same output.
+   * The only non-deterministic part is the commit (which may fail due to OCC).
+   *
+   * ASYNC: The state store is async (supports persistent backends).
    */
   async executeTransaction(transaction: ProtocolTransaction): Promise<ProtocolExecutionResult> {
-    return this.deps.executor.execute(transaction)
+    // 1. Load the current state (async).
+    const beforeState = await this.deps.stateStore.getState()
+
+    // 2-3. Calculate the transition (pure — no store mutation).
+    const calc = this.deps.executor.apply(transaction, beforeState)
+
+    if (!calc.valid) {
+      // Validation failed — state unchanged.
+      return {
+        success: false,
+        resultingState: beforeState,
+        receipt: {
+          transactionId: transaction.id,
+          beforeStateHash: beforeState.hash,
+          afterStateHash: beforeState.hash, // unchanged
+          executedAt: transaction.submittedAt, // deterministic
+          executor: 'protocol-runtime',
+        },
+        error: calc.error,
+      }
+    }
+
+    // 4. Stage the calculated entries on the store.
+    // Clear any previous staged changes, then apply the calculated entries.
+    this.deps.stateStore.rollback()
+    for (const [key, value] of calc.newEntries) {
+      // Only stage keys that differ from the current state.
+      const currentValue = beforeState.entries.get(key)
+      if (currentValue !== value) {
+        if (value === undefined) {
+          this.deps.stateStore.delete(key)
+        } else {
+          this.deps.stateStore.put(key, value)
+        }
+      }
+    }
+
+    // 5. Commit with optimistic concurrency (async, version-checked).
+    try {
+      const afterState = await this.deps.stateStore.commit(beforeState.version, transaction.id)
+
+      // 6. Build the receipt.
+      const receipt: ProtocolReceipt = {
+        transactionId: transaction.id,
+        beforeStateHash: beforeState.hash,
+        afterStateHash: afterState.hash,
+        executedAt: transaction.submittedAt, // deterministic
+        executor: 'protocol-runtime',
+      }
+
+      return {
+        success: true,
+        resultingState: afterState,
+        receipt,
+      }
+    } catch (err) {
+      // StaleVersionError — another transaction committed first.
+      if (err instanceof StaleVersionError) {
+        const currentState = await this.deps.stateStore.getState()
+        return {
+          success: false,
+          resultingState: currentState,
+          receipt: {
+            transactionId: transaction.id,
+            beforeStateHash: beforeState.hash,
+            afterStateHash: currentState.hash,
+            executedAt: transaction.submittedAt,
+            executor: 'protocol-runtime',
+          },
+          error: `Stale version: another transaction committed first (expected ${err.expectedVersion}, actual ${err.actualVersion})`,
+        }
+      }
+      throw err
+    }
   }
 
   /**

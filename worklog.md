@@ -2656,3 +2656,36 @@ Stage Summary:
 - Deterministic hash is preserved across persistence (same state → same hash, regardless of store instance).
 - Historical snapshots are retrievable by version (deterministic replay).
 - Phase 9B is complete. Phase 9C (minimal validator/consensus reference) is the next step.
+
+---
+Task ID: Phase-9B.1-Transition-Journal-And-Executor-Purity
+Agent: orchestrator
+Task: Phase 9B.1 — adversarial review of Phase 9B + transition journal. Fix the executor owning persistence (issue #3 from the audit). Add ProtocolTransition journal model. Wire it into the commit path atomically.
+
+Work Log:
+- ADVERSARIAL AUDIT (5 checklist items):
+  1. Determinism: ✅ PASS — no Date.now() in executor, submittedAt used for executedAt, canonical JSON (sorted keys) identical in both stores.
+  2. OCC transaction safety: ✅ PASS — P2002 correctly caught → StaleVersionError, DB unique constraint is the real guard, application-level check is a fast-path.
+  3. Executor does not own persistence: ❌ FIXED — executor was calling stateStore.commit() directly. Now the executor is a PURE CALCULATOR (validate + apply), and the runtime coordinates load → validate → apply → stage → commit → receipt.
+  4. Postgres model is protocol-generic: ✅ PASS — only networkVersionId, version, stateJson, stateHash, createdAt. No domain-specific columns.
+  5. Bootstrap ownership: ✅ PASS — runtime does not construct stores; bootstrap constructs + injects.
+- FIX #3 — EXECUTOR IS NOW A PURE CALCULATOR:
+  - Removed the stateStore from the executor constructor. The executor no longer takes or imports ProtocolStateStore.
+  - Added `apply(transaction, state)` method — pure calculation that returns new entries without touching the store.
+  - The `execute()` method is deprecated — it now takes (transaction, state) and returns a calculation result without committing.
+  - The ProtocolRuntime.executeTransaction() now coordinates the full flow: load state → executor.apply (pure) → stage calculated entries → store.commit (async, version-checked) → build receipt.
+  - Architecture tests verify: executor source does NOT import ProtocolStateStore, runtime calls executor.apply + stateStore.commit (not executor.execute).
+- TRANSITION JOURNAL (ProtocolTransition model):
+  - Added ProtocolTransition Prisma model: id, networkVersionId, version, transactionHash, previousStateHash, resultStateHash, createdAt.
+  - @@unique([networkVersionId, version]) — one transition per version.
+  - @@index([networkVersionId]) + @@index([transactionHash]) + @@index([previousStateHash]).
+  - The commit method now takes an optional `transactionHash` parameter. If provided, the PostgresProtocolStateStore writes a ProtocolTransition entry atomically with the state snapshot (in the same Prisma $transaction).
+  - The ProtocolRuntime passes `transaction.id` as the transactionHash to commit.
+  - The in-memory store accepts (and ignores) the transactionHash parameter — same interface.
+  - DB-backed tests verify: successful commit with transactionHash records a ProtocolTransition, commit without transactionHash does NOT.
+- VERIFICATION: bun run lint clean. tsc: 106 errors (105 pre-existing + 1 bun:test in new test file). 151 non-DB tests pass. Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The executor is now a pure calculator — it does NOT own persistence. The runtime coordinates load → validate → calculate → stage → commit → receipt.
+- The transition journal records each state transition atomically with the snapshot. This creates an append-only journal that consensus can agree on.
+- Phase 9B.1 is complete. Phase 9C (minimal consensus/finality) is ready.

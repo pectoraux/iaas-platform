@@ -186,8 +186,17 @@ export interface ProtocolStateStore {
    *
    * ATOMIC: The commit is all-or-nothing. If it fails, the state is
    * unchanged and staged changes are discarded.
+   *
+   * TRANSITION JOURNAL (Phase 9B.1): If `transactionHash` is provided,
+   * persistent implementations record a ProtocolTransition entry atomically
+   * with the state snapshot. This creates an append-only journal of state
+   * transitions that consensus can agree on.
+   *
+   * @param expectedVersion The version the caller read (for OCC).
+   * @param transactionHash Optional hash of the transaction that produced
+   *   this transition (for the transition journal).
    */
-  commit(expectedVersion: number): Promise<ProtocolStateSnapshot>
+  commit(expectedVersion: number, transactionHash?: string): Promise<ProtocolStateSnapshot>
 
   /** Rollback staged changes (discard without committing). */
   rollback(): void
@@ -204,34 +213,40 @@ export interface ProtocolStateStore {
  * A deterministic transaction executor.
  *
  * THE CRITICAL INVARIANT:
- *   Given the same state + transaction, execution produces the same result.
+ *   Given the same state + transaction, the calculation is identical.
  *
- * Phase 9B: The executor is ASYNC (the state store is async). The executor:
- *   1. Reads the current state (async)
- *   2. Validates the transaction (signature, nonce, domain rules)
- *   3. Applies the transaction to the state (staged)
- *   4. Commits with optimistic concurrency (async, version-checked)
- *   5. Returns the execution result + receipt
+ * Phase 9B.1: The executor is a PURE CALCULATOR. It does NOT own persistence
+ * — it does not read from or commit to the state store. The executor:
+ *   1. validate(transaction, state) — checks signature, nonce, domain rules
+ *   2. apply(transaction, state) — calculates the new entries (pure)
  *
- * If validation fails, the state is unchanged and the result has
- * success=false + an error message.
+ * The RUNTIME is responsible for:
+ *   - Loading state from the store (async)
+ *   - Calling executor.validate + executor.apply
+ *   - Staging the calculated entries on the store
+ *   - Committing with optimistic concurrency (async)
+ *   - Building the receipt
  *
- * If commit fails due to a stale version (another transaction committed
- * first), the result has success=false + a StaleVersionError message.
+ * This separation makes consensus integration easier: the consensus engine
+ * can use the executor to calculate transitions without committing, then
+ * order them, then commit in order.
  */
 export interface ProtocolTransactionExecutor {
   /**
-   * Validate a transaction against the current state WITHOUT executing it.
+   * Validate a transaction against the given state WITHOUT executing it.
+   * PURE: does not mutate the state or the store.
    * Returns null if valid, or an error message if invalid.
    */
   validate(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): string | null
 
   /**
-   * Execute a transaction against the current state.
-   * If validation fails, the state is unchanged.
-   * If execution succeeds, the state is committed (optimistic concurrency).
+   * Calculate the state transition for a transaction.
+   * PURE: does not mutate the store or the input state.
+   * Returns the new entries that would result from applying the transaction.
+   *
+   * If the transaction is invalid, returns valid=false + error.
    */
-  execute(transaction: ProtocolTransaction): Promise<ProtocolExecutionResult>
+  apply(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): { valid: boolean; newEntries: Map<string, string>; error?: string }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,18 +1,22 @@
 // =============================================================================
-// Kernel: Deterministic Transaction Executor (Phase 9B)
+// Kernel: Deterministic Transaction Executor (Phase 9B.1)
 // =============================================================================
-// A deterministic transaction executor that validates + executes transactions
-// against the protocol state store.
+// A deterministic transaction executor that CALCULATES state transitions.
+//
+// Phase 9B.1: The executor is now a PURE CALCULATOR. It does NOT own
+// persistence — it does not read from or commit to the state store.
+// The executor takes a state snapshot + transaction, validates, and returns
+// the resulting entries. The RUNTIME coordinates the load → validate →
+// calculate → stage → commit → receipt flow.
+//
+// This separation makes consensus integration easier: the consensus engine
+// can use the executor to calculate transitions without committing, then
+// order them, then commit in order.
 //
 // THE CRITICAL INVARIANT:
-//   Given the same state + transaction, execution produces the same result.
+//   Given the same state + transaction, the calculation is identical.
 //
-// Phase 9B: The executor is now ASYNC (the state store is async). The
-// commit is version-checked (optimistic concurrency). If another transaction
-// committed first, the commit throws StaleVersionError and the result has
-// success=false.
-//
-// Phase 9A reference state-transition protocol:
+// Reference state-transition protocol:
 //   - 'transfer' transactions move a balance from one account to another
 //   - 'mint' transactions create balance (for testing/initialization)
 //   - State keys: 'balance:<account>' → string (decimal)
@@ -24,41 +28,45 @@ import type {
   ProtocolExecutionResult,
   ProtocolReceipt,
   ProtocolStateSnapshot,
-  ProtocolStateStore,
   ProtocolTransactionExecutor,
 } from './types'
-import { StaleVersionError } from './types'
+
+/**
+ * The result of calculating a transaction's state transition.
+ * This is a PURE value — no side effects, no store mutation.
+ */
+export interface TransitionCalculation {
+  /** Whether the transaction is valid. */
+  valid: boolean
+  /** The new entries after applying the transaction (only if valid). */
+  newEntries: Map<string, string>
+  /** Error message if invalid. */
+  error?: string
+}
 
 /**
  * A deterministic transaction executor for the reference state-transition
  * protocol.
  *
- * Supports:
- *   - 'transfer': move balance from sender to recipient
- *   - 'mint': create balance (testing only — would require governance in production)
+ * Phase 9B.1: The executor is a PURE CALCULATOR. It does NOT read from or
+ * commit to the state store. All methods are synchronous (no I/O).
  *
- * Validation rules:
- *   - Signature must be non-empty (simplified — real implementation would verify)
- *   - Nonce must match the expected nonce for the sender
- *   - 'transfer': sender must have sufficient balance
+ * The executor:
+ *   1. validate(transaction, state) — checks signature, nonce, domain rules
+ *   2. apply(transaction, state) — calculates the new entries (pure)
+ *
+ * The RUNTIME is responsible for:
+ *   - Loading state from the store (async)
+ *   - Calling executor.validate + executor.apply
+ *   - Staging the calculated entries on the store
+ *   - Committing with optimistic concurrency (async)
+ *   - Building the receipt
  *
  * Determinism:
- *   The executor does NOT use Date.now() or Math.random() during execution.
- *   The receipt's executedAt is set from the transaction's submittedAt
- *   (not the current time) to ensure determinism.
- *
- * Optimistic concurrency:
- *   The executor reads the current state, stages changes, then commits with
- *   the expected version. If another transaction committed first, the commit
- *   throws StaleVersionError and the result has success=false.
+ *   The executor does NOT use Date.now() or Math.random().
+ *   All calculations are pure functions of (state, transaction).
  */
 export class DeterministicTransactionExecutor implements ProtocolTransactionExecutor {
-  private readonly stateStore: ProtocolStateStore
-
-  constructor(stateStore: ProtocolStateStore) {
-    this.stateStore = stateStore
-  }
-
   validate(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): string | null {
     // Signature check (simplified — real implementation would verify the signature).
     if (!transaction.signature) {
@@ -82,66 +90,73 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
     }
   }
 
-  async execute(transaction: ProtocolTransaction): Promise<ProtocolExecutionResult> {
-    // 1. Read the current state (async).
-    const beforeState = await this.stateStore.getState()
-
-    // 2. Validate the transaction.
-    const validationError = this.validate(transaction, beforeState)
-
+  /**
+   * Calculate the state transition for a transaction.
+   * PURE: does not mutate the store or the input state.
+   * Returns the new entries that would result from applying the transaction.
+   *
+   * If the transaction is invalid, returns valid=false + error.
+   */
+  apply(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): TransitionCalculation {
+    const validationError = this.validate(transaction, state)
     if (validationError) {
+      return { valid: false, newEntries: new Map(state.entries), error: validationError }
+    }
+
+    // Calculate the new entries (pure — does not mutate the input state).
+    const newEntries = new Map(state.entries)
+    this.applyTransactionToEntries(transaction, newEntries)
+
+    return { valid: true, newEntries }
+  }
+
+  /**
+   * Execute a transaction against the current state.
+   *
+   * Phase 9B.1: This method is DEPRECATED. The runtime should use
+   * validate() + apply() + coordinate the commit itself. This method
+   * is kept for backward compatibility with Phase 9A tests but delegates
+   * to the same pure calculation.
+   *
+   * @deprecated Use ProtocolRuntime.executeTransaction() instead.
+   */
+  async execute(
+    transaction: ProtocolTransaction,
+    state: ProtocolStateSnapshot,
+  ): Promise<ProtocolExecutionResult> {
+    const calc = this.apply(transaction, state)
+
+    if (!calc.valid) {
       return {
         success: false,
-        resultingState: beforeState,
+        resultingState: state,
         receipt: {
           transactionId: transaction.id,
-          beforeStateHash: beforeState.hash,
-          afterStateHash: beforeState.hash, // unchanged
+          beforeStateHash: state.hash,
+          afterStateHash: state.hash, // unchanged
           executedAt: transaction.submittedAt, // deterministic
           executor: 'deterministic-executor',
         },
-        error: validationError,
+        error: calc.error,
       }
     }
 
-    // 3. Apply the transaction to the staged state.
-    this.applyTransaction(transaction, beforeState)
-
-    // 4. Commit with optimistic concurrency (async, version-checked).
-    try {
-      const afterState = await this.stateStore.commit(beforeState.version)
-
-      const receipt: ProtocolReceipt = {
+    // NOTE: This method does NOT commit — the runtime must stage + commit.
+    // This is a pure calculation result.
+    return {
+      success: true,
+      resultingState: {
+        version: state.version + 1,
+        hash: this.computeHash(calc.newEntries),
+        entries: calc.newEntries,
+      },
+      receipt: {
         transactionId: transaction.id,
-        beforeStateHash: beforeState.hash,
-        afterStateHash: afterState.hash,
+        beforeStateHash: state.hash,
+        afterStateHash: this.computeHash(calc.newEntries),
         executedAt: transaction.submittedAt, // deterministic
         executor: 'deterministic-executor',
-      }
-
-      return {
-        success: true,
-        resultingState: afterState,
-        receipt,
-      }
-    } catch (err) {
-      // StaleVersionError — another transaction committed first.
-      if (err instanceof StaleVersionError) {
-        const currentState = await this.stateStore.getState()
-        return {
-          success: false,
-          resultingState: currentState,
-          receipt: {
-            transactionId: transaction.id,
-            beforeStateHash: beforeState.hash,
-            afterStateHash: currentState.hash,
-            executedAt: transaction.submittedAt,
-            executor: 'deterministic-executor',
-          },
-          error: `Stale version: another transaction committed first (expected ${err.expectedVersion}, actual ${err.actualVersion})`,
-        }
-      }
-      throw err
+      },
     }
   }
 
@@ -184,7 +199,11 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
     return null
   }
 
-  private applyTransaction(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): void {
+  /**
+   * Apply a transaction to a mutable entries map (pure mutation of the
+   * passed-in map — does not touch any store).
+   */
+  private applyTransactionToEntries(transaction: ProtocolTransaction, entries: Map<string, string>): void {
     const sender = transaction.sender
     const nonceKey = `nonce:${sender}`
 
@@ -193,29 +212,41 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
         const { from, to, amount } = transaction.payload.data
         const fromKey = `balance:${from}`
         const toKey = `balance:${to}`
-        const fromBalance = state.entries.get(fromKey)
-        const toBalance = state.entries.get(toKey)
+        const fromBalance = entries.get(fromKey)
+        const toBalance = entries.get(toKey)
         const currentFrom = fromBalance ? parseFloat(fromBalance) : 0
         const currentTo = toBalance ? parseFloat(toBalance) : 0
         const transferAmount = parseFloat(amount as string)
 
-        this.stateStore.put(fromKey, (currentFrom - transferAmount).toString())
-        this.stateStore.put(toKey, (currentTo + transferAmount).toString())
-        this.stateStore.put(nonceKey, (transaction.nonce + 1).toString())
+        entries.set(fromKey, (currentFrom - transferAmount).toString())
+        entries.set(toKey, (currentTo + transferAmount).toString())
+        entries.set(nonceKey, (transaction.nonce + 1).toString())
         break
       }
       case 'mint': {
         const { to, amount } = transaction.payload.data
         const toKey = `balance:${to}`
-        const toBalance = state.entries.get(toKey)
+        const toBalance = entries.get(toKey)
         const currentTo = toBalance ? parseFloat(toBalance) : 0
         const mintAmount = parseFloat(amount as string)
 
-        this.stateStore.put(toKey, (currentTo + mintAmount).toString())
-        this.stateStore.put(nonceKey, (transaction.nonce + 1).toString())
+        entries.set(toKey, (currentTo + mintAmount).toString())
+        entries.set(nonceKey, (transaction.nonce + 1).toString())
         break
       }
     }
+  }
+
+  /**
+   * Compute a deterministic SHA-256 hash from entries.
+   */
+  private computeHash(entries: Map<string, string>): string {
+    const sortedKeys = Array.from(entries.keys()).sort()
+    const canonical: Record<string, string> = {}
+    for (const key of sortedKeys) {
+      canonical[key] = entries.get(key)!
+    }
+    return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
   }
 }
 

@@ -94,7 +94,7 @@ export function initializeBootstrap(): void {
   //    networkVersionId. Tests construct their own store with the
   //    correct networkVersionId.
   const protocolStateStore = new InMemoryProtocolStateStore('bootstrap-protocol-store')
-  const protocolExecutor = new DeterministicTransactionExecutor(protocolStateStore)
+  const protocolExecutor = new DeterministicTransactionExecutor()
   const protocolRuntime = new ProtocolRuntime({
     stateStore: protocolStateStore,
     executor: protocolExecutor,

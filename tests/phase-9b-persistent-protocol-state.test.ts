@@ -80,7 +80,7 @@ function createPersistentRuntime(): ProtocolRuntime {
   const stateStore = new PostgresProtocolStateStore(networkVersionId)
   const deps: ProtocolRuntimeDeps = {
     stateStore,
-    executor: new DeterministicTransactionExecutor(stateStore),
+    executor: new DeterministicTransactionExecutor(),
     validatorRegistry: new StubValidatorRegistry(),
     consensusEngine: new StubConsensusEngine(),
   }
@@ -144,18 +144,18 @@ describe('Phase 9B: versioning', () => {
 describe('Phase 9B: atomicity', () => {
   it('failed transaction (insufficient balance) leaves state unchanged', async () => {
     const store = new PostgresProtocolStateStore(networkVersionId)
-    const executor = new DeterministicTransactionExecutor(store)
+    const executor = new DeterministicTransactionExecutor()
 
     const stateBefore = await store.getState()
 
-    // Transfer from an account with 0 balance — should fail.
+    // Transfer from an account with 0 balance — should fail (pure calculation).
     const tx = createTransaction('nobody', 0, 'transfer', { from: 'nobody', to: 'alice', amount: '10' })
-    const result = await executor.execute(tx)
+    const calc = executor.apply(tx, stateBefore)
 
-    expect(result.success).toBe(false)
-    expect(result.error).toMatch(/Insufficient balance/)
+    expect(calc.valid).toBe(false)
+    expect(calc.error).toMatch(/Insufficient balance/)
 
-    // State unchanged.
+    // State unchanged — the executor is pure and didn't touch the store.
     const stateAfter = await store.getState()
     expect(stateAfter.version).toBe(stateBefore.version)
     expect(stateAfter.hash).toBe(stateBefore.hash)
@@ -269,5 +269,51 @@ describe('Phase 9B: isolation', () => {
     // which scan protocol/*.ts for infrastructure imports. The postgres-state-store.ts
     // is in the same directory and follows the same isolation rules.
     expect(true).toBe(true) // Phase 9A architecture tests cover this
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 9B.1: Transition Journal
+// ---------------------------------------------------------------------------
+
+describe('Phase 9B.1: transition journal', () => {
+  it('successful commit with transactionHash records a ProtocolTransition', async () => {
+    const runtime = createPersistentRuntime()
+    const tx = createTransaction('journal-test', 0, 'mint', { to: 'journal-test', amount: '1' })
+
+    const result = await runtime.executeTransaction(tx)
+    expect(result.success).toBe(true)
+
+    // Verify the transition journal entry was recorded.
+    const transition = await db.protocolTransition.findFirst({
+      where: {
+        networkVersionId,
+        transactionHash: tx.id,
+      },
+      orderBy: { version: 'desc' },
+    })
+
+    expect(transition).toBeTruthy()
+    expect(transition!.transactionHash).toBe(tx.id)
+    expect(transition!.previousStateHash).toBe(result.receipt.beforeStateHash)
+    expect(transition!.resultStateHash).toBe(result.receipt.afterStateHash)
+    expect(transition!.version).toBe(result.resultingState.version)
+  })
+
+  it('commit without transactionHash does NOT record a transition', async () => {
+    const store = new PostgresProtocolStateStore(networkVersionId)
+    const state = await store.getState()
+
+    store.put('no-journal-test', 'value')
+    // Commit WITHOUT a transactionHash — no transition should be recorded.
+    await store.commit(state.version)
+
+    const transition = await db.protocolTransition.findFirst({
+      where: {
+        networkVersionId,
+        transactionHash: 'none',
+      },
+    })
+    expect(transition).toBeNull()
   })
 })

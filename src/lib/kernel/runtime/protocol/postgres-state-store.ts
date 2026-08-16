@@ -79,7 +79,7 @@ export class PostgresProtocolStateStore implements ProtocolStateStore {
     this.stagedEntries.set(key, null)
   }
 
-  async commit(expectedVersion: number): Promise<ProtocolStateSnapshot> {
+  async commit(expectedVersion: number, transactionHash?: string): Promise<ProtocolStateSnapshot> {
     const currentState = await this.getState()
 
     // Optimistic concurrency check (application-level).
@@ -100,19 +100,39 @@ export class PostgresProtocolStateStore implements ProtocolStateStore {
     const newVersion = expectedVersion + 1
     const stateJson = this.serializeEntries(newEntries)
     const stateHash = this.computeHash(newEntries)
+    const previousStateHash = currentState.hash
 
     // Insert with optimistic concurrency (database-level).
     // The UNIQUE(networkVersionId, version) constraint ensures only one
     // transaction can commit to this version. If another transaction
     // committed first, the insert fails with a unique constraint violation.
+    //
+    // Phase 9B.1: If transactionHash is provided, also write a ProtocolTransition
+    // journal entry atomically with the state snapshot. This creates an
+    // append-only journal of state transitions that consensus can agree on.
     try {
-      await db.protocolStateSnapshot.create({
-        data: {
-          networkVersionId: this.networkVersionId,
-          version: newVersion,
-          stateJson,
-          stateHash,
-        },
+      await db.$transaction(async (tx) => {
+        await tx.protocolStateSnapshot.create({
+          data: {
+            networkVersionId: this.networkVersionId,
+            version: newVersion,
+            stateJson,
+            stateHash,
+          },
+        })
+
+        // Record the transition journal entry (if provenance is provided).
+        if (transactionHash) {
+          await tx.protocolTransition.create({
+            data: {
+              networkVersionId: this.networkVersionId,
+              version: newVersion,
+              transactionHash,
+              previousStateHash,
+              resultStateHash: stateHash,
+            },
+          })
+        }
       })
     } catch (err) {
       // Check for unique constraint violation (P2002 in Prisma).
