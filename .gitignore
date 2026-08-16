@@ -52,3 +52,10 @@ prompt
 server.log
 # Skills directory
 /skills/tool-results/
+
+# tool debug output (never commit)
+/tool-results/
+
+# local SQLite database (binary, changes every test run)
+*.db
+/db/*.db

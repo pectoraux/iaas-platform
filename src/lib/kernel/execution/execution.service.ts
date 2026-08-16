@@ -25,6 +25,13 @@ import { Prisma } from '@prisma/client'
 import { NotFoundError, ValidationError } from '@/lib/domain/errors'
 
 // ---------------------------------------------------------------------------
+// Type alias: accepts either the full PrismaClient or a TransactionClient.
+// ---------------------------------------------------------------------------
+
+/** A client that can read/write Execution + ExecutionAssignment rows. */
+type ExecutionClient = Prisma.TransactionClient | typeof db
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -215,7 +222,7 @@ export async function findExecutionBySource(
 }
 
 // ---------------------------------------------------------------------------
-// Finalize execution if all assignments are terminal (Phase 4.2)
+// Finalize execution if all assignments are terminal (Phase 4.2 hardened)
 // ---------------------------------------------------------------------------
 
 /**
@@ -224,37 +231,70 @@ export async function findExecutionBySource(
  * Terminal = the assignment has reached a state where no further execution
  * work will occur. The execution result (success or failure) is known.
  *
- * 'reconciliation_required' is NOT included here — it's an economic recovery
- * state, not an execution state. The generic execution layer treats
- * reconciliation_required assignments as 'failed' for execution purposes
- * (the work did not complete successfully).
+ * 'reconciliation_required' is NOT a generic ExecutionAssignment state — it
+ * is a VPP-specific economic-recovery state on VppDispatchAssignment. The
+ * generic ExecutionAssignment that a VPP assignment wraps is set to 'failed'
+ * when the VPP assignment enters 'reconciliation_required'. So the generic
+ * layer only ever sees 'completed' or 'failed' as terminal assignment states.
  */
-const EXECUTION_TERMINAL_STATES = ['completed', 'failed'] as const
+const EXECUTION_ASSIGNMENT_TERMINAL_STATES = ['completed', 'failed'] as const
 
 /**
- * Check if all assignments of an execution are terminal, and if so,
- * transition the parent Execution to its final state:
- *   - All completed → Execution completed
- *   - Any failed → Execution completed (execution finished, but with failures)
- *   - Mixed → Execution completed (execution finished)
+ * PARENT EXECUTION SEMANTICS (Phase 4.2 — explicit definition):
  *
- * The generic Execution lifecycle is: created → assigned → executing → completed
- * It does NOT track 'failed' as a parent state — an execution with failed
- * assignments is still 'completed' (the execution happened, some assignments
- * failed). The VPP layer tracks the richer commercial lifecycle.
+ * The generic Execution tracks the EXECUTION LIFECYCLE — "did the work
+ * execute?" — NOT the commercial outcome. Its status transitions are:
  *
- * This function is idempotent: if the Execution is already 'completed',
- * it's a no-op.
+ *     created → assigned → executing → completed
  *
- * @param tenantId    Tenant scope
- * @param executionId The Execution ID
- * @returns The updated Execution status, or null if no transition occurred
+ * `completed` means the execution lifecycle has ENDED: every assignment has
+ * reached a terminal state (completed or failed). It does NOT mean every
+ * assignment succeeded. An execution with failed assignments is still
+ * `completed` — the execution happened, some assignments failed. The
+ * per-assignment success/failure is recorded on ExecutionAssignment.status.
+ *
+ * The generic Execution does NOT carry VPP financial states. These live on
+ * VppDispatch (the VPP-specific wrapper):
+ *
+ *     VPP delivery_complete         → Execution completed
+ *     VPP buyer_settlement_pending  → Execution completed (already)
+ *     VPP reconciliation_required   → Execution completed (already)
+ *     VPP completed                 → Execution completed (already)
+ *
+ * VPP's `reconciliation_required` (an economic recovery state) maps to
+ * generic ExecutionAssignment.status = `failed` — the work did not complete
+ * successfully, and the generic layer does not model financial recovery.
+ *
+ * TRANSACTION-AWARE:
+ * This function accepts a `tx` (Prisma TransactionClient or the db client)
+ * as its first argument. The caller MUST pass the same transaction client
+ * that is performing the last assignment's terminal transition, so the
+ * parent finalization is atomic with the assignment transition:
+ *
+ *   - If the assignment transition commits → the parent finalization commits.
+ *   - If the assignment transition rolls back → both roll back.
+ *
+ * This guarantees there is never a partial state where an assignment is
+ * terminal but the parent Execution is stuck in `executing`.
+ *
+ * IDEMPOTENT:
+ * If the Execution is already `completed`, this is a no-op. Safe to call
+ * from multiple code paths (e.g., the atomic in-transition call + a
+ * defensive fallback in the vertical's finalization logic).
+ *
+ * @param tx          The Prisma transaction client (or db) to use for reads/writes.
+ * @param tenantId    Tenant scope.
+ * @param executionId The Execution ID.
+ * @returns The resulting Execution status (`'completed'`), or `null` if no
+ *          transition occurred (execution not found, no assignments, or
+ *          assignments not all terminal).
  */
 export async function finalizeExecutionIfTerminal(
+  tx: ExecutionClient,
   tenantId: string,
   executionId: string,
 ): Promise<string | null> {
-  const execution = await db.execution.findFirst({
+  const execution = await tx.execution.findFirst({
     where: { id: executionId, tenantId },
     include: {
       assignments: { select: { status: true } },
@@ -262,32 +302,37 @@ export async function finalizeExecutionIfTerminal(
   })
   if (!execution) return null
 
-  // Already in a terminal state — no-op.
-  if (execution.status === 'completed' || execution.status === 'failed') {
-    return execution.status
+  // Already completed — idempotent no-op. The generic Execution has only
+  // ONE terminal parent state: 'completed'. There is no 'failed' parent
+  // state (failed assignments still produce a 'completed' execution).
+  if (execution.status === 'completed') {
+    return 'completed'
   }
 
   const assignments = execution.assignments
   if (assignments.length === 0) return null
 
   // Check if ALL assignments are execution-terminal.
-  // VPP's 'reconciliation_required' maps to 'failed' for execution purposes.
-  const allTerminal = assignments.every((a) => {
-    if (EXECUTION_TERMINAL_STATES.includes(a.status as any)) return true
-    // VPP-specific: reconciliation_required means the execution didn't
-    // complete successfully. Map it to terminal for the generic layer.
-    if (a.status === 'reconciliation_required') return true
-    return false
-  })
+  // The generic layer only sees 'completed' or 'failed' (VPP's
+  // 'reconciliation_required' is mapped to 'failed' by the VPP service
+  // before this function is called). The defensive check below also
+  // treats 'reconciliation_required' as terminal in case a vertical
+  // forgets to map it.
+  const allTerminal = assignments.every((a) =>
+    EXECUTION_ASSIGNMENT_TERMINAL_STATES.includes(a.status as (typeof EXECUTION_ASSIGNMENT_TERMINAL_STATES)[number]) ||
+    a.status === 'reconciliation_required',
+  )
 
   if (!allTerminal) return null
 
-  // All assignments are terminal → finalize the execution.
-  // The generic execution is 'completed' regardless of whether individual
-  // assignments succeeded or failed. The execution *happened*; the
-  // vertical tracks success/failure at its layer.
-  await db.execution.updateMany({
-    where: { id: executionId, status: { notIn: ['completed', 'failed'] } },
+  // All assignments are terminal → finalize the parent Execution.
+  // CAS (compare-and-swap): only transition if not already 'completed'.
+  // This defends against concurrent finalization attempts — two callers
+  // racing to finalize will both pass the read check, but only one's
+  // updateMany will match (the other's WHERE clause won't match a row
+  // already at 'completed'). Both return 'completed' (idempotent).
+  await tx.execution.updateMany({
+    where: { id: executionId, status: { not: 'completed' } },
     data: { status: 'completed' },
   })
 

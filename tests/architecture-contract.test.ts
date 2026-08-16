@@ -209,8 +209,9 @@ describe('Architecture contract: VPP-Execution invariant', () => {
     const content = readFileSync(vppServicePath, 'utf-8')
 
     // The failAssignment function should update ExecutionAssignment → failed.
-    // Look for the pattern inside the failure handler.
-    expect(content).toMatch(/executionAssignment.*update.*status.*failed/)
+    // Use [\s\S]* (matches across newlines) because the .update() call and
+    // the status: 'failed' field are on separate lines.
+    expect(content).toMatch(/executionAssignment[\s\S]*update[\s\S]*status:\s*'failed'/)
   })
 
   it('kernel execution service has finalizeExecutionIfTerminal', () => {
@@ -218,5 +219,33 @@ describe('Architecture contract: VPP-Execution invariant', () => {
     const content = readFileSync(execServicePath, 'utf-8')
 
     expect(content).toMatch(/export async function finalizeExecutionIfTerminal/)
+  })
+
+  it('finalizeExecutionIfTerminal is transaction-aware (accepts tx as first param)', () => {
+    const execServicePath = join(process.cwd(), 'src', 'lib', 'kernel', 'execution', 'execution.service.ts')
+    const content = readFileSync(execServicePath, 'utf-8')
+
+    // The function signature must accept a transaction client as the first
+    // argument, enabling atomic finalization with the assignment transition.
+    expect(content).toMatch(/finalizeExecutionIfTerminal\(\s*tx/)
+    // The VPP service must pass `tx` (not just tenantId) when calling it
+    // inside a transaction.
+    const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
+    const vppContent = readFileSync(vppServicePath, 'utf-8')
+    expect(vppContent).toMatch(/finalizeExecutionIfTerminal\(tx,/)
+  })
+
+  it('parent Execution does not carry VPP financial states', () => {
+    const execServicePath = join(process.cwd(), 'src', 'lib', 'kernel', 'execution', 'execution.service.ts')
+    const content = readFileSync(execServicePath, 'utf-8')
+
+    // The generic Execution service must NEVER set Execution.status to a
+    // VPP financial state. These live on VppDispatch, not Execution.
+    // Check that no code assigns these as status VALUES (ignore comments).
+    expect(content).not.toMatch(/status:\s*'(delivery_complete|buyer_settlement_pending|reconciliation_required)'/)
+    // The only terminal parent status WRITTEN is 'completed'.
+    expect(content).toMatch(/data:\s*\{\s*status:\s*'completed'\s*\}/)
+    // The semantics doc must state 'completed' = lifecycle ended.
+    expect(content).toMatch(/ONE terminal parent state/)
   })
 })

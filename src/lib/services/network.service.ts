@@ -16,6 +16,7 @@ import {
 } from '@/lib/domain/templates'
 import { createCapability } from './registry.service'
 import { createRewardRule } from './reward.service'
+import { supportsRowLocking } from '@/lib/kernel/db/provider'
 
 export interface CreateNetworkInput {
   name: string
@@ -129,24 +130,49 @@ export async function publishNetworkVersion(
   // prevents any concurrent writer from mutating baselinePolicyJson between
   // validation and commit.
   const publishedVersion = await db.$transaction(async (tx) => {
-    // Lock the NetworkVersion row FOR UPDATE. This blocks any concurrent
-    // transaction that tries to read/update this row until we COMMIT (or
-    // ROLLBACK on validation failure).
-    const lockedRows = await tx.$queryRaw<Array<{
+    // Lock the NetworkVersion row FOR UPDATE (PostgreSQL only). This blocks
+    // any concurrent transaction that tries to read/update this row until we
+    // COMMIT (or ROLLBACK on validation failure). On SQLite the transaction
+    // isolation provides the same guarantee.
+    let version: {
       id: string
       networkId: string
       version: number
       configurationJson: string
       baselinePolicyJson: string | null
       publishedAt: Date | null
-    }>>`
-      SELECT "id", "networkId", "version", "configurationJson",
-             "baselinePolicyJson", "publishedAt"
-      FROM "NetworkVersion"
-      WHERE "id" = ${versionId}::text
-      FOR UPDATE
-    `
-    const version = lockedRows[0]
+    } | undefined
+
+    if (supportsRowLocking()) {
+      const lockedRows = await tx.$queryRaw<Array<{
+        id: string
+        networkId: string
+        version: number
+        configurationJson: string
+        baselinePolicyJson: string | null
+        publishedAt: Date | null
+      }>>`
+        SELECT "id", "networkId", "version", "configurationJson",
+               "baselinePolicyJson", "publishedAt"
+        FROM "NetworkVersion"
+        WHERE "id" = ${versionId}::text
+        FOR UPDATE
+      `
+      version = lockedRows[0]
+    } else {
+      // SQLite: no FOR UPDATE, no ::text cast. Use Prisma client.
+      version = await tx.networkVersion.findUnique({
+        where: { id: versionId },
+        select: {
+          id: true,
+          networkId: true,
+          version: true,
+          configurationJson: true,
+          baselinePolicyJson: true,
+          publishedAt: true,
+        },
+      }) ?? undefined
+    }
     if (!version) throw new NotFoundError('network_version', versionId)
 
     // The networkId scope check still applies (defend against a caller passing

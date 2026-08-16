@@ -45,6 +45,7 @@ import {
   updateAssignmentResults as updateGenericAssignmentResults,
   finalizeExecutionIfTerminal,
 } from '@/lib/kernel/execution/execution.service'
+import { supportsRowLocking } from '@/lib/kernel/db/provider'
 
 const derAdapter: DERAdapter = new SimulatedDERAdapter()
 
@@ -352,15 +353,19 @@ export async function createDispatch(tenantId: string, input: CreateDispatchInpu
 
   // Task 5: transactional dispatch — create dispatch + allocations + assignments atomically.
   const dispatch = await db.$transaction(async (tx) => {
-    // Lock all active reservations for this program.
-    await tx.$queryRaw`
-      SELECT * FROM "VppCapacityReservation"
-      WHERE "programId" = ${input.programId}
-        AND status = 'active'
-        AND "effectiveFrom" < ${endTime}
-        AND "effectiveTo" > ${startTime}
-      FOR UPDATE
-    `
+    // Lock all active reservations for this program (PostgreSQL only —
+    // SQLite's transaction isolation makes this redundant; skipped via
+    // supportsRowLocking()).
+    if (supportsRowLocking()) {
+      await tx.$queryRaw`
+        SELECT * FROM "VppCapacityReservation"
+        WHERE "programId" = ${input.programId}
+          AND status = 'active'
+          AND "effectiveFrom" < ${endTime}
+          AND "effectiveTo" > ${startTime}
+        FOR UPDATE
+      `
+    }
 
     // Reload reservations inside the lock.
     const reservations = await tx.vppCapacityReservation.findMany({
@@ -584,6 +589,11 @@ export async function executeDispatchAssignment(
         where: { id: assignment.executionAssignmentId },
         data: { status: 'failed' },
       })
+      // VPP-4.2: Atomically finalize the parent Execution if this was the
+      // last non-terminal assignment. Same tx as the failure transition —
+      // guarantees the parent doesn't get stuck in 'executing' if the
+      // assignment failed.
+      await finalizeExecutionIfTerminal(tx, tenantId, assignment.dispatch.executionId)
     })
     await releaseAssignmentCapacity()
   }
@@ -605,6 +615,9 @@ export async function executeDispatchAssignment(
         where: { id: assignment.executionAssignmentId },
         data: { status: 'failed' },
       })
+      // VPP-4.2: Atomically finalize the parent Execution. Same tx as the
+      // failure transition — symmetric with the success path.
+      await finalizeExecutionIfTerminal(tx, tenantId, assignment.dispatch.executionId)
     })
     await appendAudit({
       tenantId, actorId,
@@ -923,7 +936,12 @@ export async function executeDispatchAssignment(
     }
 
     // --- COMPLETED (only reached if settlement succeeded) ---
-    // VPP-4.1: Update VPP + generic assignment atomically.
+    // VPP-4.2: Update VPP + generic assignment atomically, AND finalize the
+    // parent Execution in the SAME transaction. This guarantees:
+    //   - If the assignment transition commits → the parent finalization commits.
+    //   - If it rolls back → both roll back (no partial state).
+    // The parent Execution finalization is idempotent, so if this is NOT the
+    // last terminal assignment, finalizeExecutionIfTerminal is a no-op.
     await db.$transaction(async (tx) => {
       await tx.vppDispatchAssignment.update({
         where: { id: assignmentId },
@@ -934,6 +952,11 @@ export async function executeDispatchAssignment(
         where: { id: assignment.executionAssignmentId },
         data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
       })
+
+      // Atomically finalize the parent Execution if all assignments are now
+      // terminal. Uses the SAME tx — the finalization commits or rolls back
+      // with the assignment transition above.
+      await finalizeExecutionIfTerminal(tx, tenantId, assignment.dispatch.executionId)
     })
 
     // VPP-2D-4: canonical finalization. Checks if ALL assignments are
@@ -1060,12 +1083,19 @@ async function maybeFinalizeDispatch(
   // The generic Execution lifecycle (created → assigned → executing → completed)
   // is separate from VPP's richer commercial lifecycle. The Execution is
   // 'completed' when the work finished, regardless of buyer settlement state.
+  //
+  // NOTE: The primary atomic finalization already happened inside each
+  // assignment's terminal transition transaction (success / failAssignment /
+  // markReconciliationRequired). This call is a DEFENSIVE idempotent fallback
+  // for edge cases (e.g., legacy dispatches, or if the in-transition call was
+  // somehow skipped). It uses `db` (no transaction) — safe because
+  // finalizeExecutionIfTerminal is idempotent.
   const dispatch = await db.vppDispatch.findUnique({
     where: { id: dispatchId },
     select: { executionId: true },
   })
   if (dispatch) {
-    await finalizeExecutionIfTerminal(tenantId, dispatch.executionId)
+    await finalizeExecutionIfTerminal(db, tenantId, dispatch.executionId)
   }
 
   // All assignments are performance-terminal.

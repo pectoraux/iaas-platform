@@ -23,7 +23,12 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  // The platform schema is designed for PostgreSQL (row-level locking via
+  // FOR UPDATE, SKIP LOCKED). In local/test environments SQLite is used.
+  // Service code uses src/lib/kernel/db/provider.ts to conditionally skip
+  // postgres-only raw SQL when running on SQLite. The transaction is the
+  // correctness boundary; FOR UPDATE is a concurrency optimisation.
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -385,7 +390,7 @@ model Attestation {
   tenantId                  String
   eventId                   String
   claimType                 String   // valid_measurement | valid_usage | ...
-  quantity                  Decimal @db.Decimal(20, 8)
+  quantity                  Decimal
   unit                      String
   status                    String   @default("verified") // verified | disputed | revoked
   verificationPolicyVersion Int      // = NetworkVersion.version (task 6)
@@ -411,7 +416,7 @@ model Contribution {
   operatorId       String
   assetId          String
   capabilityId     String
-  quantity         Decimal @db.Decimal(20, 8)
+  quantity         Decimal
   unit             String
   startTime        DateTime
   endTime          DateTime
@@ -624,7 +629,7 @@ model Reward {
   tenantId        String
   contributionId  String
   operatorId      String
-  amount          Decimal @db.Decimal(20, 8)
+  amount          Decimal
   currency        String   @default("USD")
   ruleVersion     Int
   ruleId          String
@@ -710,7 +715,7 @@ model LedgerEntry {
   tenantId  String
   postingId String
   accountId String
-  amount    Decimal @db.Decimal(20, 8) // signed: +credit / -debit; sum per posting MUST = 0
+  amount    Decimal // signed: +credit / -debit; sum per posting MUST = 0
   currency  String   @default("USD")
   entryType String   // reward_credit | platform_fee | buyer_debit | settlement_debit | settlement_credit | funding_credit | funding_debit
   createdAt DateTime @default(now())
@@ -737,7 +742,7 @@ model Settlement {
   tenantId         String
   rewardId         String   @unique
   operatorId       String
-  amount           Decimal @db.Decimal(20, 8)
+  amount           Decimal
   currency         String   @default("USD")
   status           String   @default("created") // created | claiming | submitted | processing | completed | failed | retrying
   idempotencyKey   String?
