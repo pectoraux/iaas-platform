@@ -1,0 +1,327 @@
+/**
+ * Phase 9A: Protocol Runtime Contracts — Tests
+ *
+ * These tests prove the protocol runtime boundary and deterministic
+ * execution contracts.
+ *
+ * Architecture tests:
+ *   - ProtocolRuntime does NOT import InfrastructureRuntime/adapter/VPP/compute
+ *   - ProtocolRuntime accepts ProtocolRuntimeDeps in constructor
+ *   - Protocol runtime directory has the expected contract files
+ *
+ * In-memory tests:
+ *   - Deterministic state store: same entries → same hash
+ *   - Deterministic executor: same state + transaction → same result
+ *   - ProtocolRuntime.executeTransaction works end-to-end
+ *   - runtimeKind='protocol' → ProtocolRuntime
+ *   - Invalid transactions are rejected (state unchanged)
+ *   - Nonce enforcement prevents replay
+ *
+ * Run: bun test tests/phase-9a-protocol-contracts.test.ts --timeout 30000
+ */
+import { describe, it, expect, beforeAll } from 'bun:test'
+import { readFileSync, readdirSync } from 'fs'
+import { join } from 'path'
+import { initializeBootstrap } from '../src/lib/bootstrap'
+import { resolveRuntime } from '../src/lib/kernel/runtime'
+import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
+import { InMemoryProtocolStateStore } from '../src/lib/kernel/runtime/protocol/state-store'
+import { DeterministicTransactionExecutor, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
+import { StubValidatorRegistry, StubConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
+import type { ProtocolTransaction, ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/types'
+import { getTemplate } from '../src/lib/domain/templates'
+
+beforeAll(() => {
+  initializeBootstrap()
+})
+
+// Helper: create a ProtocolRuntime with real deps for testing.
+function createProtocolRuntime(): ProtocolRuntime {
+  const stateStore = new InMemoryProtocolStateStore()
+  const deps: ProtocolRuntimeDeps = {
+    stateStore,
+    executor: new DeterministicTransactionExecutor(stateStore),
+    validatorRegistry: new StubValidatorRegistry(),
+    consensusEngine: new StubConsensusEngine(),
+  }
+  return new ProtocolRuntime(deps)
+}
+
+// Helper: create a signed protocol transaction.
+function createTransaction(
+  networkVersionId: string,
+  sender: string,
+  nonce: number,
+  payloadType: string,
+  data: Record<string, unknown>,
+): ProtocolTransaction {
+  const id = computeTransactionId(networkVersionId, sender, nonce, { type: payloadType, data })
+  return {
+    id,
+    networkVersionId,
+    sender,
+    nonce,
+    payload: { type: payloadType, data },
+    signature: 'test-signature',
+    submittedAt: new Date('2024-01-01T00:00:00Z'), // deterministic — not Date.now()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Architecture tests: ProtocolRuntime does NOT import infrastructure
+// ---------------------------------------------------------------------------
+
+describe('Phase 9A: architecture — protocol runtime isolation', () => {
+  const VPP_PATTERNS = [
+    /from\s+['"]\.\/infrastructure-runtime/,
+    /from\s+['"]\.\/adapter-registry/,
+    /from\s+['"]\.\.\/adapters\/infrastructure-adapter/,
+    /from\s+['"].*vpp/,
+    /from\s+['"].*compute-adapter/,
+    /from\s+['"].*compute\.service/,
+  ]
+
+  it('ProtocolRuntime does NOT import InfrastructureRuntime or adapters', () => {
+    const path = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol-runtime.ts')
+    const content = readFileSync(path, 'utf-8')
+    for (const pattern of VPP_PATTERNS) {
+      expect(content.match(pattern)).toBeNull()
+    }
+  })
+
+  it('protocol/types.ts does NOT import infrastructure concepts', () => {
+    const path = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol', 'types.ts')
+    const content = readFileSync(path, 'utf-8')
+    for (const pattern of VPP_PATTERNS) {
+      expect(content.match(pattern)).toBeNull()
+    }
+  })
+
+  it('protocol/state-store.ts does NOT import infrastructure concepts', () => {
+    const path = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol', 'state-store.ts')
+    const content = readFileSync(path, 'utf-8')
+    for (const pattern of VPP_PATTERNS) {
+      expect(content.match(pattern)).toBeNull()
+    }
+  })
+
+  it('protocol/executor.ts does NOT import infrastructure concepts', () => {
+    const path = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol', 'executor.ts')
+    const content = readFileSync(path, 'utf-8')
+    for (const pattern of VPP_PATTERNS) {
+      expect(content.match(pattern)).toBeNull()
+    }
+  })
+
+  it('ProtocolRuntime accepts ProtocolRuntimeDeps in constructor', () => {
+    const path = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol-runtime.ts')
+    const content = readFileSync(path, 'utf-8')
+    expect(content).toMatch(/constructor\(private readonly deps:\s*ProtocolRuntimeDeps\)/)
+  })
+
+  it('protocol directory has the expected contract files', () => {
+    const dir = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol')
+    const entries = readdirSync(dir)
+    expect(entries).toContain('types.ts')
+    expect(entries).toContain('state-store.ts')
+    expect(entries).toContain('executor.ts')
+    expect(entries).toContain('validator-consensus.ts')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// In-memory tests: deterministic state store
+// ---------------------------------------------------------------------------
+
+describe('Phase 9A: deterministic state store', () => {
+  it('same entries produce the same hash (determinism)', () => {
+    const store1 = new InMemoryProtocolStateStore({ alice: '100', bob: '50' })
+    const store2 = new InMemoryProtocolStateStore({ bob: '50', alice: '100' }) // different insertion order
+    expect(store1.getState().hash).toBe(store2.getState().hash)
+  })
+
+  it('different entries produce different hashes', () => {
+    const store1 = new InMemoryProtocolStateStore({ alice: '100' })
+    const store2 = new InMemoryProtocolStateStore({ alice: '101' })
+    expect(store1.getState().hash).not.toBe(store2.getState().hash)
+  })
+
+  it('put + commit produces a new versioned snapshot', () => {
+    const store = new InMemoryProtocolStateStore()
+    expect(store.getState().version).toBe(0)
+
+    store.put('alice', '100')
+    const snapshot = store.commit()
+    expect(snapshot.version).toBe(1)
+    expect(snapshot.entries.get('alice')).toBe('100')
+    expect(store.getState().version).toBe(1)
+  })
+
+  it('rollback discards staged changes', () => {
+    const store = new InMemoryProtocolStateStore({ alice: '100' })
+    store.put('alice', '200')
+    store.rollback()
+    expect(store.get('alice')).toBe('100') // unchanged
+    expect(store.getState().version).toBe(0) // no new version
+  })
+
+  it('getSnapshot retrieves historical versions', () => {
+    const store = new InMemoryProtocolStateStore()
+    store.put('v1', 'a')
+    store.commit()
+    store.put('v2', 'b')
+    store.commit()
+
+    expect(store.getSnapshot(0)?.entries.get('v1')).toBeUndefined()
+    expect(store.getSnapshot(1)?.entries.get('v1')).toBe('a')
+    expect(store.getSnapshot(2)?.entries.get('v2')).toBe('b')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// In-memory tests: deterministic executor
+// ---------------------------------------------------------------------------
+
+describe('Phase 9A: deterministic transaction executor', () => {
+  it('mint transaction creates balance', () => {
+    const store = new InMemoryProtocolStateStore()
+    const executor = new DeterministicTransactionExecutor(store)
+    const tx = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
+
+    const result = executor.execute(tx)
+    expect(result.success).toBe(true)
+    expect(result.resultingState.entries.get('balance:alice')).toBe('100')
+    expect(result.receipt.beforeStateHash).not.toBe(result.receipt.afterStateHash)
+  })
+
+  it('transfer transaction moves balance', () => {
+    const store = new InMemoryProtocolStateStore()
+    const executor = new DeterministicTransactionExecutor(store)
+
+    // Mint initial balance.
+    executor.execute(createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' }))
+
+    // Transfer 30 from alice to bob.
+    const transferTx = createTransaction('nv1', 'alice', 1, 'transfer', { from: 'alice', to: 'bob', amount: '30' })
+    const result = executor.execute(transferTx)
+
+    expect(result.success).toBe(true)
+    expect(result.resultingState.entries.get('balance:alice')).toBe('70')
+    expect(result.resultingState.entries.get('balance:bob')).toBe('30')
+  })
+
+  it('insufficient balance rejects the transaction (state unchanged)', () => {
+    const store = new InMemoryProtocolStateStore()
+    const executor = new DeterministicTransactionExecutor(store)
+
+    // Alice has 0 balance — transfer should fail.
+    const tx = createTransaction('nv1', 'alice', 0, 'transfer', { from: 'alice', to: 'bob', amount: '10' })
+    const result = executor.execute(tx)
+
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/Insufficient balance/)
+    // State unchanged.
+    expect(result.receipt.beforeStateHash).toBe(result.receipt.afterStateHash)
+  })
+
+  it('invalid nonce rejects the transaction (replay protection)', () => {
+    const store = new InMemoryProtocolStateStore()
+    const executor = new DeterministicTransactionExecutor(store)
+
+    // Mint with nonce 0.
+    executor.execute(createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' }))
+
+    // Try mint again with nonce 0 (replay) — should fail (expected nonce is 1).
+    const replayTx = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
+    const result = executor.execute(replayTx)
+
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/Invalid nonce/)
+  })
+
+  it('deterministic: same state + transaction → same result', () => {
+    // Execute the same transaction in two separate stores with the same initial state.
+    const store1 = new InMemoryProtocolStateStore()
+    const store2 = new InMemoryProtocolStateStore()
+    const executor1 = new DeterministicTransactionExecutor(store1)
+    const executor2 = new DeterministicTransactionExecutor(store2)
+
+    const tx = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
+
+    const result1 = executor1.execute(tx)
+    const result2 = executor2.execute(tx)
+
+    // Same state hash after execution.
+    expect(result1.resultingState.hash).toBe(result2.resultingState.hash)
+    // Same receipt (except the receipt is deterministic too).
+    expect(result1.receipt.afterStateHash).toBe(result2.receipt.afterStateHash)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// In-memory tests: ProtocolRuntime.executeTransaction
+// ---------------------------------------------------------------------------
+
+describe('Phase 9A: ProtocolRuntime.executeTransaction', () => {
+  it('runtime executes a transaction and returns a receipt', () => {
+    const runtime = createProtocolRuntime()
+    const tx = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
+
+    const result = runtime.executeTransaction(tx)
+    expect(result.success).toBe(true)
+    expect(result.resultingState.entries.get('balance:alice')).toBe('100')
+    expect(result.receipt.transactionId).toBe(tx.id)
+  })
+
+  it('runtime validates without executing', () => {
+    const runtime = createProtocolRuntime()
+    const validTx = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
+    expect(runtime.validateTransaction(validTx)).toBeNull()
+
+    const invalidTx = createTransaction('nv1', 'alice', 5, 'mint', { to: 'alice', amount: '100' })
+    expect(runtime.validateTransaction(invalidTx)).toMatch(/Invalid nonce/)
+  })
+
+  it('infrastructure-shaped methods still throw NotImplemented', async () => {
+    const runtime = createProtocolRuntime()
+    const mockTx = {} as any
+    await expect(
+      runtime.createExecution(mockTx, {
+        tenantId: 't1', networkId: 'n1', requestedQuantity: '1', requestedUnit: 'unit',
+        startTime: new Date(), endTime: new Date(), sourceType: 'test',
+      }),
+    ).rejects.toThrow(/not implemented/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Runtime resolution: runtimeKind='protocol' → ProtocolRuntime
+// ---------------------------------------------------------------------------
+
+describe('Phase 9A: runtime resolution', () => {
+  it('resolveRuntime(protocol) returns ProtocolRuntime', () => {
+    const runtime = resolveRuntime('protocol')
+    expect(runtime).toBeInstanceOf(ProtocolRuntime)
+    expect(runtime.kind).toBe('protocol')
+  })
+
+  it('ProtocolRuntime.executeTransaction is available on the resolved runtime', () => {
+    const runtime = resolveRuntime('protocol')
+    expect(runtime).toBeInstanceOf(ProtocolRuntime)
+    const protocolRuntime = runtime as ProtocolRuntime
+    expect(typeof protocolRuntime.executeTransaction).toBe('function')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Template: protocol-network exists with runtimeKind=protocol
+// ---------------------------------------------------------------------------
+
+describe('Phase 9A: protocol-network template', () => {
+  it('the protocol-network template exists with runtimeKind=protocol', () => {
+    const template = getTemplate('protocol-network')
+    expect(template).toBeDefined()
+    expect(template!.runtimeKind).toBe('protocol')
+    expect(template!.vertical).toBe('protocol')
+  })
+})

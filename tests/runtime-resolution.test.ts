@@ -42,6 +42,22 @@ import type {
   TelemetryReading,
   HealthStatus,
 } from '../src/lib/kernel/adapters/infrastructure-adapter'
+import { InMemoryProtocolStateStore } from '../src/lib/kernel/runtime/protocol/state-store'
+import { DeterministicTransactionExecutor } from '../src/lib/kernel/runtime/protocol/executor'
+import { StubValidatorRegistry, StubConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
+import type { ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/types'
+
+// Helper: create a ProtocolRuntime with stub deps for testing.
+function createProtocolRuntime() {
+  const stateStore = new InMemoryProtocolStateStore()
+  const deps: ProtocolRuntimeDeps = {
+    stateStore,
+    executor: new DeterministicTransactionExecutor(stateStore),
+    validatorRegistry: new StubValidatorRegistry(),
+    consensusEngine: new StubConsensusEngine(),
+  }
+  return new ProtocolRuntime(deps)
+}
 
 // Explicitly initialize the bootstrap before tests run.
 // This is the test's composition root — same pattern as instrumentation.ts.
@@ -153,7 +169,7 @@ describe('Phase 5: registry completeness', () => {
 
 describe('Phase 5: protocol and hybrid runtimes are stubs', () => {
   it('ProtocolRuntime.createExecution throws NotImplemented', async () => {
-    const runtime = new ProtocolRuntime()
+    const runtime = createProtocolRuntime()
     // Pass a mock tx — the stub throws before touching it.
     const mockTx = {} as any
     await expect(
@@ -186,7 +202,7 @@ describe('Phase 5: protocol and hybrid runtimes are stubs', () => {
   })
 
   it('ProtocolRuntime.completeAssignment throws NotImplemented', async () => {
-    const runtime = new ProtocolRuntime()
+    const runtime = createProtocolRuntime()
     const mockTx = {} as any
     await expect(
       runtime.completeAssignment(mockTx, 't1', 'a1', 'e1'),

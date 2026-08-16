@@ -2530,3 +2530,69 @@ Stage Summary:
 - The failure-path test now genuinely reaches runtime.executeAssignment() and proves the stable computeJobId allows releaseCommitment to find and release the EXACT commitment.
 - The computeJobId uses crypto.randomUUID() for collision resistance.
 - Phase 8C2 is complete. Phase 8 (A + B + C + C2) is now frozen. Phase 9 (ProtocolRuntime) is authorized.
+
+---
+Task ID: Phase-9A-Protocol-Runtime-Contracts
+Agent: orchestrator
+Task: Phase 9A — establish the ProtocolRuntime boundary and contracts. Define ProtocolStateStore, ProtocolTransactionExecutor, ValidatorRegistry, ConsensusEngine. Implement a deterministic in-memory state store + a minimal reference state-transition executor. Prove runtimeKind=protocol → ProtocolRuntime → deterministic transaction execution. Do NOT implement real consensus. Do NOT couple protocol concepts to InfrastructureRuntime/Execution/adapter.
+
+Work Log:
+- PROTOCOL CONTRACTS (src/lib/kernel/runtime/protocol/types.ts):
+  - ProtocolTransaction: immutable transaction envelope (id, networkVersionId, sender, nonce, payload, signature, submittedAt). No blockchain concepts (UTXO, EVM, gas, slashing).
+  - ProtocolTransactionPayload: generic { type, data } — the executor interprets the type deterministically.
+  - ProtocolExecutionResult: success, resultingState, receipt, error.
+  - ProtocolReceipt: transactionId, beforeStateHash, afterStateHash, executedAt (deterministic — from transaction.submittedAt, not Date.now()), executor.
+  - ProtocolStateSnapshot: version, hash, entries (ReadonlyMap).
+  - ProtocolStateStore: getState, get, put, delete, commit, rollback, getSnapshot — deterministic, versioned key-value store.
+  - ProtocolTransactionExecutor: validate(transaction, state) → string|null, execute(transaction) → ProtocolExecutionResult.
+  - ValidatorRegistry: register, deactivate, getActiveValidators (contract — stub implementation).
+  - ConsensusEngine: propose, validateProposal, finalize (contract — stub implementation).
+  - ProtocolRuntimeDeps: { stateStore, executor, validatorRegistry, consensusEngine } — injected into ProtocolRuntime.
+- IN-MEMORY STATE STORE (protocol/state-store.ts):
+  - InMemoryProtocolStateStore: maintains currentEntries + stagedEntries + versioned history.
+  - Deterministic hash: SHA-256 of canonical JSON (sorted keys). Two stores with the same entries produce the same hash, regardless of insertion order.
+  - Genesis snapshot at version 0; each commit increments version and pushes to history.
+  - getSnapshot(version) retrieves historical snapshots for deterministic replay.
+- DETERMINISTIC EXECUTOR (protocol/executor.ts):
+  - DeterministicTransactionExecutor: validates + executes transactions against the state store.
+  - Reference state-transition protocol: 'transfer' (move balance) + 'mint' (create balance). State keys: 'balance:<account>', 'nonce:<sender>'.
+  - Validation: signature non-empty, nonce matches expected, sufficient balance for transfers, positive amounts.
+  - Determinism: receipt.executedAt = transaction.submittedAt (not Date.now()). No Math.random() or Date.now() during execution.
+  - computeTransactionId: deterministic SHA-256 hash of the transaction contents.
+- VALIDATOR REGISTRY + CONSENSUS ENGINE STUBS (protocol/validator-consensus.ts):
+  - StubValidatorRegistry: throws NotImplemented for all methods.
+  - StubConsensusEngine: throws NotImplemented for all methods.
+  - Contracts defined; implementations land in Phase 9C.
+- PROTOCOL RUNTIME (protocol-runtime.ts):
+  - ProtocolRuntime now accepts ProtocolRuntimeDeps in its constructor (dependency injection, mirroring InfrastructureRuntime).
+  - Primary entry point: executeTransaction(transaction) → ProtocolExecutionResult. This is the protocol-specific method — NOT executeAssignment (which is infrastructure-shaped and throws NotImplemented).
+  - validateTransaction(transaction) → string|null — validates without executing.
+  - Infrastructure-shaped NetworkRuntime methods (createExecution, executeAssignment, etc.) still throw NotImplemented — they don't apply to the protocol model.
+  - Does NOT import InfrastructureRuntime, AdapterRegistry, InfrastructureAdapter, VPP, or Compute.
+- BOOTSTRAP (bootstrap/index.ts):
+  - Constructs ProtocolRuntime with real deps: InMemoryProtocolStateStore + DeterministicTransactionExecutor + StubValidatorRegistry + StubConsensusEngine.
+  - Registers the ProtocolRuntime with the RuntimeRegistry.
+- PROTOCOL-NETWORK TEMPLATE (templates.ts):
+  - Added 'protocol-network' template: vertical='protocol', runtimeKind='protocol', asset_types=['validator_node'], capabilities=['protocol_transaction'], reward $0.01/transaction.
+- ARCHITECTURE TESTS (5 new):
+  - ProtocolRuntime does NOT import InfrastructureRuntime or adapters
+  - protocol/types.ts does NOT import infrastructure concepts
+  - protocol/state-store.ts does NOT import infrastructure concepts
+  - protocol/executor.ts does NOT import infrastructure concepts
+  - ProtocolRuntime accepts ProtocolRuntimeDeps in constructor
+  - protocol directory has the expected contract files
+- IN-MEMORY TESTS (17 new):
+  - Deterministic state store: same entries → same hash, different entries → different hash, put+commit → new version, rollback discards, getSnapshot retrieves history.
+  - Deterministic executor: mint creates balance, transfer moves balance, insufficient balance rejects (state unchanged), invalid nonce rejects (replay protection), deterministic (same input → same output).
+  - ProtocolRuntime.executeTransaction: executes + returns receipt, validates without executing, infrastructure-shaped methods throw NotImplemented.
+  - Runtime resolution: resolveRuntime('protocol') → ProtocolRuntime, executeTransaction available on resolved runtime.
+  - Template: protocol-network exists with runtimeKind=protocol.
+- VERIFICATION: bun run lint clean. tsc: 104 errors (all pre-existing, zero new). 147 non-DB tests pass (62 regex architecture + 48 runtime resolution/adapter + 15 Phase 8 compute + 22 Phase 9A protocol, 0 fail, 200ms). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The ProtocolRuntime now owns its own contracts: ProtocolStateStore, ProtocolTransactionExecutor, ValidatorRegistry, ConsensusEngine. These are separate from the infrastructure runtime's Execution/adapter model.
+- The protocol runtime's primary entry point is executeTransaction() — NOT executeAssignment(). Protocol transactions are deterministic state transitions, not physical asset executions.
+- The state store is deterministic (same entries → same hash), the executor is deterministic (same input → same output), and the receipts are deterministic (executedAt from transaction.submittedAt, not Date.now()).
+- ProtocolRuntime does NOT import InfrastructureRuntime, AdapterRegistry, InfrastructureAdapter, VPP, or Compute. The protocol side is architecturally isolated.
+- ValidatorRegistry and ConsensusEngine are contract stubs — real implementations land in Phase 9C.
+- Phase 9A is complete. Phase 9B (persistent protocol state) is the next step before Phase 9C (minimal consensus).

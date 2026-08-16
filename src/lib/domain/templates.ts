@@ -210,6 +210,41 @@ export const NETWORK_TEMPLATES: NetworkTemplate[] = [
       platform_fee_pct: 10,
     },
   },
+  // -------------------------------------------------------------------------
+  // protocol-network — Phase 9A: first protocol runtime reference.
+  // Proves the protocol runtime contract: deterministic state transitions
+  // via ProtocolRuntime (not infrastructure execution).
+  // runtimeKind = 'protocol' → resolves to ProtocolRuntime via RuntimeRegistry.
+  // -------------------------------------------------------------------------
+  {
+    key: 'protocol-network',
+    name: 'Protocol Network',
+    slug: 'protocol-network',
+    vertical: 'protocol',
+    description:
+      'A protocol-based network that operates via deterministic state transitions. Transactions are validated and executed against a versioned state store, producing execution receipts. Uses the ProtocolRuntime (runtimeKind=protocol), not the InfrastructureRuntime.',
+    asset_types: ['validator_node'],
+    capabilities: [
+      {
+        type: 'protocol_transaction',
+        unit: 'transactions',
+        schemaVersion: 1,
+        fields: { transaction_count: 'number', state_transitions: 'number' },
+      },
+    ],
+    verification: {
+      checks: ['device_signature', 'timestamp_window', 'replay_protection', 'schema_validation'],
+      timestamp_window_seconds: 300,
+    },
+    reward: {
+      type: 'fixed_rate',
+      rate: '0.01',
+      unit: 'transactions',
+      currency: 'USD',
+      platform_fee_pct: 5,
+    },
+    runtimeKind: 'protocol',
+  },
 ]
 
 export function getTemplate(key: string): NetworkTemplate | undefined {

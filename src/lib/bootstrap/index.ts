@@ -49,6 +49,9 @@ import { runtimeRegistry } from '@/lib/kernel/runtime/registry'
 import { InfrastructureRuntime } from '@/lib/kernel/runtime/infrastructure-runtime'
 import { ProtocolRuntime } from '@/lib/kernel/runtime/protocol-runtime'
 import { HybridRuntime } from '@/lib/kernel/runtime/hybrid-runtime'
+import { InMemoryProtocolStateStore } from '@/lib/kernel/runtime/protocol/state-store'
+import { DeterministicTransactionExecutor } from '@/lib/kernel/runtime/protocol/executor'
+import { StubValidatorRegistry, StubConsensusEngine } from '@/lib/kernel/runtime/protocol/validator-consensus'
 
 let initialized = false
 
@@ -82,9 +85,22 @@ export function initializeBootstrap(): void {
   //    instance rather than importing the global singleton.
   const infrastructureRuntime = new InfrastructureRuntime(adapterRegistry)
 
-  // 3. Register all three runtimes with the RuntimeRegistry.
+  // 3. Construct ProtocolRuntime with protocol-specific dependencies.
+  //    Phase 9A: The protocol runtime owns a state store, executor,
+  //    validator registry, and consensus engine. These are injected
+  //    (not imported as globals), mirroring InfrastructureRuntime.
+  const protocolStateStore = new InMemoryProtocolStateStore()
+  const protocolExecutor = new DeterministicTransactionExecutor(protocolStateStore)
+  const protocolRuntime = new ProtocolRuntime({
+    stateStore: protocolStateStore,
+    executor: protocolExecutor,
+    validatorRegistry: new StubValidatorRegistry(),
+    consensusEngine: new StubConsensusEngine(),
+  })
+
+  // 4. Register all three runtimes with the RuntimeRegistry.
   runtimeRegistry.register(infrastructureRuntime)
-  runtimeRegistry.register(new ProtocolRuntime())
+  runtimeRegistry.register(protocolRuntime)
   runtimeRegistry.register(new HybridRuntime())
 
   initialized = true
