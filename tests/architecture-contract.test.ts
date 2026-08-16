@@ -605,13 +605,18 @@ describe('Architecture contract: physical execution boundary (Phase 6)', () => {
     expect(content).toMatch(/async executeAssignment\(/)
   })
 
-  it('InfrastructureRuntime.executeAssignment resolves adapter via AdapterRegistry', () => {
+  it('InfrastructureRuntime.executeAssignment resolves adapter via AdapterRegistry.resolve (Phase 7.2)', () => {
     const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
     const content = readFileSync(infraPath, 'utf-8')
 
-    // The executeAssignment method must call resolveAdapter — not
-    // instantiate a concrete adapter.
-    expect(content).toMatch(/resolveAdapter\(/)
+    // Phase 7.2: The runtime must use adapterRegistry.resolve({ assetType, adapterType, capabilityType })
+    // — the full selection contract — NOT the old resolveAdapter(assetType) helper.
+    expect(content).toMatch(/adapterRegistry\.resolve\(/)
+    expect(content).toMatch(/assetType:\s*input\.assetType/)
+    expect(content).toMatch(/adapterType:\s*input\.adapterType/)
+    expect(content).toMatch(/capabilityType:\s*input\.capabilityType/)
+    // Must NOT use the old backward-compatible helper.
+    expect(content).not.toMatch(/resolveAdapter\(/)
   })
 
   it('kernel runtime directory has adapter-registry (generic, no concrete imports)', () => {

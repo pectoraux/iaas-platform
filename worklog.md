@@ -2309,3 +2309,32 @@ Work Log:
 Stage Summary:
 - registerBatch() is now genuinely atomic. All descriptors are validated completely (field validation + batch uniqueness + registry uniqueness) BEFORE any descriptor is committed. The commit phase uses commitDescriptor() directly — it cannot throw, so no partial mutation is possible.
 - Phase 7.1 is now correct. Phase 7 is closed. Phase 8 (Compute reference network) is ready.
+
+---
+Task ID: Phase-7.2-Runtime-Adapter-Selection
+Agent: orchestrator
+Task: Wire adapter selection through RuntimeExecuteInput and InfrastructureRuntime.executeAssignment. The registry supports multi-adapter selection (assetType + adapterType + capabilityType) but the runtime was still calling the old resolveAdapter(assetType) helper — which would throw AMBIGUOUS if Phase 8 added a second adapter for an existing asset type.
+
+Work Log:
+- ROOT CAUSE: InfrastructureRuntime.executeAssignment called resolveAdapter(input.assetType) — the backward-compatible helper that only takes assetType. The hardened registry supports adapterRegistry.resolve({ assetType, adapterType, capabilityType }) but the runtime didn't consume it. If Phase 8 added a second adapter for 'battery' (e.g., tesla_powerwall alongside simulated_der), VPP's execution would throw AMBIGUOUS because it doesn't specify adapterType.
+- FIX — RUNTIME USES FULL SELECTION CONTRACT:
+  - Added optional `adapterType?: string` to RuntimeExecuteInput. The vertical can specify it for deterministic selection when multiple adapters serve the same asset type. VPP omits it (single energy adapter); Compute can specify it (gpu_cluster for compute_node).
+  - Changed InfrastructureRuntime.executeAssignment to call `adapterRegistry.resolve({ assetType: input.assetType, adapterType: input.adapterType, capabilityType: input.capabilityType })` — the full selection contract. Removed the import of the old `resolveAdapter` helper.
+  - The runtime now passes capabilityType to the registry, which checks it against the adapter's supported capabilities. If the adapter doesn't support the requested capability, resolution throws.
+- BEHAVIORAL TESTS (5 new):
+  - explicit adapterType resolves the correct adapter — registers two adapters for 'battery', selects each by adapterType, verifies the telemetry reports the correct adapterType.
+  - omitted adapterType resolves single adapter — one adapter for 'battery', omitted adapterType, resolves successfully.
+  - omitted adapterType with multiple adapters throws (ambiguous) — two adapters, omitted adapterType, throws AMBIGUOUS.
+  - capability mismatch throws — adapter supports energy_discharge but capabilityType is frequency_response, throws "does not support capability".
+  - VPP-style execution (omitted adapterType, single energy adapter) works via global runtime — proves VPP's current usage (no adapterType) still works with the global registry.
+- ARCHITECTURE TEST UPDATE: The regex test for "InfrastructureRuntime.executeAssignment resolves adapter via AdapterRegistry" now checks for adapterRegistry.resolve( with assetType, adapterType, AND capabilityType — and asserts the old resolveAdapter( helper is NOT used.
+- TEST APPROACH: The multi-adapter tests use a SEPARATE AdapterRegistry instance + a test runtime wrapper (createRuntimeWithRegistry) to avoid polluting the global singleton. The VPP-style test uses the real InfrastructureRuntime with the global registry (which has simulated_der registered via beforeAll → initializeBootstrap).
+- VERIFICATION: bun run lint clean. tsc: 102 errors (all pre-existing, zero new). 107 non-DB tests pass (59 regex architecture + 48 runtime resolution/adapter, 5 new Phase 7.2 behavioral tests, 0 fail, 134ms). Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The runtime now consumes the full adapter selection contract: assetType + adapterType + capabilityType.
+- VPP can omit adapterType (single energy adapter) — backward compatible.
+- Phase 8 (Compute) can specify adapterType (e.g., 'gpu_cluster' for 'compute_node') without modifying the kernel.
+- Ambiguous resolution (multiple adapters, no adapterType) throws — no silent fallback.
+- Capability mismatch throws — the registry checks capability support during resolution.
+- Phase 7.2 is complete. Phase 7 is now fully closed (registry + runtime integration). Phase 8 (Compute reference network) is ready.

@@ -100,14 +100,33 @@ export interface RuntimeAssignmentResults {
  * Input for the runtime's physical execution of an assignment.
  * Phase 6: The vertical provides the asset type (for adapter resolution),
  * the assigned quantity, and execution parameters.
+ * Phase 7.2: The vertical can optionally specify adapterType for deterministic
+ * adapter selection when multiple adapters serve the same asset type.
  */
 export interface RuntimeExecuteInput {
   /** The asset to execute on (looked up to determine assetType for adapter resolution). */
   assetId: string
   /** The asset type (e.g., 'battery', 'compute_node') — determines the adapter. */
   assetType: string
-  /** The capability to execute (e.g., 'energy_discharge'). */
+  /**
+   * The capability to execute (e.g., 'energy_discharge').
+   * Also used by the registry for capability-aware resolution.
+   */
   capabilityType: string
+  /**
+   * Phase 7.2: Optional explicit adapter selection.
+   *
+   * If specified, the runtime resolves the exact adapter via:
+   *   adapterRegistry.resolve({ assetType, adapterType, capabilityType })
+   *
+   * If omitted, the runtime resolves the single adapter for the asset type.
+   * If multiple adapters are registered and adapterType is omitted,
+   * resolution is AMBIGUOUS and throws.
+   *
+   * This allows Phase 8 (Compute) to select 'gpu_cluster' for 'compute_node'
+   * without modifying the kernel, while VPP can omit it (single energy adapter).
+   */
+  adapterType?: string
   /** Assigned quantity (e.g., assignedKwh). */
   assignedQuantity: string
   assignedUnit: string

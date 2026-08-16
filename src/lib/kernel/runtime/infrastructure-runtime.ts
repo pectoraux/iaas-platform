@@ -18,7 +18,7 @@
 // =============================================================================
 
 import { finalizeExecutionIfTerminal } from '../execution/execution.service'
-import { resolveAdapter } from './adapter-registry'
+import { adapterRegistry } from './adapter-registry'
 import type {
   NetworkRuntime,
   RuntimeAssignmentResults,
@@ -102,14 +102,23 @@ export class InfrastructureRuntime implements NetworkRuntime {
   }
 
   // Phase 6: Physical execution boundary.
-  // The runtime resolves the adapter via AdapterRegistry, calls adapter.execute(),
-  // and returns the raw telemetry + actuals. The vertical processes the result.
+  // Phase 7.2: The runtime resolves the adapter using the full selection
+  // (assetType + adapterType + capabilityType) — not just assetType.
+  // This supports multi-adapter asset types (e.g., battery → multiple adapters).
   async executeAssignment(
     input: RuntimeExecuteInput,
   ): Promise<RuntimeExecuteResult> {
-    // Resolve the adapter for this asset type via the AdapterRegistry.
-    // Throws if no adapter is registered — no silent fallback.
-    const adapter = resolveAdapter(input.assetType)
+    // Phase 7.2: Resolve the adapter via the full selection contract.
+    // - If adapterType is specified: resolves the exact adapter.
+    // - If adapterType is omitted + single adapter: resolves it.
+    // - If adapterType is omitted + multiple adapters: AMBIGUOUS, throws.
+    // - Unknown asset/adapter: throws. No silent fallback.
+    // - capabilityType is checked against the adapter's supported capabilities.
+    const adapter = adapterRegistry.resolve({
+      assetType: input.assetType,
+      adapterType: input.adapterType,
+      capabilityType: input.capabilityType,
+    })
 
     // Execute the physical command via the adapter.
     const result = await adapter.execute({

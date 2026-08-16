@@ -276,6 +276,205 @@ describe('Phase 6: adapter resolution', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Test 7b: Phase 7.2 — Runtime adapter selection (behavioral)
+// ---------------------------------------------------------------------------
+
+// These tests exercise the InfrastructureRuntime's adapter resolution using
+// the full selection contract (assetType + adapterType + capabilityType).
+//
+// The global adapterRegistry already has 'simulated_der' registered for
+// energy asset types (via beforeAll → initializeBootstrap). We create a
+// fresh InfrastructureRuntime for each test — it uses the global registry.
+//
+// To test multi-adapter scenarios, we create a SEPARATE AdapterRegistry
+// instance and a custom InfrastructureRuntime-like wrapper that uses it.
+// This avoids polluting the global singleton.
+
+import { AdapterRegistry as AdapterRegistryClass } from '../src/lib/kernel/runtime/adapter-registry'
+import { finalizeExecutionIfTerminal } from '../src/lib/kernel/execution/execution.service'
+import type {
+  InfrastructureAdapter,
+  ExecuteCommand,
+  ExecuteResult,
+  AssetCapabilities,
+  TelemetryReading,
+  HealthStatus,
+} from '../src/lib/kernel/adapters/infrastructure-adapter'
+
+// Helper: create a mock adapter with a specific adapterType.
+function mockNamedAdapter(adapterType: string): InfrastructureAdapter {
+  return {
+    adapterType,
+    async discover(): Promise<AssetCapabilities[]> { return [] },
+    async getCapabilities(): Promise<AssetCapabilities> {
+      return { assetId: 'x', capabilities: [], health: 'healthy' }
+    },
+    async readTelemetry(): Promise<TelemetryReading> {
+      return { assetId: 'x', timestamp: new Date(), capabilityType: 'x', payload: {} }
+    },
+    async execute(cmd: ExecuteCommand): Promise<ExecuteResult> {
+      return {
+        assetId: cmd.assetId,
+        actualQuantity: '5',
+        actualUnit: 'unit',
+        telemetry: { payload: { adapterType } },
+        success: true,
+      }
+    },
+    async health(): Promise<HealthStatus> {
+      return { assetId: 'x', status: 'healthy' }
+    },
+  }
+}
+
+// Helper: create a runtime that uses a specific registry (not the global one).
+// This lets us test multi-adapter scenarios without polluting the global state.
+function createRuntimeWithRegistry(registry: AdapterRegistryClass) {
+  return {
+    async executeAssignment(input: import('../src/lib/kernel/runtime/types').RuntimeExecuteInput) {
+      const adapter = registry.resolve({
+        assetType: input.assetType,
+        adapterType: input.adapterType,
+        capabilityType: input.capabilityType,
+      })
+      const result = await adapter.execute({
+        assetId: input.assetId,
+        capabilityType: input.capabilityType,
+        assignedQuantity: input.assignedQuantity,
+        assignedUnit: input.assignedUnit,
+        durationSeconds: input.durationSeconds,
+        parameters: input.parameters,
+      })
+      return {
+        actualQuantity: result.actualQuantity,
+        actualUnit: result.actualUnit,
+        telemetryPayload: result.telemetry.payload,
+        success: result.success,
+        error: result.error,
+      }
+    },
+  }
+}
+
+describe('Phase 7.2: runtime adapter selection', () => {
+  it('explicit adapterType resolves the correct adapter', async () => {
+    const reg = new AdapterRegistryClass()
+    const adapterA = mockNamedAdapter('adapter_a')
+    const adapterB = mockNamedAdapter('adapter_b')
+    reg.register({ adapter: adapterA, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    reg.register({ adapter: adapterB, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+
+    const runtime = createRuntimeWithRegistry(reg)
+
+    // Explicit adapterType: adapter_a
+    const resultA = await runtime.executeAssignment({
+      assetId: 'asset-1',
+      assetType: 'battery',
+      adapterType: 'adapter_a',
+      capabilityType: 'energy_discharge',
+      assignedQuantity: '10',
+      assignedUnit: 'kWh',
+      durationSeconds: 3600,
+    })
+    expect(resultA.success).toBe(true)
+    expect(resultA.telemetryPayload.adapterType).toBe('adapter_a')
+
+    // Explicit adapterType: adapter_b
+    const resultB = await runtime.executeAssignment({
+      assetId: 'asset-1',
+      assetType: 'battery',
+      adapterType: 'adapter_b',
+      capabilityType: 'energy_discharge',
+      assignedQuantity: '10',
+      assignedUnit: 'kWh',
+      durationSeconds: 3600,
+    })
+    expect(resultB.success).toBe(true)
+    expect(resultB.telemetryPayload.adapterType).toBe('adapter_b')
+  })
+
+  it('omitted adapterType resolves single adapter', async () => {
+    const reg = new AdapterRegistryClass()
+    const adapter = mockNamedAdapter('only_adapter')
+    reg.register({ adapter: adapter, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+
+    const runtime = createRuntimeWithRegistry(reg)
+
+    const result = await runtime.executeAssignment({
+      assetId: 'asset-1',
+      assetType: 'battery',
+      // adapterType omitted — single adapter, should resolve
+      capabilityType: 'energy_discharge',
+      assignedQuantity: '10',
+      assignedUnit: 'kWh',
+      durationSeconds: 3600,
+    })
+    expect(result.success).toBe(true)
+    expect(result.telemetryPayload.adapterType).toBe('only_adapter')
+  })
+
+  it('omitted adapterType with multiple adapters throws (ambiguous)', async () => {
+    const reg = new AdapterRegistryClass()
+    const adapterA = mockNamedAdapter('adapter_a')
+    const adapterB = mockNamedAdapter('adapter_b')
+    reg.register({ adapter: adapterA, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+    reg.register({ adapter: adapterB, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+
+    const runtime = createRuntimeWithRegistry(reg)
+
+    await expect(
+      runtime.executeAssignment({
+        assetId: 'asset-1',
+        assetType: 'battery',
+        // adapterType omitted — multiple adapters, AMBIGUOUS
+        capabilityType: 'energy_discharge',
+        assignedQuantity: '10',
+        assignedUnit: 'kWh',
+        durationSeconds: 3600,
+      }),
+    ).rejects.toThrow(/Ambiguous/)
+  })
+
+  it('capability mismatch throws', async () => {
+    const reg = new AdapterRegistryClass()
+    const adapter = mockNamedAdapter('energy_only')
+    reg.register({ adapter: adapter, supportedAssetTypes: ['battery'], supportedCapabilities: ['energy_discharge'] })
+
+    const runtime = createRuntimeWithRegistry(reg)
+
+    await expect(
+      runtime.executeAssignment({
+        assetId: 'asset-1',
+        assetType: 'battery',
+        capabilityType: 'frequency_response', // NOT supported by this adapter
+        assignedQuantity: '10',
+        assignedUnit: 'kW',
+        durationSeconds: 3600,
+      }),
+    ).rejects.toThrow(/does not support capability/)
+  })
+
+  it('VPP-style execution (omitted adapterType, single energy adapter) works via global runtime', async () => {
+    // The global adapterRegistry has 'simulated_der' registered for battery
+    // (via beforeAll → initializeBootstrap). This proves VPP's current usage
+    // (no adapterType) still works — the runtime resolves the single adapter.
+    const runtime = new InfrastructureRuntime()
+    const result = await runtime.executeAssignment({
+      assetId: 'vpp-asset',
+      assetType: 'battery',
+      // adapterType omitted — VPP doesn't specify it
+      capabilityType: 'energy_discharge',
+      assignedQuantity: '10',
+      assignedUnit: 'kWh',
+      durationSeconds: 3600,
+      parameters: { assignedKw: '5' },
+    })
+    expect(result.success).toBe(true)
+    expect(result.actualQuantity).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Test 8: Phase 7 — AdapterRegistry hardening (behavioral)
 // ---------------------------------------------------------------------------
 
