@@ -44,6 +44,7 @@ import type {
   ProtocolTransaction,
   ProtocolExecutionResult,
   FinalizedBatch,
+  BatchExecutionResult,
 } from './protocol/types'
 import { computeTransactionId } from './protocol/executor'
 
@@ -223,14 +224,15 @@ export class HybridRuntime implements NetworkRuntime {
    *
    * @param input The infrastructure execution input.
    * @param currentNonce The sender's current protocol nonce.
-   * @returns The infrastructure result and the protocol execution results.
+   * @returns The infrastructure result and the protocol batch execution result
+   *          (with explicit status: EXECUTED, REJECTED_BY_CONSENSUS, etc.).
    */
   async executeHybrid(
     input: RuntimeExecuteInput,
     currentNonce: number,
   ): Promise<{
     infrastructureResult: RuntimeExecuteResult
-    protocolResults: ProtocolExecutionResult[]
+    protocolResult: BatchExecutionResult
   }> {
     // 1. Execute physical work via the infrastructure runtime.
     const infrastructureResult = await this.deps.infrastructureRuntime.executeAssignment(input)
@@ -245,12 +247,9 @@ export class HybridRuntime implements NetworkRuntime {
 
     // 3. Submit through the canonical protocol path:
     //    propose → validateProposal → finalize → executeBatch.
-    // Phase 10 final closure: HybridRuntime uses ProtocolRuntime.submitTransaction()
-    // — it does NOT access protocolRuntime.deps directly. The protocol runtime
-    // owns its lifecycle; the hybrid runtime does not reach into its internals.
-    const protocolResults = await this.deps.protocolRuntime.submitTransaction(transaction)
+    const protocolResult = await this.deps.protocolRuntime.submitTransaction(transaction)
 
-    return { infrastructureResult, protocolResults }
+    return { infrastructureResult, protocolResult }
   }
 
   // -------------------------------------------------------------------------

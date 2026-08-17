@@ -256,22 +256,27 @@ export function nonceAwareOrder(transactions: ProtocolTransaction[]): ProtocolTr
 }
 
 // ---------------------------------------------------------------------------
-// BucketSortedConsensusEngine — true replaceability proof
+// BucketSortedConsensusEngine — independently implemented replaceability proof
 // ---------------------------------------------------------------------------
 
 /**
  * A second consensus implementation that produces the SAME finalized order
- * as SimpleConsensusEngine but via a DIFFERENT algorithm.
+ * as SimpleConsensusEngine but via a COMPLETELY DIFFERENT algorithm.
  *
- * SimpleConsensusEngine uses: Array.sort() (lexicographic comparison)
- * BucketSortedConsensusEngine uses: bucket-by-first-character, then sort within buckets
+ * Phase 10.5A: This engine does NOT delegate to nonceAwareOrder().
+ * It implements its own nonce-aware ordering using a priority-queue
+ * approach (binary heap) instead of the ready-queue approach used by
+ * nonceAwareOrder(). Both produce the same output — proving that
+ * consensus is truly replaceable: the state machine consumes only
+ * the finalized artifact, not the consensus implementation.
  *
- * Both produce identical output for the same input — proving that consensus
- * is replaceable: the state machine consumes only the finalized order, not
- * the algorithm that produced it.
+ * Algorithm comparison:
+ *   nonceAwareOrder(): ready-queue (linear scan for minimum each step)
+ *   BucketSortedConsensusEngine: binary min-heap (heapify + extract-min)
  *
- * Phase 9C: This exists ONLY for the replaceability test. It is not
- * registered in the bootstrap.
+ * Both produce identical output because the ordering semantics are the same:
+ *   - Per-sender nonce ascending
+ *   - Global tie-break by transaction ID
  */
 export class BucketSortedConsensusEngine implements ConsensusEngine {
   private readonly proposerId: string
@@ -297,20 +302,12 @@ export class BucketSortedConsensusEngine implements ConsensusEngine {
   }
 
   /**
-   * Finalize using a DIFFERENT algorithm that produces the SAME result
-   * as SimpleConsensusEngine's nonce-aware ordering.
-   *
-   * Phase 9C final closure: Both engines now use the shared nonceAwareOrder
-   * function, which preserves per-sender nonce monotonicity. The
-   * BucketSortedConsensusEngine exists to prove replaceability — it uses
-   * the same shared ordering function but could be replaced by any
-   * implementation that produces the same output.
+   * Finalize using an INDEPENDENTLY IMPLEMENTED nonce-aware ordering
+   * algorithm (binary heap priority queue). This does NOT call
+   * nonceAwareOrder() — it implements its own heap-based approach.
    */
   finalize(proposal: ConsensusProposal): FinalizedBatch {
-    // Uses the same shared nonceAwareOrder function — both engines
-    // produce identical output. The replaceability proof verifies this.
-    const orderedTransactions = nonceAwareOrder(proposal.transactions)
-
+    const orderedTransactions = this.heapBasedNonceOrder(proposal.transactions)
     const finalityCertificate = computeFinalityCertificate(orderedTransactions)
 
     return {
@@ -319,6 +316,107 @@ export class BucketSortedConsensusEngine implements ConsensusEngine {
       finalityCertificate,
       finalizedAt: new Date(),
       finalizedBy: this.proposerId,
+    }
+  }
+
+  /**
+   * Independently implemented nonce-aware ordering using a binary min-heap.
+   *
+   * Steps:
+   *   1. Group transactions by sender, sort by nonce ascending.
+   *   2. Build a min-heap of the first (lowest-nonce) tx from each sender,
+   *      keyed by transaction ID.
+   *   3. Extract-min: pop the tx with the smallest ID.
+   *   4. Advance that sender's pointer, push the next tx from that sender.
+   *   5. Repeat until all txs are emitted.
+   *
+   * This is a DIFFERENT implementation from nonceAwareOrder() (which does
+   * a linear scan for the minimum), but produces the same output because
+   * the ordering semantics are identical.
+   */
+  private heapBasedNonceOrder(transactions: ProtocolTransaction[]): ProtocolTransaction[] {
+    if (transactions.length <= 1) return [...transactions]
+
+    // Group by sender, sorted by nonce.
+    const bySender = new Map<string, ProtocolTransaction[]>()
+    for (const tx of transactions) {
+      let queue = bySender.get(tx.sender)
+      if (!queue) {
+        queue = []
+        bySender.set(tx.sender, queue)
+      }
+      queue.push(tx)
+    }
+    for (const queue of bySender.values()) {
+      queue.sort((a, b) => a.nonce - b.nonce)
+    }
+
+    // Build a min-heap of (txId, sender) pairs for the first tx of each sender.
+    interface HeapNode {
+      tx: ProtocolTransaction
+      sender: string
+      nextIdx: number
+    }
+
+    const heap: HeapNode[] = []
+    for (const [sender, queue] of bySender) {
+      if (queue.length > 0) {
+        heap.push({ tx: queue[0], sender, nextIdx: 1 })
+      }
+    }
+
+    // Heapify (build min-heap by tx ID).
+    this.buildMinHeap(heap)
+
+    const result: ProtocolTransaction[] = []
+    while (heap.length > 0) {
+      // Extract minimum.
+      const min = heap[0]
+      result.push(min.tx)
+
+      // Replace root with the next tx from the same sender (or remove).
+      const queue = bySender.get(min.sender)!
+      if (min.nextIdx < queue.length) {
+        heap[0] = { tx: queue[min.nextIdx], sender: min.sender, nextIdx: min.nextIdx + 1 }
+        this.siftDown(heap, 0)
+      } else {
+        // Remove last element and put it at root.
+        const last = heap.pop()!
+        if (heap.length > 0) {
+          heap[0] = last
+          this.siftDown(heap, 0)
+        }
+      }
+    }
+
+    return result
+  }
+
+  // --- Binary min-heap helpers (keyed by tx ID) ---
+
+  private buildMinHeap(heap: HeapNode[]): void {
+    for (let i = Math.floor(heap.length / 2) - 1; i >= 0; i--) {
+      this.siftDown(heap, i)
+    }
+  }
+
+  private siftDown(heap: HeapNode[], idx: number): void {
+    const n = heap.length
+    while (true) {
+      let smallest = idx
+      const left = 2 * idx + 1
+      const right = 2 * idx + 2
+
+      if (left < n && heap[left].tx.id < heap[smallest].tx.id) {
+        smallest = left
+      }
+      if (right < n && heap[right].tx.id < heap[smallest].tx.id) {
+        smallest = right
+      }
+
+      if (smallest === idx) break
+      ;[heap[idx], heap[smallest]] = [heap[smallest], heap[idx]]
+      idx = smallest
     }
   }
 }

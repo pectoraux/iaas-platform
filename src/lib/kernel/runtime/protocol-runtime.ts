@@ -43,6 +43,7 @@ import type {
   ProtocolExecutionResult,
   ProtocolReceipt,
   FinalizedBatch,
+  BatchExecutionResult,
 } from './protocol/types'
 import { StaleVersionError } from './protocol/types'
 import { computeFinalityCertificate } from './protocol/validator-consensus'
@@ -240,16 +241,19 @@ export class ProtocolRuntime implements NetworkRuntime {
    *   - Certificate is verified before execution
    *   - The protocol runtime owns its lifecycle (deps is private)
    *
-   * @returns The execution results. Empty if the proposal was rejected
-   *          by validator authorization or certificate verification.
+   * @returns A BatchExecutionResult with explicit status. Status is
+   *          REJECTED_BY_CONSENSUS if validator authorization fails,
+   *          INVALID_FINALITY_CERTIFICATE if the batch is tampered,
+   *          EXECUTED if the batch was processed (individual transactions
+   *          may still have failed — check receipts).
    */
-  async submitTransaction(transaction: ProtocolTransaction): Promise<ProtocolExecutionResult[]> {
+  async submitTransaction(transaction: ProtocolTransaction): Promise<BatchExecutionResult> {
     // 1. Propose.
     const proposal = this.deps.consensusEngine.propose([transaction])
 
     // 2. Validate the proposal (validator authorization).
     if (!this.deps.consensusEngine.validateProposal(proposal)) {
-      return [] // rejected — no execution
+      return { status: 'REJECTED_BY_CONSENSUS', receipts: [], error: 'Proposal rejected by consensus (validator authorization)' }
     }
 
     // 3. Finalize (deterministic ordering + certificate).
@@ -284,16 +288,17 @@ export class ProtocolRuntime implements NetworkRuntime {
    *   The runtime applies the ordering through the executor. Neither layer
    *   knows how the other works.
    *
-   * @returns An array of execution results (one per transaction, in order).
-   *          Stops at the first failure. Returns an empty array if the
-   *          certificate is invalid.
+   * @returns A BatchExecutionResult with explicit status.
    */
-  async executeBatch(batch: FinalizedBatch): Promise<ProtocolExecutionResult[]> {
+  async executeBatch(batch: FinalizedBatch): Promise<BatchExecutionResult> {
+    if (batch.orderedTransactions.length === 0) {
+      return { status: 'NO_TRANSACTIONS', receipts: [] }
+    }
+
     // Phase 9C closure: Verify the finality certificate BEFORE execution.
     const recomputedCertificate = computeFinalityCertificate(batch.orderedTransactions)
     if (recomputedCertificate !== batch.finalityCertificate) {
-      // Tampered batch — reject without executing any transactions.
-      return []
+      return { status: 'INVALID_FINALITY_CERTIFICATE', receipts: [], error: 'Finality certificate mismatch' }
     }
 
     const results: ProtocolExecutionResult[] = []
@@ -303,12 +308,11 @@ export class ProtocolRuntime implements NetworkRuntime {
       results.push(result)
 
       if (!result.success) {
-        // Stop at the first failure — remaining transactions are NOT executed.
         break
       }
     }
 
-    return results
+    return { status: 'EXECUTED', receipts: results }
   }
 
   // -------------------------------------------------------------------------

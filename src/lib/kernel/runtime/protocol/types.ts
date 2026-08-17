@@ -390,21 +390,47 @@ export interface ConsensusProposal {
 /**
  * A finalized batch of transactions with a deterministic ordering and
  * a finality certificate.
- *
- * This is what the protocol runtime executes: it takes the ordered
- * transactions and executes them in order through the executor + state store.
  */
 export interface FinalizedBatch {
-  /** The proposal that was finalized. */
   proposalId: string
-  /** The transactions in their finalized execution order. */
   orderedTransactions: ProtocolTransaction[]
-  /** A deterministic hash certifying this exact ordering. */
   finalityCertificate: string
-  /** When finality was reached. */
   finalizedAt: Date
-  /** Which validator finalized this batch. */
   finalizedBy: string
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10.5B: Explicit batch execution result model
+// ---------------------------------------------------------------------------
+
+/**
+ * The status of a batch submission/execution.
+ *
+ * Phase 10.5B: Replaces the ambiguous empty-array return with explicit
+ * status codes. A caller can now distinguish:
+ *   - EXECUTED: the batch was accepted, certified, and executed (possibly
+ *     with individual transaction failures within the batch).
+ *   - REJECTED_BY_CONSENSUS: the proposal was rejected by validator
+ *     authorization before finalization.
+ *   - INVALID_FINALITY_CERTIFICATE: the finalized batch's certificate did
+ *     not match the recomputed certificate (tampered batch).
+ *   - NO_TRANSACTIONS: the batch contained no transactions.
+ */
+export type BatchExecutionStatus =
+  | 'EXECUTED'
+  | 'REJECTED_BY_CONSENSUS'
+  | 'INVALID_FINALITY_CERTIFICATE'
+  | 'NO_TRANSACTIONS'
+
+/**
+ * The result of submitting/executing a batch of transactions.
+ */
+export interface BatchExecutionResult {
+  status: BatchExecutionStatus
+  /** Execution results for each transaction (only if status === EXECUTED). */
+  receipts: ProtocolExecutionResult[]
+  /** Error message (if status !== EXECUTED). */
+  error?: string
 }
 
 // ---------------------------------------------------------------------------

@@ -153,9 +153,10 @@ describe('Phase 10: hybrid execution', () => {
     expect(parseFloat(result.infrastructureResult.actualQuantity)).toBeCloseTo(9.5, 1)
 
     // Protocol result: a transaction was executed via consensus (propose → finalize → executeBatch).
-    expect(result.protocolResults.length).toBeGreaterThan(0)
-    expect(result.protocolResults[0].success).toBe(true)
-    expect(result.protocolResults[0].receipt.transactionId).toBeTruthy()
+    expect(result.protocolResult.status).toBe('EXECUTED')
+    expect(result.protocolResult.receipts.length).toBeGreaterThan(0)
+    expect(result.protocolResult.receipts[0].success).toBe(true)
+    expect(result.protocolResult.receipts[0].receipt.transactionId).toBeTruthy()
 
     // The protocol state now has a record of the delivery.
     const state = await hybridRuntime.protocol.stateStore.getState()

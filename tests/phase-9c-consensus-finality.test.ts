@@ -157,10 +157,10 @@ describe('Phase 9C: runtime executes finalized batch', () => {
     const proposal = consensus.propose(txs)
     const batch = consensus.finalize(proposal)
 
-    const results = await runtime.executeBatch(batch)
+    const result = await runtime.executeBatch(batch)
 
-    expect(results.length).toBe(2)
-    expect(results.every(r => r.success)).toBe(true)
+    expect(result.status).toBe("EXECUTED"); expect(result.receipts.length).toBe(2)
+    expect(result.receipts.every(r => r.success)).toBe(true)
 
     // Final state should reflect both transactions.
     const state = await runtime.stateStore.getState()
@@ -190,10 +190,10 @@ describe('Phase 9C: runtime executes finalized batch', () => {
     expect(alice1Idx).toBeGreaterThan(-1)
     expect(alice0Idx).toBeLessThan(alice1Idx) // alice-0 before alice-1
 
-    const results = await runtime.executeBatch(batch)
+    const result = await runtime.executeBatch(batch)
 
-    expect(results.length).toBe(3)
-    expect(results.every(r => r.success)).toBe(true)
+    expect(result.status).toBe("EXECUTED"); expect(result.receipts.length).toBe(3)
+    expect(result.receipts.every(r => r.success)).toBe(true)
 
     // Verify final state.
     const state = await runtime.stateStore.getState()
@@ -222,14 +222,14 @@ describe('Phase 9C: runtime executes finalized batch', () => {
 
     const txs = [validTx, invalidTx]
     const batch = consensus.finalize(consensus.propose(txs))
-    const results = await runtime.executeBatch(batch)
+    const result = await runtime.executeBatch(batch)
 
     // At least one success (the valid transfer), then failure.
-    const hasFailure = results.some(r => !r.success)
+    const hasFailure = result.receipts.some(r => !r.success)
     expect(hasFailure).toBe(true)
     // The last result should be the failure.
-    expect(results[results.length - 1].success).toBe(false)
-    expect(results[results.length - 1].error).toMatch(/Insufficient balance|Invalid nonce/)
+    expect(result.receipts[result.receipts.length - 1].success).toBe(false)
+    expect(result.receipts[result.receipts.length - 1].error).toMatch(/Insufficient balance|Invalid nonce/)
   })
 })
 
@@ -318,9 +318,9 @@ describe('Phase 9C: consensus replaceability', () => {
     const batch = consensus.finalize(consensus.propose(txs))
 
     const runtime = makeRuntime()
-    const results = await runtime.executeBatch(batch)
+    const result = await runtime.executeBatch(batch)
 
-    expect(results.every(r => r.success)).toBe(true)
+    expect(result.receipts.every(r => r.success)).toBe(true)
 
     // Both start with 100 each. alice→bob 50, bob→alice 20.
     // Result: alice=100-50+20=70, bob=100+50-20=130.
@@ -389,10 +389,10 @@ describe('Phase 9C closure: finality certificate verification', () => {
       // The certificate still matches the ORIGINAL order — but the transactions don't.
     }
 
-    const results = await runtime.executeBatch(tamperedBatch)
+    const result = await runtime.executeBatch(tamperedBatch)
 
     // Empty results — the batch was rejected before any execution.
-    expect(results.length).toBe(0)
+    expect(result.status).toBe("INVALID_FINALITY_CERTIFICATE")
   })
 
   it('executeBatch rejects a batch with a forged certificate', async () => {
@@ -410,8 +410,8 @@ describe('Phase 9C closure: finality certificate verification', () => {
       finalityCertificate: 'forged-certificate-000000',
     }
 
-    const results = await runtime.executeBatch(forgedBatch)
-    expect(results.length).toBe(0)
+    const result = await runtime.executeBatch(forgedBatch)
+    expect(result.status).toBe("INVALID_FINALITY_CERTIFICATE")
   })
 
   it('executeBatch accepts a valid batch (certificate matches)', async () => {
@@ -423,9 +423,9 @@ describe('Phase 9C closure: finality certificate verification', () => {
     ]
     const batch = consensus.finalize(consensus.propose(txs))
 
-    const results = await runtime.executeBatch(batch)
-    expect(results.length).toBe(1)
-    expect(results[0].success).toBe(true)
+    const result = await runtime.executeBatch(batch)
+    expect(result.status).toBe("EXECUTED"); expect(result.receipts.length).toBe(1)
+    expect(result.receipts[0].success).toBe(true)
   })
 })
 
@@ -574,18 +574,18 @@ describe('Phase 9C closure: batch failure semantics', () => {
     ]
 
     const batch = consensus.finalize(consensus.propose(txs))
-    const results = await runtime.executeBatch(batch)
+    const result = await runtime.executeBatch(batch)
 
     // At least one success and one failure.
-    const hasSuccess = results.some(r => r.success)
-    const hasFailure = results.some(r => !r.success)
+    const hasSuccess = result.receipts.some(r => r.success)
+    const hasFailure = result.receipts.some(r => !r.success)
     expect(hasFailure).toBe(true)
 
     // If alice's tx executed, alice's balance should be 70.
     // If nobody's tx executed first, it failed — alice's tx may or may not
     // have executed depending on sort order. The key assertion is that
     // a failure occurred and the batch stopped.
-    expect(results.length).toBeLessThanOrEqual(2)
+    expect(result.receipts.length).toBeLessThanOrEqual(2)
   })
 })
 
