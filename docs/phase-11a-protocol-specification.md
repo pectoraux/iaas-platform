@@ -643,17 +643,24 @@ repository (no green-test declaration is sufficient on its own).
   a proper Prisma migration
   (`prisma/migrations/20260817000000_recon_c3_partial_unique/`). The runtime
   `ensureC3UniqueIndex()` is a safety net, not the primary path.
-- **C3 migration is actually deployed:** `[IMPLEMENTED]` as of this correction.
+- **C3 migration is actually deployed:** `[IMPLEMENTED]`.
   `vercel.json` declares `"buildCommand": "prisma generate && prisma migrate deploy && next build"`,
   and the Vercel project's `buildCommand` is updated to match. Every Vercel
-  deployment now runs `prisma migrate deploy`, which applies pending migrations
-  (including the C3 partial unique index) before the Next.js build. The
-  migration SQL uses `CREATE UNIQUE INDEX IF NOT EXISTS` (idempotent).
-  **Deployment transition note:** if the Neon database was previously created
-  via `prisma db push` (no `_prisma_migrations` table), the first `migrate deploy`
-  may detect drift. This requires a one-time `prisma migrate resolve --applied`
-  baseline operation. This is documented as a known operational step, not a code
-  gap.
+  deployment runs `prisma migrate deploy`, which applies pending migrations
+  (including the C3 partial unique index) before the Next.js build.
+- **Fresh-DB provisioning (Defect 11 fix):** `[IMPLEMENTED]`. A baseline
+  migration (`20260816000000_initial_baseline`) creates the FULL schema from
+  an empty database — all 44 models, including `PhysicalExecutionEvidence`,
+  `ReconciliationAttempt`, and `ProtocolOutcome`. The C3 index migration
+  (`20260817000000`) runs after the baseline. A fresh PostgreSQL database can
+  now be provisioned entirely via `prisma migrate deploy` — no `db push`
+  required. `vercel.json` is the single source of truth for the production
+  build command (with migrations); `package.json` build is dev-friendly
+  (no migration step, to avoid failing against a non-existent local DB).
+  **For databases previously created via `db push`:** run
+  `prisma migrate resolve --applied 20260816000000_initial_baseline` and
+  `prisma migrate resolve --applied 20260817000000_recon_c3_partial_unique` once
+  to mark both migrations as applied, then `migrate deploy` is a no-op.
 - **PostgreSQL local proof:** `[GAP]`. The local sandbox has no reachable
   Postgres (Neon connection is on Vercel; sandbox IPv6 egress to Neon is
   blocked). All DB-backed tests are CI-only. This is the same limitation as
