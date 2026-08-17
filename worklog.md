@@ -2994,3 +2994,29 @@ Stage Summary:
 - All 8 completeness criteria: [IMPLEMENTED].
 - Only remaining [GAP]: algorithm drift detection (by construction, undetectable — honestly documented).
 - Phase 11B is now structurally and operationally complete, proven against real PostgreSQL.
+
+---
+Task ID: 11B-test-harness-correction
+Agent: main (Z.ai Code)
+Task: Fix the two test-harness defects from the user's eighth audit of f0f1fa6: (1) the restart tests reused the old PostgresProtocolStateStore instead of constructing a fresh one, (2) the C3 test was sequential, not concurrent.
+
+Work Log:
+- Accepted the user's audit in full. Both defects are real test-harness bugs, not implementation bugs.
+- Fix 1 (restart purity): test 1 now constructs a FULLY NEW runtime stack for the "post-crash" runtime: new PostgresProtocolStateStore, new ReconciliationStore, new ProtocolRuntime with fresh ProtocolRuntimeDeps referencing the new stateStore2 (not the original protocolDeps/stateStore1). This proves the protocol runtime's persistence dependency is genuinely reconstructed, not cached. The version-after-recovery read now goes through stateStore2 (the new instance), proving the persisted state is unchanged (not an in-memory cache).
+- Fix 2 (same for test 2): the crash-after-commit test also reused the shared stateStore. Fixed identically — new stateStore2, new protocolRuntime2 with fresh deps. The version-after-recovery read now goes through stateStore2.
+- Fix 3 (C3 concurrency): rewrote the C3 test to be TRULY concurrent. Instead of `await recordPending(); await recordPending()` (sequential), it now uses Promise.allSettled with TWO SEPARATE store instances (storeA, storeB) launching recordPending simultaneously. Asserts exactly one fulfilled (PENDING) and exactly one rejected (unique-constraint/C3). This exercises the actual race the partial unique index was designed to prevent. Two separate store instances simulate two concurrent processes.
+- Ran the corrected tests against the LIVE NEON database: ALL 3 PASS.
+  - Test 1 (restart purity): 11337ms — PENDING → new runtime stack (new state store) → recoverPending → RECONCILED, version 0→1 via new stateStore2, no double-count ✓
+  - Test 2 (crash-after-commit, new stack): 4989ms — journal-hit path, version unchanged via new stateStore2 ✓
+  - Test 3 (concurrent C3 race): 3905ms — Promise.allSettled, exactly 1 fulfilled + 1 rejected (P2002) ✓
+- The prisma:error log in test 3 is expected — it's the P2002 from the losing concurrent insert.
+- VERIFICATION (local, SQLite): 26 pass, 3 skip (PG tests skip cleanly), 0 fail. eslint clean.
+- VERIFICATION (Neon, PostgreSQL): 3 pass, 0 fail. 18 expect calls.
+- The test harness now genuinely proves: (a) full runtime reconstruction from PostgreSQL after a crash, (b) journal-hit recovery without re-submission, (c) concurrent C3 race-proofing. No cached state, no sequential-only C3.
+
+Stage Summary:
+- Restart-purity bug: FIXED — both restart tests construct a fully new runtime stack (new state store, new reconciliation store, new protocol runtime with fresh deps).
+- C3 sequential-only bug: FIXED — the C3 test now uses Promise.allSettled with two separate store instances (true concurrency).
+- All 3 corrected tests pass against live Neon PostgreSQL.
+- 26 pass, 3 skip locally. eslint clean.
+- Criterion 8 is now genuinely proven against real PostgreSQL with a correct test harness.

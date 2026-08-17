@@ -135,14 +135,21 @@ describeOrSkip('Phase 11B Criterion 8: PostgreSQL crash-recovery restart proof',
     const stateBefore = await stateStore1.getState()
     const versionBefore = stateBefore.version
 
-    // --- Simulate process crash: construct a NEW runtime instance ---
+    // --- Simulate process crash: construct a FULLY NEW runtime stack ---
     // sharing the SAME PostgreSQL database. In a real crash, the new process
-    // loads from the same DB. Here we construct new store instances pointing
-    // to the same Neon database.
+    // loads from the same DB with fresh store instances. This test constructs
+    // a new PostgresProtocolStateStore, a new ReconciliationStore, a new
+    // ProtocolRuntime (with fresh deps referencing the new state store), and
+    // a new HybridRuntime — a complete reconstruction, not a partial reuse.
     const stateStore2 = new PostgresProtocolStateStore(networkVersionId)
     const reconStore2 = new PostgresReconciliationStore()
-
-    const protocolRuntime2 = new ProtocolRuntime(protocolDeps)
+    const protocolDeps2: ProtocolRuntimeDeps = {
+      stateStore: stateStore2,
+      executor,
+      validatorRegistry: new InMemoryValidatorRegistry(),
+      consensusEngine: new SimpleConsensusEngine(),
+    }
+    const protocolRuntime2 = new ProtocolRuntime(protocolDeps2)
 
     const hybridRuntime2 = new HybridRuntime({
       infrastructureRuntime: null as never, // not used by recoverPending
@@ -248,10 +255,13 @@ describeOrSkip('Phase 11B Criterion 8: PostgreSQL crash-recovery restart proof',
     // CRASH: do NOT call resolve(). The attempt is still PENDING, but the
     // transaction IS in the journal.
 
-    // Phase 2: new runtime, call recoverPending().
+    // Phase 2: FULLY NEW runtime stack (simulating a fresh process after
+    // crash). New state store, new reconciliation store, new protocol runtime
+    // with fresh deps — all pointing at the same Neon database.
+    const stateStore2 = new PostgresProtocolStateStore(networkVersionId)
     const reconStore2 = new PostgresReconciliationStore()
     const protocolRuntime2 = new ProtocolRuntime({
-      stateStore, // share the same state store (same DB)
+      stateStore: stateStore2,
       executor,
       validatorRegistry: new InMemoryValidatorRegistry(),
       consensusEngine: new SimpleConsensusEngine(),
@@ -271,21 +281,31 @@ describeOrSkip('Phase 11B Criterion 8: PostgreSQL crash-recovery restart proof',
 
     // NO double-count: the protocol version did NOT advance again.
     // Recovery detected the journal entry and synthesized EXECUTED without
-    // re-submitting.
-    const versionAfterRecovery = (await stateStore.getState()).version
+    // re-submitting. Read via the NEW state store to prove the persisted
+    // state is unchanged (not a cached in-memory value).
+    const versionAfterRecovery = (await stateStore2.getState()).version
     expect(versionAfterRecovery).toBe(versionAfterCommit)
   })
 
-  it('C3 partial unique index prevents two concurrent PENDING attempts for the same evidence', async () => {
-    // This test proves the C3 race-proof guarantee on real PostgreSQL.
-    // Two attempts to create a PENDING attempt for the same evidenceId
-    // must result in exactly one success and one failure (P2002).
+  it('C3 partial unique index prevents two CONCURRENT PENDING attempts for the same evidence', async () => {
+    // This test proves the C3 race-proof guarantee on real PostgreSQL by
+    // launching TWO recordPending calls CONCURRENTLY (not sequentially).
+    // The partial unique index must ensure exactly one succeeds and the other
+    // receives a unique-constraint violation (P2002).
+    //
+    // A sequential test (insert, then insert) only proves the index rejects
+    // a second insert after the first exists — it does NOT exercise the race
+    // that the partial unique index was designed to prevent. This test uses
+    // Promise.allSettled to launch both inserts simultaneously.
 
-    const reconStore = new PostgresReconciliationStore()
-    await reconStore.ensureC3UniqueIndex()
+    // Two SEPARATE store instances (simulating two concurrent processes).
+    const storeA = new PostgresReconciliationStore()
+    const storeB = new PostgresReconciliationStore()
+    await storeA.ensureC3UniqueIndex()
+    await storeB.ensureC3UniqueIndex()
 
     const evidence = computeEvidence(
-      `c3-concurrent-${Date.now()}`,
+      `c3-race-${Date.now()}`,
       networkVersionId,
       {
         actualQuantity: '5',
@@ -298,13 +318,25 @@ describeOrSkip('Phase 11B Criterion 8: PostgreSQL crash-recovery restart proof',
     const bridge = new DefaultHybridBridge()
     const txId = bridge.deriveTransactionId(evidence.resultJson, networkVersionId, 'c3-sender', 0)
 
-    // First PENDING attempt — succeeds.
-    const attempt1 = await reconStore.recordPending(evidence, txId, 'c3-sender', 0)
-    expect(attempt1.status).toBe('PENDING')
+    // Launch BOTH recordPending calls concurrently. The partial unique index
+    // on ReconciliationAttempt(evidenceId) WHERE status='PENDING' must ensure
+    // that only one can commit; the other gets P2002.
+    const results = await Promise.allSettled([
+      storeA.recordPending(evidence, txId, 'c3-sender', 0),
+      storeB.recordPending(evidence, txId, 'c3-sender', 0),
+    ])
 
-    // Second PENDING attempt for the SAME evidence — must fail (C3).
-    await expect(
-      reconStore.recordPending(evidence, txId, 'c3-sender', 0),
-    ).rejects.toThrow(/PENDING attempt already exists|C3|unique/i)
+    const fulfilled = results.filter((r) => r.status === 'fulfilled')
+    const rejected = results.filter((r) => r.status === 'rejected')
+
+    // Exactly one must succeed.
+    expect(fulfilled.length).toBe(1)
+    const success = fulfilled[0] as PromiseFulfilledResult<{ attemptId: string; status: string }>
+    expect(success.value.status).toBe('PENDING')
+
+    // Exactly one must fail with a unique-constraint / C3 error.
+    expect(rejected.length).toBe(1)
+    const failure = rejected[0] as PromiseRejectedResult
+    expect(failure.reason.message).toMatch(/PENDING attempt already exists|C3|unique/i)
   })
 })
