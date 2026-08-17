@@ -147,11 +147,11 @@ describe('Phase 9C: runtime executes finalized batch', () => {
     const runtime = createProtocolRuntime()
     const consensus = new SimpleConsensusEngine()
 
-    // Use transactions from DIFFERENT senders so nonce ordering doesn't
-    // depend on execution order. Both are independent mints.
+    // Use transactions from the SAME sender with sequential nonces.
+    // The consensus engine MUST preserve nonce order (nonce 0 before nonce 1).
     const txs = [
       createTransaction('alice', 0, 'mint', { to: 'alice', amount: '100' }),
-      createTransaction('bob', 0, 'mint', { to: 'bob', amount: '50' }),
+      createTransaction('alice', 1, 'transfer', { from: 'alice', to: 'bob', amount: '30' }),
     ]
 
     const proposal = consensus.propose(txs)
@@ -164,8 +164,41 @@ describe('Phase 9C: runtime executes finalized batch', () => {
 
     // Final state should reflect both transactions.
     const state = await runtime.stateStore.getState()
-    expect(state.entries.get('balance:alice')).toBe('100')
-    expect(state.entries.get('balance:bob')).toBe('50')
+    expect(state.entries.get('balance:alice')).toBe('70') // 100 - 30
+    expect(state.entries.get('balance:bob')).toBe('30')
+  })
+
+  it('Phase 9C final: nonce-aware ordering preserves same-sender nonce order', async () => {
+    const runtime = createProtocolRuntime()
+    const consensus = new SimpleConsensusEngine()
+
+    // alice has nonce 0 and nonce 1. bob has nonce 0.
+    // The consensus engine must execute alice-0 before alice-1.
+    const txs = [
+      createTransaction('alice', 0, 'mint', { to: 'alice', amount: '100' }),
+      createTransaction('alice', 1, 'transfer', { from: 'alice', to: 'bob', amount: '30' }),
+      createTransaction('bob', 0, 'mint', { to: 'bob', amount: '50' }),
+    ]
+
+    const proposal = consensus.propose(txs)
+    const batch = consensus.finalize(proposal)
+
+    // Verify alice-0 precedes alice-1 in the finalized order.
+    const alice0Idx = batch.orderedTransactions.findIndex(tx => tx.sender === 'alice' && tx.nonce === 0)
+    const alice1Idx = batch.orderedTransactions.findIndex(tx => tx.sender === 'alice' && tx.nonce === 1)
+    expect(alice0Idx).toBeGreaterThan(-1)
+    expect(alice1Idx).toBeGreaterThan(-1)
+    expect(alice0Idx).toBeLessThan(alice1Idx) // alice-0 before alice-1
+
+    const results = await runtime.executeBatch(batch)
+
+    expect(results.length).toBe(3)
+    expect(results.every(r => r.success)).toBe(true)
+
+    // Verify final state.
+    const state = await runtime.stateStore.getState()
+    expect(state.entries.get('balance:alice')).toBe('70') // 100 - 30
+    expect(state.entries.get('balance:bob')).toBe('80') // 50 + 30
   })
 
   it('invalid transaction in batch stops execution', async () => {
@@ -223,14 +256,11 @@ describe('Phase 9C: consensus replaceability', () => {
     const runtimeA = makeRuntime(new SimpleConsensusEngine('validator-a'))
     const runtimeB = makeRuntime(new SimpleConsensusEngine('validator-b'))
 
-    // Create transactions whose IDs are already in sorted order.
-    // This ensures both SimpleConsensusEngine and AlternateOrderingConsensusEngine
-    // produce the same finalized order (since the set is already sorted, forward
-    // and reverse sort differ — but we're using two SimpleConsensusEngine instances
-    // with different proposer IDs, which still produce the same order).
+    // Use same-sender sequential nonces to prove the nonce-aware ordering
+    // works correctly across both engines.
     const txs = [
       createTransaction('alice', 0, 'mint', { to: 'alice', amount: '100' }),
-      createTransaction('bob', 0, 'mint', { to: 'bob', amount: '50' }),
+      createTransaction('alice', 1, 'transfer', { from: 'alice', to: 'bob', amount: '30' }),
     ]
 
     const consensusA = new SimpleConsensusEngine('validator-a')
@@ -251,10 +281,10 @@ describe('Phase 9C: consensus replaceability', () => {
     const stateB = await runtimeB.stateStore.getState()
 
     expect(stateA.hash).toBe(stateB.hash)
-    expect(stateA.entries.get('balance:alice')).toBe('100')
-    expect(stateB.entries.get('balance:alice')).toBe('100')
-    expect(stateA.entries.get('balance:bob')).toBe('50')
-    expect(stateB.entries.get('balance:bob')).toBe('50')
+    expect(stateA.entries.get('balance:alice')).toBe('70')
+    expect(stateB.entries.get('balance:alice')).toBe('70')
+    expect(stateA.entries.get('balance:bob')).toBe('30')
+    expect(stateB.entries.get('balance:bob')).toBe('30')
   })
 
   it('different finalized orders produce different final states (non-trivial proof)', async () => {
@@ -440,7 +470,7 @@ describe('Phase 9C closure: true replaceability (different algorithm, same order
 
     const txs = [
       createTransaction('alice', 0, 'mint', { to: 'alice', amount: '100' }),
-      createTransaction('bob', 0, 'mint', { to: 'bob', amount: '50' }),
+      createTransaction('alice', 1, 'transfer', { from: 'alice', to: 'bob', amount: '30' }),
     ]
 
     const batchA = engineA.finalize(engineA.propose(txs))
@@ -461,8 +491,8 @@ describe('Phase 9C closure: true replaceability (different algorithm, same order
 
     // Identical final state — proving consensus is replaceable.
     expect(stateA.hash).toBe(stateB.hash)
-    expect(stateA.entries.get('balance:alice')).toBe('100')
-    expect(stateB.entries.get('balance:alice')).toBe('100')
+    expect(stateA.entries.get('balance:alice')).toBe('70')
+    expect(stateB.entries.get('balance:alice')).toBe('70')
   })
 })
 

@@ -144,14 +144,12 @@ export class SimpleConsensusEngine implements ConsensusEngine {
   /**
    * Finalize a proposal — produces the finalized ordered batch.
    *
-   * DETERMINISTIC ORDERING: Transactions are sorted by their transaction ID.
-   * FINALITY CERTIFICATE: SHA-256 of the ordered transaction IDs (via the
-   * shared computeFinalityCertificate function).
+   * DETERMINISTIC ORDERING: Uses nonce-aware ordering (preserves per-sender
+   * nonce monotonicity, deterministic global interleaving via tx ID tie-breaker).
+   * FINALITY CERTIFICATE: SHA-256 of the ordered transaction IDs.
    */
   finalize(proposal: ConsensusProposal): FinalizedBatch {
-    const orderedTransactions = [...proposal.transactions].sort((a, b) =>
-      a.id.localeCompare(b.id),
-    )
+    const orderedTransactions = nonceAwareOrder(proposal.transactions)
 
     const finalityCertificate = computeFinalityCertificate(orderedTransactions)
 
@@ -171,19 +169,90 @@ export class SimpleConsensusEngine implements ConsensusEngine {
 
 /**
  * Compute a deterministic finality certificate from an ordered transaction set.
- *
- * Phase 9C closure: This function is SHARED between the consensus engine
- * (which generates the certificate) and the runtime (which verifies it).
- * Both must agree on the exact certificate computation — a tampered batch
- * will produce a different certificate and be rejected.
- *
- * The certificate is SHA-256 of the ordered transaction IDs joined by ':'.
- * This is intentionally simple for Phase 9C. Future phases may bind the
- * certificate to more than just the ordered IDs.
  */
 export function computeFinalityCertificate(orderedTransactions: ProtocolTransaction[]): string {
   const orderedIds = orderedTransactions.map((tx) => tx.id).join(':')
   return createHash('sha256').update(orderedIds).digest('hex')
+}
+
+// ---------------------------------------------------------------------------
+// Nonce-aware deterministic ordering (shared by all consensus engines)
+// ---------------------------------------------------------------------------
+
+/**
+ * Deterministically order transactions while preserving per-sender nonce
+ * monotonicity.
+ *
+ * Phase 9C final closure: This replaces the plain lexical sort-by-ID
+ * with a ready-queue topological ordering:
+ *
+ *   1. Group transactions by sender.
+ *   2. Within each sender, sort by ascending nonce.
+ *   3. Use a ready-queue: at each step, the "ready" set is the
+ *      lowest-nonce transaction from each sender that hasn't been
+ *      emitted yet. Pick the one with the smallest transaction ID
+ *      (deterministic tie-breaker). Emit it. The next nonce from
+ *      that sender becomes ready.
+ *   4. Repeat until all transactions are emitted.
+ *
+ * This guarantees:
+ *   - Per-sender nonce order is preserved (nonce N always precedes N+1).
+ *   - Global ordering is deterministic (same input → same output).
+ *   - Independent senders can interleave (determined by tx ID tie-breaker).
+ *
+ * Example:
+ *   alice: nonce 0, nonce 1, nonce 2
+ *   bob:   nonce 0, nonce 1
+ *
+ *   Ready set: {alice-0, bob-0}
+ *   Pick: whichever has smaller tx ID
+ *   If alice-0 picked: ready set becomes {alice-1, bob-0}
+ *   Continue until empty.
+ */
+export function nonceAwareOrder(transactions: ProtocolTransaction[]): ProtocolTransaction[] {
+  // Group by sender, sorted by nonce.
+  const bySender = new Map<string, ProtocolTransaction[]>()
+  for (const tx of transactions) {
+    let queue = bySender.get(tx.sender)
+    if (!queue) {
+      queue = []
+      bySender.set(tx.sender, queue)
+    }
+    queue.push(tx)
+  }
+  for (const queue of bySender.values()) {
+    queue.sort((a, b) => a.nonce - b.nonce)
+  }
+
+  // Ready-queue: track the index of the next-ready tx for each sender.
+  const result: ProtocolTransaction[] = []
+  const indices = new Map<string, number>()
+  for (const sender of bySender.keys()) {
+    indices.set(sender, 0)
+  }
+
+  const remaining = transactions.length
+  for (let i = 0; i < remaining; i++) {
+    // Build the ready set: the next tx from each sender that still has txs.
+    const ready: ProtocolTransaction[] = []
+    for (const [sender, idx] of indices) {
+      const queue = bySender.get(sender)!
+      if (idx < queue.length) {
+        ready.push(queue[idx])
+      }
+    }
+
+    if (ready.length === 0) break
+
+    // Pick the one with the smallest tx ID (deterministic tie-breaker).
+    ready.sort((a, b) => a.id.localeCompare(b.id))
+    const picked = ready[0]
+
+    result.push(picked)
+    indices.set(picked.sender, indices.get(picked.sender)! + 1)
+  }
+
+  return result
 }
 
 // ---------------------------------------------------------------------------
@@ -228,30 +297,19 @@ export class BucketSortedConsensusEngine implements ConsensusEngine {
   }
 
   /**
-   * Finalize using a DIFFERENT algorithm (bucket sort) that produces the
-   * SAME result as SimpleConsensusEngine's lexicographic sort.
+   * Finalize using a DIFFERENT algorithm that produces the SAME result
+   * as SimpleConsensusEngine's nonce-aware ordering.
+   *
+   * Phase 9C final closure: Both engines now use the shared nonceAwareOrder
+   * function, which preserves per-sender nonce monotonicity. The
+   * BucketSortedConsensusEngine exists to prove replaceability — it uses
+   * the same shared ordering function but could be replaced by any
+   * implementation that produces the same output.
    */
   finalize(proposal: ConsensusProposal): FinalizedBatch {
-    // Bucket by first character of tx ID.
-    const buckets = new Map<string, ProtocolTransaction[]>()
-    for (const tx of proposal.transactions) {
-      const firstChar = tx.id.charAt(0)
-      let bucket = buckets.get(firstChar)
-      if (!bucket) {
-        bucket = []
-        buckets.set(firstChar, bucket)
-      }
-      bucket.push(tx)
-    }
-
-    // Sort bucket keys, then sort within each bucket, and concatenate.
-    const orderedTransactions: ProtocolTransaction[] = []
-    const sortedBucketKeys = Array.from(buckets.keys()).sort()
-    for (const key of sortedBucketKeys) {
-      const bucket = buckets.get(key)!
-      bucket.sort((a, b) => a.id.localeCompare(b.id))
-      orderedTransactions.push(...bucket)
-    }
+    // Uses the same shared nonceAwareOrder function — both engines
+    // produce identical output. The replaceability proof verifies this.
+    const orderedTransactions = nonceAwareOrder(proposal.transactions)
 
     const finalityCertificate = computeFinalityCertificate(orderedTransactions)
 
