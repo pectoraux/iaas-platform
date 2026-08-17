@@ -2723,3 +2723,36 @@ Stage Summary:
 - NetworkVersion isolation is enforced at the runtime boundary.
 - The deprecated execute() is removed — apply() is the sole executor API.
 - Phase 9B.2 is complete. Phase 9B is now truly production-safe enough to hand to consensus. Phase 9C can begin.
+
+---
+Task ID: 11A
+Agent: main (Z.ai Code)
+Task: Respond to the user's audit of commit 48e8c13 (Phase 10.5D "durable PendingProtocolCommitment"). Accept the audit, correct the over-strong "durable" claim, and produce the Phase 11A Protocol Specification document defining the durable persistence/recovery semantics for hybrid reconciliation (specification, not implementation).
+
+Work Log:
+- Verified repository state: HEAD = 48e8c13 on main. Read the exact files the audit cites.
+- Confirmed audit findings against actual code:
+  - EXECUTION_FAILED IS correctly implemented (protocol-runtime.ts:317-328 stops at first failure, returns EXECUTION_FAILED).
+  - PendingProtocolCommitment is NOT durable: hybrid-runtime.ts:269-275 constructs it in memory (randomUUID), :281-290 mutates it in place. No db.* call, no store, no journal. The word "durable" appears only in comments (:268).
+  - Sequencing flaw confirmed: physical execution (:258) precedes in-memory commitment creation (:269); no durable write between them.
+  - Cause conflation confirmed: :284-290 maps every non-EXECUTED BatchExecutionStatus to RECONCILIATION_REQUIRED; PendingCommitmentStatus (types.ts:457-460) has only 3 values.
+  - No PendingProtocolCommitment Prisma model exists (grep returned only CapacityCommitment / VppPortfolioCommitment, which are economic concepts).
+  - Established durable bar = PostgresProtocolStateStore pattern (atomic db.$transaction, OCC via UNIQUE, transition journal at postgres-state-store.ts:71-92). The commitment has none of it.
+- Authored docs/phase-11a-protocol-specification.md — a specification document (not code). Contents:
+  - §1 Honest status record for Phase 10.5D, correcting the "durable" overclaim with a precise [IMPLEMENTED]/[GAP] table and the corrected status statement.
+  - §2 Foundational invariants (frozen chain restated) + 7 architectural rules; rule 7 made explicit: "durable" means the PostgresProtocolStateStore atomic/OCC/journaled bar, not an in-memory object.
+  - §3 Scope: specifies persistence/recovery semantics; explicitly defers the reconciliation engine (per user direction not to block 11A on a large subsystem).
+  - §4 Four-primitive object model the user named: PhysicalExecutionEvidence -> PendingCommitment -> ProtocolOutcome -> ReconciliationState, each content-addressed where it represents a fact, with identity, fields, and invariants (E1-E3, C1-C4, O1-O3, R1-R3). Primitives store hashes/IDs, not whole objects.
+  - §5 Durable persistence contract: ReconciliationStore interface (recordPending/resolve/loadPending/findByEvidence) + 3 required Prisma models + atomic db.$transaction rule mirroring PostgresProtocolStateStore.
+  - §6 Crash-safe sequencing: current (incorrect) sequence vs specified (correct) sequence with two durable writes; crash recovery via journal lookup + idempotent re-submission; bridge determinism requirement (C2 + canonical identity make recovery safe).
+  - §7 Anti-conflation cause taxonomy: precise mapping EXECUTED->RECONCILED, EXECUTION_FAILED->RECONCILIATION_REQUIRED_EXECUTION_FAILURE, REJECTED_BY_CONSENSUS->RECONCILIATION_REQUIRED_CONSENSUS_REJECTION, INVALID_FINALITY_CERTIFICATE->RECONCILIATION_REQUIRED_CERTIFICATE_INVALID, NO_TRANSACTIONS->RECONCILIATION_REQUIRED_INVARIANT_VIOLATION. Invariant R2 makes the conflation structurally impossible.
+  - §8 Eight completeness criteria (1 IMPLEMENTED today, 2-8 GAP) gating "economically/operationally complete", including criterion 8: a crash-recovery proof in architecture tests.
+  - §9 Explicit non-claims (does not claim 10.5D complete; does not specify an engine; does not change consensus/executor/identity).
+  - §10 Boundary summary.
+- No code changed. No schema changed. No tests added. This is a specification artifact only, as the user directed ("the next artifact should be a protocol specification document, not more code").
+
+Stage Summary:
+- Audit accepted in full. The "durable reconciliation" claim in 48e8c13's commit message is retracted; corrected status = "execution-failure semantics complete; reconciliation lifecycle modeled and detectable; durable persistence/recovery not yet implemented."
+- Deliverable: docs/phase-11a-protocol-specification.md — a grounded specification (every [GAP] cites actual file:line) defining what durable hybrid reconciliation must mean before it may be claimed.
+- Phase 10.5D is NOT closed as durable reconciliation. Phase 11B is the implementation gate against the §8 criteria; the next audit target is a crash-recovery proof (criterion 8), not another green-test declaration.
+- No overclaim made. The document explicitly distinguishes [IMPLEMENTED] from [GAP] and states nothing is complete that the repository does not support.
