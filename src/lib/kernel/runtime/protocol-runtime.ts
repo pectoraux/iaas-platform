@@ -200,8 +200,15 @@ export class ProtocolRuntime implements NetworkRuntime {
   /**
    * Validate a transaction without executing it.
    * Returns null if valid, or an error message.
+   *
+   * Phase 9B.2 closure: applies the same NetworkVersion isolation check
+   * as executeTransaction — a transaction bound to a different
+   * NetworkVersion is rejected at every protocol-runtime entry point.
    */
   async validateTransaction(transaction: ProtocolTransaction): Promise<string | null> {
+    if (transaction.networkVersionId !== this.deps.stateStore.networkVersionId) {
+      return `Transaction networkVersionId '${transaction.networkVersionId}' does not match store '${this.deps.stateStore.networkVersionId}'`
+    }
     const state = await this.deps.stateStore.getState()
     return this.deps.executor.validate(transaction, state)
   }

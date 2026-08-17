@@ -59,3 +59,4 @@ server.log
 # local SQLite database (binary, changes every test run)
 *.db
 /db/*.db
+.zscripts/

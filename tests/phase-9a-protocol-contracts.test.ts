@@ -267,14 +267,54 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
     expect(snapshot.entries.get('test')).toBe('value')
   })
 
-  it('Phase 9B.2: NetworkVersion isolation — wrong networkVersionId rejected', async () => {
+  it('Phase 9B.2: NetworkVersion isolation — wrong networkVersionId rejected in executeTransaction', async () => {
     const runtime = createProtocolRuntime()
-    // The runtime's store has networkVersionId='test-nv'.
-    // Pass a transaction with a DIFFERENT networkVersionId.
     const tx = createTransaction('wrong-nv', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
     const result = await runtime.executeTransaction(tx)
     expect(result.success).toBe(false)
     expect(result.error).toMatch(/does not match store/)
+  })
+
+  it('Phase 9B.2 closure: NetworkVersion isolation — wrong networkVersionId rejected in validateTransaction', async () => {
+    const runtime = createProtocolRuntime()
+    const tx = createTransaction('wrong-nv', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
+    const error = await runtime.validateTransaction(tx)
+    expect(error).toMatch(/does not match store/)
+  })
+
+  it('Phase 9B.2 closure: same-store concurrent write sets do not interleave', async () => {
+    // This is the regression test for the original shared-staging-buffer bug.
+    // Two transactions use the SAME store instance. Each calculates its own
+    // write set (isolated). Tx A commits first; Tx B gets StaleVersionError.
+    // The resulting state contains ONLY A's changes — not a mixture of A+B.
+    const store = new InMemoryProtocolStateStore('nv1')
+    const executor = new DeterministicTransactionExecutor()
+
+    // Both read the same state (version 0).
+    const state = await store.getState()
+
+    // Tx A: mint alice 100
+    const txA = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
+    const calcA = executor.apply(txA, state)
+
+    // Tx B: mint bob 200 (different key, same version)
+    const txB = createTransaction('nv1', 'bob', 0, 'mint', { to: 'bob', amount: '200' })
+    const calcB = executor.apply(txB, state)
+
+    // A commits first — succeeds.
+    const afterA = await store.commit(state.version, calcA.writeSet, txA.id)
+    expect(afterA.version).toBe(1)
+    expect(afterA.entries.get('balance:alice')).toBe('100')
+    // B's key should NOT be present yet.
+    expect(afterA.entries.get('balance:bob')).toBeUndefined()
+
+    // B tries to commit with the old version — StaleVersionError.
+    await expect(store.commit(state.version, calcB.writeSet, txB.id)).rejects.toThrow(/Stale version/)
+
+    // Reload state — verify it contains ONLY A's changes.
+    const finalState = await store.getState()
+    expect(finalState.entries.get('balance:alice')).toBe('100') // A's change
+    expect(finalState.entries.get('balance:bob')).toBeUndefined() // B's change was NOT committed
   })
 
   it('Phase 9B.1: executor does NOT import or use ProtocolStateStore', () => {
