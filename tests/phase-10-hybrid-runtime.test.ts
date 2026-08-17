@@ -158,6 +158,12 @@ describe('Phase 10: hybrid execution', () => {
     expect(result.protocolResult.receipts[0].success).toBe(true)
     expect(result.protocolResult.receipts[0].receipt.transactionId).toBeTruthy()
 
+    // Phase 10.5D: A PendingProtocolCommitment was created and reconciled.
+    expect(result.commitment).toBeDefined()
+    expect(result.commitment.status).toBe('RECONCILED')
+    expect(result.commitment.infrastructureResult.success).toBe(true)
+    expect(result.commitment.transaction).toBeDefined()
+
     // The protocol state now has a record of the delivery.
     const state = await hybridRuntime.protocol.stateStore.getState()
     expect(state.version).toBeGreaterThan(0) // state was committed
@@ -166,9 +172,6 @@ describe('Phase 10: hybrid execution', () => {
   it('infrastructure failure (adapter throws) is caught by the hybrid runtime', async () => {
     const hybridRuntime = createHybridRuntime()
 
-    // Use an unsupported capability — the adapter registry throws before
-    // the adapter executes. The hybrid runtime's executeHybrid should
-    // propagate the error (not produce a result with success=false).
     await expect(
       hybridRuntime.executeHybrid(
         {
@@ -182,6 +185,66 @@ describe('Phase 10: hybrid execution', () => {
         0,
       ),
     ).rejects.toThrow(/does not support capability/)
+  })
+
+  it('Phase 10.5D: physical success + consensus rejection → RECONCILIATION_REQUIRED', async () => {
+    // Create a hybrid runtime where the consensus engine has a validator
+    // registry that will REJECT the proposal.
+    const adapterRegistry = new AdapterRegistry()
+    adapterRegistry.register({
+      adapter: new SimulatedComputeAdapter(),
+      supportedAssetTypes: ['compute_node', 'gpu_cluster'],
+      supportedCapabilities: ['gpu_compute', 'cpu_compute'],
+    })
+    const infrastructureRuntime = new InfrastructureRuntime(adapterRegistry)
+
+    // Validator registry with NO registered validators → all proposals rejected.
+    const validatorRegistry = new InMemoryValidatorRegistry()
+    const consensusEngine = new SimpleConsensusEngine('validator-0', validatorRegistry)
+
+    const stateStore = new InMemoryProtocolStateStore('hybrid-test-nv')
+    const protocolRuntime = new ProtocolRuntime({
+      stateStore,
+      executor: createExecutorWithHandlers(),
+      validatorRegistry,
+      consensusEngine,
+    })
+
+    const hybridRuntime = new HybridRuntime({
+      infrastructureRuntime,
+      protocolRuntime,
+      bridge: new DefaultHybridBridge(),
+      protocolSender: 'hybrid-test-sender',
+    })
+
+    // Physical execution succeeds.
+    const result = await hybridRuntime.executeHybrid(
+      {
+        assetId: 'reconcile-test',
+        assetType: 'gpu_cluster',
+        capabilityType: 'gpu_compute',
+        assignedQuantity: '10',
+        assignedUnit: 'GPU-hours',
+        durationSeconds: 3600,
+        parameters: { gpuCount: 4 },
+      },
+      0,
+    )
+
+    // Infrastructure succeeded.
+    expect(result.infrastructureResult.success).toBe(true)
+
+    // Protocol was rejected by consensus (no active validators).
+    expect(result.protocolResult.status).toBe('REJECTED_BY_CONSENSUS')
+
+    // Phase 10.5D: The commitment is RECONCILIATION_REQUIRED.
+    expect(result.commitment.status).toBe('RECONCILIATION_REQUIRED')
+    expect(result.commitment.infrastructureResult.success).toBe(true)
+    expect(result.commitment.batchResult?.status).toBe('REJECTED_BY_CONSENSUS')
+
+    // The protocol state was NOT changed (no protocol transition recorded).
+    const state = await hybridRuntime.protocol.stateStore.getState()
+    expect(state.version).toBe(0) // genesis, unchanged
   })
 })
 

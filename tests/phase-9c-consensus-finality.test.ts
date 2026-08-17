@@ -224,7 +224,8 @@ describe('Phase 9C: runtime executes finalized batch', () => {
     const batch = consensus.finalize(consensus.propose(txs))
     const result = await runtime.executeBatch(batch)
 
-    // At least one success (the valid transfer), then failure.
+    // Phase 10.5D: EXECUTION_FAILED (not EXECUTED) because a transaction failed.
+    expect(result.status).toBe('EXECUTION_FAILED')
     const hasFailure = result.receipts.some(r => !r.success)
     expect(hasFailure).toBe(true)
     // The last result should be the failure.
@@ -576,15 +577,11 @@ describe('Phase 9C closure: batch failure semantics', () => {
     const batch = consensus.finalize(consensus.propose(txs))
     const result = await runtime.executeBatch(batch)
 
-    // At least one success and one failure.
+    // Phase 10.5D: EXECUTION_FAILED because at least one tx failed.
+    expect(result.status).toBe('EXECUTION_FAILED')
     const hasSuccess = result.receipts.some(r => r.success)
     const hasFailure = result.receipts.some(r => !r.success)
     expect(hasFailure).toBe(true)
-
-    // If alice's tx executed, alice's balance should be 70.
-    // If nobody's tx executed first, it failed — alice's tx may or may not
-    // have executed depending on sort order. The key assertion is that
-    // a failure occurred and the batch stopped.
     expect(result.receipts.length).toBeLessThanOrEqual(2)
   })
 })

@@ -45,8 +45,10 @@ import type {
   ProtocolExecutionResult,
   FinalizedBatch,
   BatchExecutionResult,
+  PendingProtocolCommitment,
 } from './protocol/types'
 import { computeTransactionId } from './protocol/executor'
+import { randomUUID } from 'crypto'
 
 // ---------------------------------------------------------------------------
 // Hybrid Bridge — the only place that knows about both worlds
@@ -224,8 +226,25 @@ export class HybridRuntime implements NetworkRuntime {
    *
    * @param input The infrastructure execution input.
    * @param currentNonce The sender's current protocol nonce.
-   * @returns The infrastructure result and the protocol batch execution result
-   *          (with explicit status: EXECUTED, REJECTED_BY_CONSENSUS, etc.).
+   * @returns The infrastructure result, the protocol batch result, and
+   *          the pending commitment (with updated status).
+   */
+  /**
+   * Execute a hybrid assignment with durable reconciliation:
+   *   1. Execute physical work via InfrastructureRuntime.executeAssignment
+   *   2. Create a PendingProtocolCommitment (durable record)
+   *   3. Convert the result to a protocol transaction via the bridge
+   *   4. Submit through consensus: propose → validateProposal → finalize → executeBatch
+   *   5. Update the commitment based on the protocol result
+   *
+   * Phase 10.5D: The PendingProtocolCommitment is a durable record that
+   * prevents the physical world from getting ahead of protocol state
+   * without a trace. If consensus rejects or execution fails, the
+   * commitment has status RECONCILIATION_REQUIRED — the physical result
+   * is unreconciled and can be retried.
+   *
+   * @returns The infrastructure result, the protocol batch result, and
+   *          the pending commitment (with updated status).
    */
   async executeHybrid(
     input: RuntimeExecuteInput,
@@ -233,6 +252,7 @@ export class HybridRuntime implements NetworkRuntime {
   ): Promise<{
     infrastructureResult: RuntimeExecuteResult
     protocolResult: BatchExecutionResult
+    commitment: PendingProtocolCommitment
   }> {
     // 1. Execute physical work via the infrastructure runtime.
     const infrastructureResult = await this.deps.infrastructureRuntime.executeAssignment(input)
@@ -245,11 +265,31 @@ export class HybridRuntime implements NetworkRuntime {
       currentNonce,
     )
 
-    // 3. Submit through the canonical protocol path:
-    //    propose → validateProposal → finalize → executeBatch.
+    // 3. Create a durable PendingProtocolCommitment (PENDING).
+    const commitment: PendingProtocolCommitment = {
+      id: randomUUID(),
+      infrastructureResult,
+      transaction,
+      status: 'PENDING',
+      createdAt: new Date(),
+    }
+
+    // 4. Submit through the canonical protocol path.
     const protocolResult = await this.deps.protocolRuntime.submitTransaction(transaction)
 
-    return { infrastructureResult, protocolResult }
+    // 5. Update the commitment based on the protocol result.
+    commitment.batchResult = protocolResult
+    commitment.resolvedAt = new Date()
+
+    if (protocolResult.status === 'EXECUTED') {
+      commitment.status = 'RECONCILED'
+    } else {
+      // REJECTED_BY_CONSENSUS, INVALID_FINALITY_CERTIFICATE, EXECUTION_FAILED,
+      // or NO_TRANSACTIONS — all mean the physical result is unreconciled.
+      commitment.status = 'RECONCILIATION_REQUIRED'
+    }
+
+    return { infrastructureResult, protocolResult, commitment }
   }
 
   // -------------------------------------------------------------------------

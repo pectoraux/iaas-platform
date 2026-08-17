@@ -302,13 +302,26 @@ export class ProtocolRuntime implements NetworkRuntime {
     }
 
     const results: ProtocolExecutionResult[] = []
+    let hasFailure = false
 
     for (const transaction of batch.orderedTransactions) {
       const result = await this.executeTransaction(transaction)
       results.push(result)
 
       if (!result.success) {
+        hasFailure = true
         break
+      }
+    }
+
+    // Phase 10.5D: EXECUTED means ALL transactions succeeded.
+    // EXECUTION_FAILED means at least one failed.
+    if (hasFailure) {
+      const failedReceipt = results.find(r => !r.success)
+      return {
+        status: 'EXECUTION_FAILED',
+        receipts: results,
+        error: failedReceipt?.error ?? 'Transaction execution failed',
       }
     }
 
