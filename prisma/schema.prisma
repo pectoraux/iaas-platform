@@ -1491,3 +1491,70 @@ model ProtocolTransition {
   @@index([transactionHash])
   @@index([previousStateHash])
 }
+
+/// Phase 11B §4.1: PhysicalExecutionEvidence — proves a physical action
+/// occurred in the infrastructure world. Content-addressed by evidenceId.
+/// Immutable after creation (no update path). Stores resultJson so the intended
+/// protocol transaction can be re-derived after a crash (spec §6.3).
+///
+/// Mirrors the ProtocolStateSnapshot pattern: full state (resultJson) + hash
+/// (resultDigest) stored together.
+model PhysicalExecutionEvidence {
+  evidenceId            String   @id // content-addressed SHA-256
+  executionAssignmentId String
+  runtimeKind           String   // 'hybrid'
+  networkVersionId      String
+  resultDigest          String   // SHA-256 of canonical RuntimeExecuteResult
+  resultJson            String   // full canonical RuntimeExecuteResult (for re-derivation)
+  occurredAt            DateTime
+
+  @@index([executionAssignmentId])
+  @@index([networkVersionId])
+}
+
+/// Phase 11B §4.2: PendingCommitment — durable record linking a
+/// PhysicalExecutionEvidence to a protocol transaction that should be derived
+/// from it. This is the crash barrier between physical execution and protocol
+/// commit.
+///
+/// C3 (spec §4.2): at most one PENDING commitment per evidenceId. Enforced by
+/// @@unique([evidenceId]). Re-deriving the same evidence after a crash returns
+/// the existing commitment, not a duplicate.
+///
+/// C4 (spec §4.2): a commitment never transitions backwards. PENDING →
+/// {RECONCILED, <cause>} is the only forward edge. status is the
+/// ReconciliationState (PENDING before resolution, terminal after).
+model PendingCommitment {
+  commitmentId           String   @id @default(cuid())
+  evidenceId             String   // FK to PhysicalExecutionEvidence
+  networkVersionId       String
+  intendedTransactionId  String   // deterministic from evidence + nonce (C2)
+  status                 String   // ReconciliationState
+  createdAt              DateTime @default(now())
+  resolvedAt             DateTime?
+  outcomeId              String?  // FK to ProtocolOutcome
+
+  @@unique([evidenceId]) // C3: at most one commitment per evidence
+  @@index([networkVersionId])
+  @@index([status])
+  @@index([intendedTransactionId])
+}
+
+/// Phase 11B §4.3: ProtocolOutcome — durable record of what the protocol layer
+/// returned for a given intendedTransactionId. Content-addressed by outcomeId.
+/// Append-only (O2). Stores the precise BatchExecutionStatus (O1), never
+/// collapsed. Stores a receipts digest, not the array (O3 — receipts live in
+/// the ProtocolTransition journal).
+model ProtocolOutcome {
+  outcomeId            String   @id // content-addressed SHA-256
+  commitmentId         String   // FK to PendingCommitment
+  transactionId        String   // the ProtocolTransaction.id actually submitted
+  finalityCertificate  String?  // null if rejected pre-finalization
+  status               String   // exact BatchExecutionStatus (O1)
+  receiptsDigest       String?  // SHA-256 of canonical receipts (O3)
+  error                String?
+  recordedAt           DateTime @default(now())
+
+  @@index([commitmentId])
+  @@index([transactionId])
+}
