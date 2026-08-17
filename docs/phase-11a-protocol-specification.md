@@ -623,19 +623,18 @@ repository (no green-test declaration is sufficient on its own).
    independent-algorithm independence (algorithm drift is undetectable by
    construction — see §6.4). (Satisfied at `2b04989`.)
 
-8. **`[IMPLEMENTED — contract/in-memory proof]` / `[GAP — PostgreSQL restart integration proof]`**
-   The architecture tests include a crash-recovery proof — a `PENDING` attempt
-   survives a simulated process restart and is resolved without double-counting
-   and without losing the physical action. The in-memory proof exercises the
-   recovery algorithm's control flow (loadPending → journal lookup →
-   re-submit/synthesize → resolve). It does **not** prove the full PostgreSQL
-   path: PostgreSQL commit → process crash → PostgreSQL survives → fresh process
-   loads PENDING → journal lookup → no double-count. Per the architectural rule
-   "PostgreSQL is the canonical system of record; durable means the PostgreSQL
-   path," a simulated in-memory restart does not establish criterion 8 fully.
-   The PostgreSQL restart integration proof is CI-only (local sandbox has no
-   reachable Postgres). The criterion is split into two statuses to reflect
-   this honestly.
+8. **`[IMPLEMENTED]`** Crash-recovery restart proof: the architecture tests
+   include a PostgreSQL-backed crash-recovery proof — a `PENDING` attempt
+   survives a simulated process restart (new runtime instance, same Neon
+   PostgreSQL database) and is resolved without double-counting and without
+   losing the physical action. The full path is proven: PENDING attempt in
+   PostgreSQL → simulated crash → `loadPending()` → journal lookup/resubmission
+   → single RECONCILED outcome → no double-count. A second test proves the
+   crash-after-commit path (recovery detects the journal entry and synthesizes
+   EXECUTED without re-submitting). A third test proves C3 race-proofing on
+   real PostgreSQL (P2002 on concurrent PENDING). Run against the live Neon
+   database: `DATABASE_URL=postgresql://... bun test tests/phase-11b-postgres-crash-recovery.test.ts`
+   — all 3 tests pass. Locally (SQLite), the tests skip cleanly.
 
 ### 8.1 Remaining gaps (honest)
 
@@ -664,19 +663,20 @@ repository (no green-test declaration is sufficient on its own).
   both stored checksums match the committed files; all 45 tables present;
   C3 partial unique index present; O2 unique constraint present; no schema
   drift. The migration ledger is truthful — it records actual execution of
-  the committed migration files. `scripts/baseline-migrations.ts` is retained
-  as documentation of the db-push-to-migrations transition but is no longer
-  the mechanism by which the Neon DB was baselined (Prisma itself was).
+  the committed migration files. The interim `scripts/baseline-migrations.ts`
+  (a manual ledger-synthesis tool) has been REMOVED; `prisma migrate` is the
+  single canonical migration mechanism.
 - **PostgreSQL execution proof (schema + migrations):** `[IMPLEMENTED]`.
   `prisma migrate deploy` was executed against the live Neon database (after
   resetting it to a clean state). Both migrations applied successfully with
   real checksums. The schema + C3 index + O2 constraint are proven on actual
   PostgreSQL, not just structurally from migration files.
-- **PostgreSQL crash-recovery restart integration proof:** `[GAP]`. Criterion 8's
-  in-memory proof exercises the recovery control flow but does not prove the
-  full PostgreSQL restart path (commit → crash → PostgreSQL survives → fresh
-  process loads PENDING → journal lookup → no double-count). See criterion 8
-  above for the split status. This remains CI-only.
+- **PostgreSQL crash-recovery restart integration proof:** `[IMPLEMENTED]`.
+  Criterion 8 is now proven against the live Neon database. The test
+  (`tests/phase-11b-postgres-crash-recovery.test.ts`) exercises the full
+  restart path: PENDING attempt in PostgreSQL → simulated crash (new runtime
+  instance, same DB) → `loadPending()` → journal lookup/resubmission → single
+  RECONCILED outcome → no double-count. All 3 tests pass against Neon.
 - **Algorithm drift detection:** `[GAP]` by construction. A bug in the bridge's
   `buildPayload` is undetectable by ID comparison (see §6.4). This is a
   fundamental property of the transaction-ID definition, not an implementation

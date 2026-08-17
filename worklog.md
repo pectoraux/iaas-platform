@@ -2964,3 +2964,33 @@ Stage Summary:
 - prisma migrate deploy: PROVEN no-op (all migrations applied + finished; future deploys will detect no drift).
 - 88/88 tests pass. eslint clean. Dev server HTTP 200.
 - The de09bab commit's synthetic-ledger approach is superseded. The migration ledger now faithfully records execution of the committed migration files.
+
+---
+Task ID: 11B-criterion-8-postgres-proof
+Agent: main (Z.ai Code)
+Task: Close the final Phase 11B gap — the PostgreSQL crash-recovery restart integration proof (criterion 8) — and remove the executable baseline-migrations.ts so prisma migrate is the single canonical migration mechanism.
+
+Work Log:
+- Accepted the user's audit in full. Two cleanups: (1) remove scripts/baseline-migrations.ts as an executable migration tool (it undermined the "prisma migrate is the source of truth" invariant), (2) close criterion 8 with a real PostgreSQL restart test.
+- Cleanup 1 (single canonical migration path): removed scripts/baseline-migrations.ts and the @neondatabase/serverless dependency (it was only needed for the manual baseline). prisma migrate is now the ONLY mechanism that can create/modify the migration ledger. Updated spec §8.1 to note the script's removal.
+- Cleanup 2 (criterion 8 PostgreSQL restart proof): wrote tests/phase-11b-postgres-crash-recovery.test.ts with 3 tests:
+  1. "PENDING attempt in PostgreSQL survives simulated restart and resolves without double-counting" — creates a PENDING attempt via PostgresReconciliationStore (real PostgreSQL), constructs a NEW runtime instance sharing the same Neon DB (simulating a fresh process after crash), calls recoverPending(), verifies RECONCILED + protocol state advanced exactly once + idempotent re-call.
+  2. "crash AFTER protocol commit but BEFORE resolve: recovery detects journal entry and synthesizes EXECUTED without re-submitting" — submits the transaction (creating the journal entry), does NOT call resolve (simulating crash), then recovers. Verifies the journal-hit path synthesizes EXECUTED without re-submitting (no double-count).
+  3. "C3 partial unique index prevents two concurrent PENDING attempts for the same evidence" — proves the P2002 race-proof guarantee on real PostgreSQL.
+- Ran the test suite against the LIVE NEON database (DATABASE_URL=postgresql://neondb_owner:...@ep-summer-glade-axl0nrxs-pooler.c-4.us-east-2.aws.neon.tech/neondb). ALL 3 TESTS PASSED:
+  - Test 1: 9478ms — PENDING → recoverPending → RECONCILED, version 0→1, no double-count ✓
+  - Test 2: 4732ms — journal-hit path, version unchanged (no re-submit) ✓
+  - Test 3: 3012ms — P2002 on second PENDING insert for same evidence ✓
+  (The prisma:error log in test 3 is expected — it's the P2002 the test deliberately triggers.)
+- The tests use `describe.skip` when DATABASE_URL is not PostgreSQL, so they skip cleanly in the local SQLite environment (143 pass, 3 skip, 0 fail) and run against Neon/CI when a real PostgreSQL URL is set.
+- Updated spec §8 criterion 8 from [IMPLEMENTED — contract/in-memory proof] / [GAP — PostgreSQL restart integration proof] to [IMPLEMENTED] (PostgreSQL-backed proof). Updated §8.1 "PostgreSQL crash-recovery restart integration proof" from [GAP] to [IMPLEMENTED].
+- VERIFICATION (local, SQLite): 143 pass, 3 skip, 0 fail. eslint clean. Dev server HTTP 200.
+- VERIFICATION (Neon, PostgreSQL): 3 pass, 0 fail. The criterion-8 gap is closed on real PostgreSQL.
+- HONEST STATUS: All Phase 11B criteria are now [IMPLEMENTED]. The only remaining [GAP] is "Algorithm drift detection: [GAP] by construction" — a fundamental property of the transaction-ID definition (a bug in the bridge's buildPayload is undetectable by any ID comparison, because the payload IS the bridge's output). This is documented honestly and cannot be fixed without duplicating the bridge's vertical contract.
+
+Stage Summary:
+- Single canonical migration path: prisma migrate is the only mechanism that creates/modifies the migration ledger. scripts/baseline-migrations.ts removed.
+- Criterion 8 (PostgreSQL crash-recovery restart proof): [IMPLEMENTED] — proven against live Neon with 3 passing tests.
+- All 8 completeness criteria: [IMPLEMENTED].
+- Only remaining [GAP]: algorithm drift detection (by construction, undetectable — honestly documented).
+- Phase 11B is now structurally and operationally complete, proven against real PostgreSQL.
