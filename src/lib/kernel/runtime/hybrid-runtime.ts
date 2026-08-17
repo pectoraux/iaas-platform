@@ -320,13 +320,15 @@ export class HybridRuntime implements NetworkRuntime {
    *   NOT return the old resolved attempt. The 6e31067 defect (retry
    *   misreported as EXECUTED) is structurally impossible.
    *
-   * PHASE 11B FIX (Defect 4 — independent derivation):
-   *   intendedTransactionId is computed INDEPENDENTLY from evidence via
-   *   deriveIntendedTransactionId (step 3), NOT taken from the bridge output.
-   *   The bridge is called (step 5) to produce the full transaction object,
-   *   and its .id is VERIFIED against the independently-derived ID. Mismatch
-   *   → the attempt is resolved as RECONCILIATION_REQUIRED_INVARIANT_VIOLATION
-   *   (bridge drift) without submitting.
+   * PHASE 11B FIX (Defect 4+7+10 — input-consistency verification):
+   *   intendedTransactionId is derived from the STORED EVIDENCE via the bridge's
+   *   deriveTransactionId contract (step 3). The bridge's full transaction
+   *   builder (step 5) produces a transaction from the LIVE result, and its .id
+   *   is VERIFIED against the stored intendedTransactionId. Mismatch → input
+   *   drift (live result differs from stored evidence) → the attempt is
+   *   resolved as RECONCILIATION_REQUIRED_INVARIANT_VIOLATION without
+   *   submitting. This is input-consistency verification (stored vs live),
+     NOT independent-algorithm verification. See spec §6.4/§8.2.
    *
    * PHASE 11B FIX (Defect 2 — finality certificate):
    *   The outcome's finalityCertificate comes from
@@ -354,11 +356,14 @@ export class HybridRuntime implements NetworkRuntime {
       new Date(),
     )
 
-    // 3. Independently derive intendedTransactionId (Defect 4 fix, corrected).
+    // 3. Input-consistency derivation (Defect 4+7+10 fix).
     //    The bridge OWNS the derivation contract (Defect 7 fix — the kernel
     //    does NOT know the payload shape). The kernel calls the bridge's
-    //    deriveTransactionId with the evidence's resultJson, then verifies
-    //    the bridge's full transaction builder produces the same ID.
+    //    deriveTransactionId with the evidence's resultJson (STORED evidence),
+    //    then verifies the bridge's full transaction builder produces the same
+    //    ID from the LIVE result (step 6). This is input-consistency
+    //    verification (stored-evidence vs live-result), NOT independent-
+    //    algorithm verification. See spec §6.4/§8.2 for the honest scope.
     const intendedTransactionId = this.deps.bridge.deriveTransactionId(
       evidence.resultJson,
       networkVersionId,
@@ -376,7 +381,7 @@ export class HybridRuntime implements NetworkRuntime {
       currentNonce,
     )
 
-    // 5. Derive the transaction via the bridge + verify determinism (§6.4).
+    // 5. Derive the transaction via the bridge + verify input consistency (§6.4).
     const transaction = this.deps.bridge.infrastructureResultToTransaction(
       infrastructureResult,
       networkVersionId,
@@ -384,10 +389,12 @@ export class HybridRuntime implements NetworkRuntime {
       currentNonce,
     )
     if (transaction.id !== intendedTransactionId) {
-      // Bridge drift: the bridge produced a different transaction ID than the
-      // independently-derived one. Resolve as invariant violation WITHOUT
-      // submitting. Defect 4 fix — this check now happens at submission time,
-      // not just at recovery.
+      // Input drift: the bridge produced a different transaction ID from the
+      // LIVE result than it did from the STORED evidence. This means the live
+      // result differs from the stored evidence (the bridge is non-deterministic
+      // across input changes, or the evidence was corrupted). Resolve as
+      // invariant violation WITHOUT submitting. See spec §6.4 — this is
+      // input-consistency verification, NOT independent-algorithm verification.
       const outcome = computeOutcome(
         attempt.attemptId,
         transaction.id,
@@ -395,14 +402,14 @@ export class HybridRuntime implements NetworkRuntime {
           status: 'NO_TRANSACTIONS',
           receipts: [],
           finalityCertificate: null,
-          error: 'Bridge determinism violation: bridge output does not match independently-derived intendedTransactionId',
+          error: 'Input-consistency violation: bridge output does not match intendedTransactionId derived from stored evidence',
         },
         new Date(),
       )
       const resolved = await this.deps.reconciliationStore.resolve(attempt.attemptId, outcome)
       return {
         infrastructureResult,
-        protocolResult: { status: 'NO_TRANSACTIONS', receipts: [], finalityCertificate: null, error: outcome.error ?? 'Bridge determinism violation' },
+        protocolResult: { status: 'NO_TRANSACTIONS', receipts: [], finalityCertificate: null, error: outcome.error ?? 'Input-consistency violation' },
         commitment: resolved,
       }
     }
@@ -478,7 +485,7 @@ export class HybridRuntime implements NetworkRuntime {
         const outcome = computeOutcome(
           attempt.attemptId,
           transaction.id,
-          { status: 'NO_TRANSACTIONS', receipts: [], finalityCertificate: null, error: 'Bridge determinism violation: re-derived transaction ID does not match intendedTransactionId' },
+          { status: 'NO_TRANSACTIONS', receipts: [], finalityCertificate: null, error: 'Input-consistency violation: re-derived transaction ID does not match intendedTransactionId' },
           new Date(),
         )
         resolved.push(

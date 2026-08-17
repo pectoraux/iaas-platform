@@ -193,9 +193,13 @@ export interface ReconciliationAttempt {
   readonly networkVersionId: string
   /**
    * The deterministic ProtocolTransaction.id the bridge MUST produce.
-   * Computed INDEPENDENTLY from evidence via deriveIntendedTransactionId
-   * (spec §4.2 C2, §6.4). The bridge output is verified against this at
-   * submission time — not just at recovery.
+   * Derived from the STORED EVIDENCE via the bridge's deriveTransactionId
+   * contract (spec §4.2 C2, §6.4). At submission time, the bridge's full
+   * transaction builder produces a transaction from the LIVE result; the
+   * kernel compares transaction.id against this stored value. Mismatch →
+   * input drift (live result differs from stored evidence). This is
+   * input-consistency verification, NOT independent-algorithm verification
+   * (see spec §6.4/§8.2 for the honest scope).
    */
   readonly intendedTransactionId: string
   /** The sender identity for re-derivation at recovery (spec §6.3). */

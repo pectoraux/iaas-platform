@@ -323,10 +323,11 @@ describe('Phase 11B Defect 2 fix: finalityCertificate is the real consensus cert
 })
 
 // ---------------------------------------------------------------------------
-// Defect 4 fix: independent derivation
+// Defect 4+7 fix: bridge-owned input-consistency verification
+// (renamed from "independent derivation" to prevent misinterpretation — see spec §6.4/§8.2)
 // ---------------------------------------------------------------------------
 
-describe('Phase 11B Defect 4+7 fix: bridge-owned transaction ID derivation', () => {
+describe('Phase 11B Defect 4+7 fix: bridge-owned input-consistency verification', () => {
   it('the bridge owns the derivation contract; the kernel does not know the payload shape', async () => {
     // Defect 7 fix: deriveIntendedTransactionId was REMOVED from the kernel
     // (it hard-coded 'record_delivery'). The bridge now owns
@@ -364,10 +365,13 @@ describe('Phase 11B Defect 4+7 fix: bridge-owned transaction ID derivation', () 
     expect(kernelSource).not.toMatch(/record_delivery/)
   })
 
-  it('executeHybrid verifies bridge output against the independent derivation at submission time', async () => {
+  it('executeHybrid verifies bridge output against the input-consistency derivation at submission time', async () => {
     // If a (hypothetical buggy) bridge produced a different tx ID than the
-    // independently-derived one, executeHybrid would catch it at submission
-    // time (not just at recovery) and resolve as INVARIANT_VIOLATION.
+    // one derived from the stored evidence, executeHybrid would catch it at
+    // submission time (not just at recovery) and resolve as
+    // RECONCILIATION_REQUIRED_INVARIANT_VIOLATION. This is input-consistency
+    // verification (stored evidence vs live result), not independent-
+    // algorithm verification. See spec §6.4/§8.2.
     // This test verifies the check exists by confirming the happy path
     // (bridge matches derivation) succeeds.
     const { hybrid } = createHybridRuntime(undefined, 'ind-deriv-submit-nv')

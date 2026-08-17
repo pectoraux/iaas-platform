@@ -439,91 +439,113 @@ Crash between 1 and 4: physical action occurred, no durable record of it exists.
 Crash between 4 and 5: protocol state advanced, no durable record that the
 physical action was the cause, and no durable record of the outcome.
 
-### 6.2 Specified (correct) sequence — Phase 11B target
+### 6.2 Crash-safe sequence — v4 implementation (`86ac402`)
+
+This is the actual sequence in the codebase. It replaces the original
+§6.2 target (which used `PendingCommitment` and a different derivation
+order). The change from the original spec is recorded as a spec change in
+§6.4.
 
 ```
 1. InfrastructureRuntime.executeAssignment()        physical; may have external effects
 2. Compute PhysicalExecutionEvidence (pure)         content-addressed, deterministic
-3. Compute intendedTransactionId (pure)            deterministic from evidence + nonce
-4. ReconciliationStore.recordPending(               DURABLE WRITE #1 — atomic, evidence + PENDING commitment
-       evidence, intendedTransactionId)            ── crash after this point is safe ──
-5. bridge.infrastructureResultToTransaction()      pure (must equal step 3's derivation; see §6.4)
-6. submitTransaction(transaction)                  protocol commit (canonical path, unchanged)
-7. ReconciliationStore.resolve(                     DURABLE WRITE #2 — atomic, outcome + status advance
-       commitmentId, outcome)                       ── crash after this point is fully reconciled ──
+3. bridge.deriveTransactionId(evidence.resultJson)  input-consistency derivation from STORED evidence
+       → intendedTransactionId                      (see §6.4 for the honest scope)
+4. ReconciliationStore.recordPending(               DURABLE WRITE #1 — atomic, evidence + PENDING attempt
+       evidence, intendedTransactionId, ...)        ── crash after this point is safe ──
+5. bridge.infrastructureResultToTransaction()       builds the full transaction from the LIVE result
+6. verify transaction.id === intendedTransactionId  input-consistency check (§6.4); mismatch → INVARIANT_VIOLATION
+7. submitTransaction(transaction)                  protocol commit (canonical path)
+8. ReconciliationStore.resolve(                    DURABLE WRITE #2 — atomic, outcome + status advance
+       attemptId, outcome)                         ── crash after this point is fully reconciled ──
 ```
+
+The key difference from the original §6.2: step 3 uses the bridge's
+`deriveTransactionId` (bridge-owned contract), not a kernel function. Step 6
+is the input-consistency verification (see §6.4).
 
 ### 6.3 Crash recovery (restart semantics)
 
 On restart, the runtime calls `ReconciliationStore.loadPending()` and processes
-each `PENDING` commitment:
+each `PENDING` attempt:
 
 - The physical action **already occurred** (evidence is durable).
 - The protocol outcome is **unknown** (the crash was between DURABLE WRITE #1
-  and DURABLE WRITE #2, inclusive of step 6 itself).
+  and DURABLE WRITE #2, inclusive of step 7 itself).
 - Resolution: re-derive the transaction (deterministic from evidence — C2) and
   check whether `intendedTransactionId` already appears in the
   `ProtocolTransition` journal for this `networkVersionId`.
   - If it **does appear**: the protocol commit succeeded before the crash. The
-    commitment is advanced to `RECONCILED` via a synthetic `ProtocolOutcome`
+    attempt is advanced to `RECONCILED` via a synthetic `ProtocolOutcome`
     with `status = EXECUTED` and `recordedAt = transition.recordedAt`.
   - If it **does not appear**: the protocol commit did not durably succeed.
-    Re-submit via `submitTransaction` (step 6 onward). The transaction ID is
+    Re-submit via `submitTransaction` (step 7 onward). The transaction ID is
     canonical and nonce-aware, so re-submission is safe and idempotent under
     the foundational identity invariant.
 
 This recovery is **only** correct because of C2 (`intendedTransactionId` is
-deterministic from evidence) and the canonical-identity invariant (same inputs
-→ same transaction ID → same journal entry). If the bridge were non-deterministic,
+derived from the stored evidence via the bridge's deterministic contract) and
+the canonical-identity invariant (same inputs → same transaction ID → same
+journal entry). If the bridge were non-deterministic across input changes,
 recovery could double-count. The spec therefore **requires** the bridge to be a
 pure function of `(evidence, networkVersionId, sender, nonce)`.
 
-### 6.4 Bridge determinism requirement (corrected)
+### 6.4 Bridge input-consistency verification (SPEC CHANGE from original §6.4)
+
+> **SPEC CHANGE.** The original §6.4 (at `48e8c13`) required "independent
+> derivation" of the transaction ID. The implementation at `6e31067` attempted
+> this by placing `deriveIntendedTransactionId` in the kernel, but that
+> hard-coded the `record_delivery` payload shape, violating kernel-neutrality
+> (Defect 7). The `2b04989` correction moved derivation to the bridge, but
+> both `deriveTransactionId` and `infrastructureResultToTransaction` share the
+> bridge's `buildPayload`, so the guarantee is NOT independent-algorithm
+> independence. This section redefines the guarantee as **input-consistency
+> verification** — a weaker but honest guarantee — and documents why
+> independent-algorithm independence is impossible by construction.
 
 The `HybridBridge` interface defines two methods:
 - `infrastructureResultToTransaction(result, ...)` — builds the full transaction
-  from a live result.
+  from a **live** result.
 - `deriveTransactionId(resultJson, ...)` — computes the expected
-  `ProtocolTransaction.id` from the evidence's stored result JSON, WITHOUT
+  `ProtocolTransaction.id` from the **stored evidence's** result JSON, WITHOUT
   building the full transaction object.
 
 The kernel calls `deriveTransactionId` at `recordPending` time (computing
 `intendedTransactionId` from the stored evidence), then calls
-`infrastructureResultToTransaction` at submit time (producing a transaction from
-the live result), and compares `transaction.id` against the stored
-`intendedTransactionId`. Mismatch → input drift (the live result differs from
-the stored evidence), resolved as `RECONCILIATION_REQUIRED_INVARIANT_VIOLATION`.
+`infrastructureResultToTransaction` at submit time (producing a transaction
+from the live result), and compares `transaction.id` against the stored
+`intendedTransactionId`. Mismatch → the live result differs from the stored
+evidence (input drift), resolved as `RECONCILIATION_REQUIRED_INVARIANT_VIOLATION`.
 
-**HONEST SCOPE — separation of input, not independent algorithm (Defect 10):**
+**Redefined guarantee — input-consistency verification:**
 
-Both methods share the bridge's `buildPayload` implementation. This means the
-guarantee is **separation of input** independence (the stored evidence vs. the
-live result), NOT **independent algorithm** independence. The transaction ID is
-defined as `SHA-256(canonical(networkVersionId, sender, nonce, payload))`, and
-the payload is defined by the bridge's `buildPayload`. There is no independent
-payload to hash — the payload IS the bridge's output. So a bug in `buildPayload`
-itself (algorithm drift) is **undetectable by any ID comparison**, because both
-sides use the same payload definition.
+The guarantee is **stored-evidence derivation vs. live-result derivation**.
+Both derivations use the bridge's `buildPayload`, but on potentially different
+inputs (the stored evidence result vs. the live result). If the live result
+differs from the stored evidence (e.g., the adapter returns different telemetry
+on retry), the IDs diverge — detected. This is what §6.4 now requires.
 
-What this DOES detect:
-- **Input drift**: the live `RuntimeExecuteResult` differs from the stored
-  evidence result (e.g., the adapter returns different telemetry on retry).
-  This is what spec §6.4 requires.
+**What this does NOT guarantee — algorithm drift is undetectable by construction:**
 
-What this does NOT detect:
-- **Algorithm drift**: `buildPayload` produces the wrong payload shape. This is
-  undetectable by construction — the transaction ID is a function of the
-  bridge's payload, so there's no independent reference.
+The transaction ID is defined as
+`SHA-256(canonical(networkVersionId, sender, nonce, payload))`, and the payload
+is defined by the bridge's `buildPayload`. There is no independent payload to
+hash — the payload IS the bridge's output. So a bug in `buildPayload` itself
+(algorithm drift) is **undetectable by ANY ID comparison**, because both sides
+use the same payload definition. A second, independently-implemented payload
+definition would duplicate the bridge's vertical contract, which violates the
+kernel-neutrality rule. This is a fundamental property of the transaction-ID
+definition, not an implementation gap.
 
-The kernel does NOT know the payload shape (e.g., `record_delivery`) — that's
-vertical semantics owned by the bridge. This keeps the kernel vertical-neutral
-(spec §2 rule 4). A test asserts `reconciliation-types.ts` does not contain
-`record_delivery`.
+**Kernel neutrality preserved:** the kernel does NOT know the payload shape
+(e.g., `record_delivery`) — that's vertical semantics owned by the bridge. A
+test asserts `reconciliation-types.ts` does not contain `record_delivery`.
 
-**Status at `2b04989`:** `[IMPLEMENTED]`. The bridge owns
-`deriveTransactionId`; the kernel calls it and verifies. The honest scope
-(separation of input) is documented above. Algorithm drift is acknowledged as
-undetectable by construction.
+**Status at `86ac402`:** `[IMPLEMENTED]`. The bridge owns `deriveTransactionId`;
+the kernel calls it and verifies input consistency. The redefined scope
+(input-consistency, not independent-algorithm) is documented above as a spec
+change. Algorithm drift is acknowledged as undetectable by construction
+(§8.1).
 
 ---
 
@@ -601,28 +623,63 @@ repository (no green-test declaration is sufficient on its own).
    independent-algorithm independence (algorithm drift is undetectable by
    construction — see §6.4). (Satisfied at `2b04989`.)
 
-8. **`[IMPLEMENTED]`** Audit evidence: the architecture tests include a
-   crash-recovery proof — a `PENDING` attempt survives a simulated process
-   restart and is resolved without double-counting and without losing the
-   physical action. (Satisfied at `6e31067`, in-memory. PostgreSQL restart
-   proof is CI-only.)
+8. **`[IMPLEMENTED — contract/in-memory proof]` / `[GAP — PostgreSQL restart integration proof]`**
+   The architecture tests include a crash-recovery proof — a `PENDING` attempt
+   survives a simulated process restart and is resolved without double-counting
+   and without losing the physical action. The in-memory proof exercises the
+   recovery algorithm's control flow (loadPending → journal lookup →
+   re-submit/synthesize → resolve). It does **not** prove the full PostgreSQL
+   path: PostgreSQL commit → process crash → PostgreSQL survives → fresh process
+   loads PENDING → journal lookup → no double-count. Per the architectural rule
+   "PostgreSQL is the canonical system of record; durable means the PostgreSQL
+   path," a simulated in-memory restart does not establish criterion 8 fully.
+   The PostgreSQL restart integration proof is CI-only (local sandbox has no
+   reachable Postgres). The criterion is split into two statuses to reflect
+   this honestly.
 
 ### 8.1 Remaining gaps (honest)
 
-- **C3 schema lifecycle (Defect 9):** `[IMPLEMENTED]` as of this correction.
-  The partial unique index is now a proper Prisma migration
+- **C3 schema migration exists:** `[IMPLEMENTED]`. The partial unique index is
+  a proper Prisma migration
   (`prisma/migrations/20260817000000_recon_c3_partial_unique/`). The runtime
   `ensureC3UniqueIndex()` is a safety net, not the primary path.
+- **C3 migration is actually deployed:** `[IMPLEMENTED]` as of this correction.
+  `vercel.json` declares `"buildCommand": "prisma generate && prisma migrate deploy && next build"`,
+  and the Vercel project's `buildCommand` is updated to match. Every Vercel
+  deployment now runs `prisma migrate deploy`, which applies pending migrations
+  (including the C3 partial unique index) before the Next.js build. The
+  migration SQL uses `CREATE UNIQUE INDEX IF NOT EXISTS` (idempotent).
+  **Deployment transition note:** if the Neon database was previously created
+  via `prisma db push` (no `_prisma_migrations` table), the first `migrate deploy`
+  may detect drift. This requires a one-time `prisma migrate resolve --applied`
+  baseline operation. This is documented as a known operational step, not a code
+  gap.
 - **PostgreSQL local proof:** `[GAP]`. The local sandbox has no reachable
   Postgres (Neon connection is on Vercel; sandbox IPv6 egress to Neon is
   blocked). All DB-backed tests are CI-only. This is the same limitation as
   the existing Phase 9B/9C tests in this environment.
+- **PostgreSQL crash-recovery integration proof:** `[GAP]`. Criterion 8's
+  in-memory proof exercises the recovery control flow but does not prove the
+  full PostgreSQL restart path (commit → crash → PostgreSQL survives → fresh
+  process loads PENDING → journal lookup → no double-count). See criterion 8
+  above for the split status.
 - **Algorithm drift detection:** `[GAP]` by construction. A bug in the bridge's
-  `buildPayload` is undetectable by ID comparison (see §6.4 honest scope).
-  This is a fundamental property of the transaction-ID definition, not an
-  implementation gap. Documented honestly; no fix possible without a
-  second, independently-implemented payload definition (which would duplicate
-  the bridge's vertical contract).
+  `buildPayload` is undetectable by ID comparison (see §6.4). This is a
+  fundamental property of the transaction-ID definition, not an implementation
+  gap. Documented honestly; no fix possible without a second, independently-
+  implemented payload definition (which would duplicate the bridge's vertical
+  contract and violate kernel-neutrality).
+
+### 8.2 Terminology — input-consistency verification (not "independent derivation")
+
+The original §6.4 used the term "independent derivation." The v4 implementation
+redefines this as **input-consistency verification** — stored-evidence
+derivation vs. live-result derivation. The term "independent derivation" was
+potentially misleading because it implied two independently-implemented ID
+algorithms, which is impossible by construction (the payload IS the bridge's
+output; there is no independent payload to hash). The spec, code comments, and
+test names now use "input-consistency verification" to prevent misinterpretation.
+See §6.4 for the full redefinition.
 
 ---
 
