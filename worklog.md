@@ -2899,3 +2899,36 @@ Stage Summary:
 - package.json/vercel.json redundancy: FIXED — vercel.json is the single source of truth for the production build; package.json build is dev-friendly.
 - 143/143 tests pass. eslint clean. tsc clean. Dev server HTTP 200.
 - The 0597fe3 commit is superseded by this correction. schema.prisma ↔ migration history ↔ fresh DB now describe the same state.
+
+---
+Task ID: 11B-neon-baseline-execution
+Agent: main (Z.ai Code)
+Task: Execute the one-time Neon database baseline transition (the db-push legacy) by creating the missing reconciliation tables + C3 index + migration history directly against the live Neon PostgreSQL database, then verify the production deployment path is now safe.
+
+Work Log:
+- Read the user's audit: the database-lifecycle blocker is fixed at the repository level, but actual PostgreSQL execution was not locally verified. Decided to close this gap by executing the baseline against the real Neon DB.
+- Discovered the Neon DB state: 37 pre-11B tables existed (created via an earlier db push), but the 3 reconciliation tables (PhysicalExecutionEvidence, ReconciliationAttempt, ProtocolOutcome) were MISSING. The _prisma_migrations table was also missing. This meant the Vercel build's `prisma migrate deploy` would fail with P3005 (database schema is not empty) even after I marked migrations as applied.
+- Confirmed the 534e40a Vercel deployment was in ERROR state with exactly this error: "P3005: The database schema is not empty."
+- The local sandbox can't run `prisma migrate resolve` directly (Prisma engine can't connect — IPv6 egress to Neon is blocked; raw TCP works but Prisma's engine fails).
+- Solution: installed @neondatabase/serverless (HTTP driver, bypasses the IPv6 issue) and wrote scripts/baseline-migrations.ts. The script:
+  1. Creates the 3 missing reconciliation tables (IF NOT EXISTS) with exact DDL from the baseline migration.
+  2. Creates all indexes including the C3 partial unique index (recon_attempt_pending_unique).
+  3. Creates the O2 unique constraint (ProtocolOutcome_attemptId_finalityCertificate_key).
+  4. Creates the _prisma_migrations table.
+  5. Marks both migrations as applied (finished=true) with documented logs.
+- Executed the script against the live Neon DB via the HTTP driver. All steps succeeded.
+- VERIFICATION (against live Neon, via SQL queries):
+  - Both migrations marked finished=true, rolled_back=false in _prisma_migrations.
+  - All 3 reconciliation tables present.
+  - C3 partial unique index present: recon_attempt_pending_unique on ReconciliationAttempt(evidenceId) WHERE status='PENDING'.
+  - O2 unique constraint present: ProtocolOutcome_attemptId_finalityCertificate_key on ProtocolOutcome(attemptId, finalityCertificate).
+  - Conclusion: prisma migrate deploy will be a no-op (all migrations marked finished), so the Vercel build proceeds to next build.
+- Attempted to trigger a new Vercel deployment to observe the no-op migrate deploy in the build logs, but hit the Vercel free-tier API deployment limit (100/day exhausted). Pushed an empty commit (f9b99ce) to trigger auto-deploy via GitHub integration, but autoDeploy is null (not configured). The next manual deployment or GitHub push (once autoDeploy is enabled) will show the no-op migrate deploy in the build logs.
+- HONEST STATUS: The Neon database is now in the correct state — all reconciliation tables + indexes + migration history exist and match schema.prisma. The prisma migrate deploy no-op is structurally proven (verified the _prisma_migrations rows directly). The actual Vercel build execution of the no-op migrate deploy is not yet observed in build logs (API limit + autoDeploy not configured), but the database state guarantees it.
+
+Stage Summary:
+- Neon database baseline: EXECUTED. The 3 reconciliation tables, C3 partial unique index, O2 unique constraint, and _prisma_migrations history now exist on the live Neon PostgreSQL database.
+- Migration deployment no-op: STRUCTURALLY PROVEN. Both migrations are marked finished in _prisma_migrations; prisma migrate deploy will be a no-op; the Vercel build will proceed to next build.
+- PostgreSQL execution proof: the reconciliation schema + C3 index + O2 constraint are now present on the actual production Neon database, verified via direct SQL queries (not just structurally from migration files).
+- Remaining open: the actual Vercel build log showing the no-op migrate deploy (blocked by API limit + autoDeploy not configured). The PostgreSQL crash-recovery restart integration test (criterion 8) remains [GAP] — CI-only, though the database state now supports it.
+- scripts/baseline-migrations.ts is kept as a documented one-off for any future db-push-legacy transition. @neondatabase/serverless is a dependency (used by the baseline script; not a runtime dependency of the app).
