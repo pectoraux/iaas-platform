@@ -253,7 +253,7 @@ export class ProtocolRuntime implements NetworkRuntime {
 
     // 2. Validate the proposal (validator authorization).
     if (!this.deps.consensusEngine.validateProposal(proposal)) {
-      return { status: 'REJECTED_BY_CONSENSUS', receipts: [], error: 'Proposal rejected by consensus (validator authorization)' }
+      return { status: 'REJECTED_BY_CONSENSUS', receipts: [], finalityCertificate: null, error: 'Proposal rejected by consensus (validator authorization)' }
     }
 
     // 3. Finalize (deterministic ordering + certificate).
@@ -292,13 +292,15 @@ export class ProtocolRuntime implements NetworkRuntime {
    */
   async executeBatch(batch: FinalizedBatch): Promise<BatchExecutionResult> {
     if (batch.orderedTransactions.length === 0) {
-      return { status: 'NO_TRANSACTIONS', receipts: [] }
+      return { status: 'NO_TRANSACTIONS', receipts: [], finalityCertificate: null }
     }
 
     // Phase 9C closure: Verify the finality certificate BEFORE execution.
     const recomputedCertificate = computeFinalityCertificate(batch.orderedTransactions)
     if (recomputedCertificate !== batch.finalityCertificate) {
-      return { status: 'INVALID_FINALITY_CERTIFICATE', receipts: [], error: 'Finality certificate mismatch' }
+      // Phase 11B fix: return the batch's (mismatched) certificate for forensic
+      // value. The reconciliation layer records it as the actual certificate.
+      return { status: 'INVALID_FINALITY_CERTIFICATE', receipts: [], finalityCertificate: batch.finalityCertificate, error: 'Finality certificate mismatch' }
     }
 
     const results: ProtocolExecutionResult[] = []
@@ -316,16 +318,18 @@ export class ProtocolRuntime implements NetworkRuntime {
 
     // Phase 10.5D: EXECUTED means ALL transactions succeeded.
     // EXECUTION_FAILED means at least one failed.
+    // Phase 11B fix: thread the verified finality certificate into the result.
     if (hasFailure) {
       const failedReceipt = results.find(r => !r.success)
       return {
         status: 'EXECUTION_FAILED',
         receipts: results,
+        finalityCertificate: batch.finalityCertificate,
         error: failedReceipt?.error ?? 'Transaction execution failed',
       }
     }
 
-    return { status: 'EXECUTED', receipts: results }
+    return { status: 'EXECUTED', receipts: results, finalityCertificate: batch.finalityCertificate }
   }
 
   // -------------------------------------------------------------------------

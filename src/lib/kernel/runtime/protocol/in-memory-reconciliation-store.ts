@@ -1,48 +1,55 @@
 // =============================================================================
-// Kernel: In-Memory Reconciliation Store (Phase 11B)
+// Kernel: In-Memory Reconciliation Store (Phase 11B — corrected)
 // =============================================================================
-// An in-memory implementation of ReconciliationStore for tests that don't use
-// PostgreSQL. Mirrors the same atomicity + uniqueness discipline as the
-// Postgres implementation, just without persistence.
+// In-memory implementation of ReconciliationStore. Mirrors the Postgres
+// attempt-based model: recordPending ALWAYS creates a NEW PENDING attempt;
+// C3 rejects a new PENDING if one exists for that evidence; terminal attempts
+// do NOT block new attempts.
 //
-// This is NOT durable (process restart loses state). It exists so that the
-// happy-path tests can verify the reconciliation contract without a database.
-// Crash-recovery tests MUST use PostgresReconciliationStore.
+// NOT durable (process restart loses state). Happy-path tests use this;
+// crash-recovery tests use a journal-aware wrapper or PostgresReconciliationStore.
 // =============================================================================
 
 import type {
   ReconciliationStore,
   PhysicalExecutionEvidence,
-  PendingCommitment,
+  ReconciliationAttempt,
   ProtocolOutcome,
 } from './reconciliation-types'
 import { mapBatchStatusToReconciliationState } from './reconciliation-types'
 
 export class InMemoryReconciliationStore implements ReconciliationStore {
   private readonly evidence = new Map<string, PhysicalExecutionEvidence>()
-  private readonly commitments = new Map<string, PendingCommitment>()
-  private readonly commitmentsByEvidence = new Map<string, string>() // evidenceId → commitmentId
+  private readonly attempts = new Map<string, ReconciliationAttempt>()
+  private readonly attemptsByEvidence = new Map<string, string[]>() // evidenceId → attemptIds (ordered)
 
   async recordPending(
     evidence: PhysicalExecutionEvidence,
     intendedTransactionId: string,
     sender: string,
     nonce: number,
-  ): Promise<PendingCommitment> {
-    // C3: at most one commitment per evidenceId. If one exists, return it.
-    const existingId = this.commitmentsByEvidence.get(evidence.evidenceId)
-    if (existingId) {
-      const existing = this.commitments.get(existingId)
-      if (existing) return existing
-    }
-
-    // E1: evidence is immutable. Store if not present.
+  ): Promise<ReconciliationAttempt> {
+    // E1: evidence is immutable.
     if (!this.evidence.has(evidence.evidenceId)) {
       this.evidence.set(evidence.evidenceId, evidence)
     }
 
-    const commitment: PendingCommitment = {
-      commitmentId: `pending-${this.commitments.size + 1}-${evidence.evidenceId.slice(0, 8)}`,
+    // C3: reject if a PENDING attempt already exists for this evidence.
+    const attemptIds = this.attemptsByEvidence.get(evidence.evidenceId) ?? []
+    const pending = attemptIds
+      .map((id) => this.attempts.get(id))
+      .find((a) => a && a.status === 'PENDING')
+    if (pending) {
+      throw new Error(
+        `InMemoryReconciliationStore.recordPending: a PENDING attempt already exists ` +
+          `for evidenceId ${evidence.evidenceId} (attemptId ${pending.attemptId}). ` +
+          `Concurrent retry race — resolve the existing attempt before creating a new one (C3).`,
+      )
+    }
+
+    // ALWAYS create a new attempt row.
+    const attempt: ReconciliationAttempt = {
+      attemptId: `attempt-${this.attempts.size + 1}-${evidence.evidenceId.slice(0, 8)}`,
       evidenceId: evidence.evidenceId,
       networkVersionId: evidence.networkVersionId,
       intendedTransactionId,
@@ -52,66 +59,60 @@ export class InMemoryReconciliationStore implements ReconciliationStore {
       createdAt: new Date(),
     }
 
-    this.commitments.set(commitment.commitmentId, commitment)
-    this.commitmentsByEvidence.set(evidence.evidenceId, commitment.commitmentId)
-    return commitment
+    this.attempts.set(attempt.attemptId, attempt)
+    attemptIds.push(attempt.attemptId)
+    this.attemptsByEvidence.set(evidence.evidenceId, attemptIds)
+    return attempt
   }
 
   async resolve(
-    commitmentId: string,
+    attemptId: string,
     outcome: ProtocolOutcome,
-  ): Promise<PendingCommitment> {
-    const commitment = this.commitments.get(commitmentId)
-    if (!commitment) {
+  ): Promise<ReconciliationAttempt> {
+    const attempt = this.attempts.get(attemptId)
+    if (!attempt) {
       throw new Error(
-        `InMemoryReconciliationStore.resolve: commitment ${commitmentId} not found`,
+        `InMemoryReconciliationStore.resolve: attempt ${attemptId} not found`,
       )
     }
 
     // C4: a commitment never transitions backwards.
-    if (commitment.status !== 'PENDING') {
+    if (attempt.status !== 'PENDING') {
       throw new Error(
-        `InMemoryReconciliationStore.resolve: commitment ${commitmentId} is already ` +
-          `resolved (status=${commitment.status}); a commitment never transitions ` +
+        `InMemoryReconciliationStore.resolve: attempt ${attemptId} is already ` +
+          `resolved (status=${attempt.status}); a commitment never transitions ` +
           `backwards (C4).`,
       )
     }
 
-    // Advance the commitment PENDING → terminal.
-    // R1: the BatchExecutionStatus → ReconciliationState mapping is pure and
-    // computed here (at write time).
+    // R1: map at write time.
     const reconciliationState = mapBatchStatusToReconciliationState(outcome.status)
-    const resolved: PendingCommitment = {
-      ...commitment,
+    const resolved: ReconciliationAttempt = {
+      ...attempt,
       status: reconciliationState,
       resolvedAt: outcome.recordedAt,
       outcomeId: outcome.outcomeId,
     }
-    this.commitments.set(commitmentId, resolved)
+    this.attempts.set(attemptId, resolved)
     return resolved
   }
 
-  async loadPending(): Promise<PendingCommitment[]> {
-    return Array.from(this.commitments.values()).filter(
-      (c) => c.status === 'PENDING',
-    )
+  async loadPending(): Promise<ReconciliationAttempt[]> {
+    return Array.from(this.attempts.values()).filter((a) => a.status === 'PENDING')
   }
 
-  async findByEvidence(evidenceId: string): Promise<PendingCommitment | null> {
-    const id = this.commitmentsByEvidence.get(evidenceId)
-    if (!id) return null
-    return this.commitments.get(id) ?? null
+  async findByEvidence(evidenceId: string): Promise<ReconciliationAttempt | null> {
+    const ids = this.attemptsByEvidence.get(evidenceId)
+    if (!ids || ids.length === 0) return null
+    // Most recent = last in the array.
+    const lastId = ids[ids.length - 1]
+    return this.attempts.get(lastId) ?? null
   }
 
   async loadEvidence(evidenceId: string): Promise<PhysicalExecutionEvidence | null> {
     return this.evidence.get(evidenceId) ?? null
   }
 
-  /**
-   * In-memory store has no journal. Returns null — recovery will always
-   * re-submit. This is correct for happy-path tests; crash-after-commit
-   * tests that need journal lookup use a custom store or PostgreSQL.
-   */
   async findCommittedTransaction(
     _networkVersionId: string,
     _transactionId: string,

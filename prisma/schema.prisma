@@ -1512,23 +1512,29 @@ model PhysicalExecutionEvidence {
   @@index([networkVersionId])
 }
 
-/// Phase 11B §4.2: PendingCommitment — durable record linking a
-/// PhysicalExecutionEvidence to a protocol transaction that should be derived
-/// from it. This is the crash barrier between physical execution and protocol
-/// commit.
+/// Phase 11B §4.2: ReconciliationAttempt — a reconciliation try linking a
+/// PhysicalExecutionEvidence to a protocol transaction submission.
 ///
-/// C3 (spec §4.2): at most one PENDING commitment per evidenceId. Enforced by
-/// @@unique([evidenceId]). Re-deriving the same evidence after a crash returns
-/// the existing commitment, not a duplicate.
+/// PHASE 11B CORRECTION (attempt lifecycle — fixes the 6e31067 defect where a
+/// retry returned the same resolved commitment and was misreported as EXECUTED):
+///   Multiple attempts can exist per evidence. A failed terminal attempt can
+///   be followed by a NEW attempt that legitimately re-submits.
 ///
-/// C4 (spec §4.2): a commitment never transitions backwards. PENDING →
-/// {RECONCILED, <cause>} is the only forward edge. status is the
-/// ReconciliationState (PENDING before resolution, terminal after).
-model PendingCommitment {
-  commitmentId           String   @id @default(cuid())
+/// C3 (corrected): at most one PENDING attempt per evidence at a time.
+///   Enforced by a partial unique index on (evidenceId) WHERE status = 'PENDING'.
+///   Terminal attempts do NOT block new attempts.
+///
+/// C4: an attempt never transitions backwards. PENDING → {RECONCILED, <cause>}
+///   is the only forward edge. A new attempt is a NEW row.
+///
+/// Note: Prisma doesn't support partial unique indexes declaratively; the
+/// store enforces C3 at the application level (checking for existing PENDING
+/// before inserting). The index on (evidenceId, status) supports this lookup.
+model ReconciliationAttempt {
+  attemptId               String   @id @default(cuid())
   evidenceId             String   // FK to PhysicalExecutionEvidence
   networkVersionId       String
-  intendedTransactionId  String   // deterministic from evidence + nonce (C2)
+  intendedTransactionId  String   // independently derived from evidence (C2, §6.4)
   sender                 String   // for re-derivation at recovery (§6.3)
   nonce                  Int      // for re-derivation at recovery (§6.3)
   status                 String   // ReconciliationState
@@ -1536,27 +1542,41 @@ model PendingCommitment {
   resolvedAt             DateTime?
   outcomeId              String?  // FK to ProtocolOutcome
 
-  @@unique([evidenceId]) // C3: at most one commitment per evidence
+  @@index([evidenceId, status]) // C3 lookup: existing PENDING for evidence
   @@index([networkVersionId])
   @@index([status])
   @@index([intendedTransactionId])
 }
 
+/// Backward-compat alias for the old name. Prisma doesn't support model
+/// aliases, so callers using @prisma/client will reference ReconciliationAttempt.
+/// The reconciliation-types.ts PendingCommitment type is an alias for
+/// ReconciliationAttempt.
+
 /// Phase 11B §4.3: ProtocolOutcome — durable record of what the protocol layer
-/// returned for a given intendedTransactionId. Content-addressed by outcomeId.
-/// Append-only (O2). Stores the precise BatchExecutionStatus (O1), never
-/// collapsed. Stores a receipts digest, not the array (O3 — receipts live in
-/// the ProtocolTransition journal).
+/// returned for a given attempt. Content-addressed by outcomeId.
+/// Append-only (O2 — now ENFORCED by @@unique([attemptId, finalityCertificate])).
+/// Stores the precise BatchExecutionStatus (O1), never collapsed. Stores a
+/// receipts digest, not the array (O3 — receipts live in the ProtocolTransition
+/// journal).
+///
+/// PHASE 11B FIX: finalityCertificate holds the ACTUAL consensus certificate
+/// (SHA-256 of ordered tx IDs), threaded from BatchExecutionResult. Previously
+/// it held the transaction ID — a protocol-significant field recording the
+/// wrong fact.
+/// PHASE 11B FIX: O2 uniqueness now enforced by @@unique([attemptId, finalityCertificate]).
+///   Previously it was application convention only.
 model ProtocolOutcome {
   outcomeId            String   @id // content-addressed SHA-256
-  commitmentId         String   // FK to PendingCommitment
+  attemptId            String   // FK to ReconciliationAttempt
   transactionId        String   // the ProtocolTransaction.id actually submitted
-  finalityCertificate  String?  // null if rejected pre-finalization
+  finalityCertificate  String?  // the ACTUAL consensus cert (null if rejected pre-finalization)
   status               String   // exact BatchExecutionStatus (O1)
   receiptsDigest       String?  // SHA-256 of canonical receipts (O3)
   error                String?
   recordedAt           DateTime @default(now())
 
-  @@index([commitmentId])
+  @@unique([attemptId, finalityCertificate]) // O2: one outcome per (attempt, certificate)
+  @@index([attemptId])
   @@index([transactionId])
 }

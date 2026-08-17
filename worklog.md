@@ -2789,3 +2789,30 @@ Stage Summary:
 - The "durable" claim from 48e8c13 is now genuinely backed: reconciliation primitives use the same atomic db.$transaction + OCC + unique-constraint discipline as PostgresProtocolStateStore.
 - HONEST CAVEAT: the in-memory tests prove the contract logic (crash recovery, no double-count, anti-conflation, determinism). The PostgreSQL-backed durability bar (criterion 3) is implemented in PostgresReconciliationStore but NOT yet proven by a DB integration test — the local environment has no PostgreSQL (DATABASE_URL is SQLite, schema declares postgresql). CI runs the real PostgreSQL integration test. The crash-recovery proof test uses in-memory stores + a journal-aware wrapper to simulate the journal-hit path.
 - No overclaim: the code implements the spec. The in-memory tests prove the logic. PostgreSQL integration is implemented but unverified locally (same as all existing Phase 9B/9C tests in this environment).
+
+---
+Task ID: 11B-correction
+Agent: main (Z.ai Code)
+Task: Fix the four defects the user identified in the 6e31067 Phase 11B implementation: (1) critical retry-misreports-EXECUTED bug, (2) wrong finalityCertificate, (3) O2 not enforced, (4) bridge derivation not independent.
+
+Work Log:
+- Accepted the user's audit in full. All four defects are real and grounded in the actual code.
+- Defect 1 (critical — retry lifecycle): The 6e31067 model enforced UNIQUE(evidenceId) on the commitment, so recordPending returned the SAME resolved commitment on retry, and executeHybrid misreported it as { status: 'EXECUTED' } without submitting. FIX: renamed PendingCommitment → ReconciliationAttempt (attempt-based model). recordPending now ALWAYS creates a NEW PENDING attempt. Multiple attempts can exist per evidence. C3 redefined: at most one PENDING attempt per evidence at a time (rejects concurrent retry race); terminal attempts do NOT block new attempts. The fabricated-EXECUTED path is gone. Proven by the new test "a retry after a terminal failure creates a NEW attempt that re-submits".
+- Defect 2 (finalityCertificate): computeOutcome was setting finalityCertificate = receipts[0].receipt.transactionId (a transaction ID, not the consensus cert). FIX: added finalityCertificate field to BatchExecutionResult (types.ts). Threaded it from executeBatch (which already computes computeFinalityCertificate). computeOutcome now reads batchResult.finalityCertificate. computeSyntheticExecutedOutcome recomputes the cert the same way computeFinalityCertificate does for a single-tx batch (SHA-256(txId)). Proven by "the outcome stores the actual finalityCertificate" + "REJECTED_BY_CONSENSUS outcomes have finalityCertificate = null".
+- Defect 3 (O2 enforcement): The schema had no uniqueness constraint on (commitmentId, finalityCertificate). FIX: added @@unique([attemptId, finalityCertificate]) to ProtocolOutcome. O2 is now enforced by the database, not application convention.
+- Defect 4 (independent derivation): intendedTransactionId was taken from bridge output (transaction.id), so the initial commitment didn't contain an independently-computed expected ID. FIX: added deriveIntendedTransactionId(evidence, sender, nonce, computeTxId) which computes the expected tx ID directly from evidence WITHOUT calling the bridge. executeHybrid now: (3) independently derives intendedTransactionId, (5) calls the bridge, (5b) verifies transaction.id === intendedTransactionId — mismatch → RECONCILIATION_REQUIRED_INVARIANT_VIOLATION at submission time (not just recovery). The bridge contract is encoded in deriveIntendedTransactionId (the DefaultHybridBridge payload shape { type: 'record_delivery', data: { quantity, unit, success } }).
+- Schema: renamed PendingCommitment model → ReconciliationAttempt, removed @@unique([evidenceId]), added @@index([evidenceId, status]) for the C3 lookup, renamed commitmentId → attemptId on ProtocolOutcome, added @@unique([attemptId, finalityCertificate]) for O2. Ran prisma generate.
+- Updated PostgresReconciliationStore + InMemoryReconciliationStore for the attempt-based model (recordPending always creates new; C3 checks for existing PENDING; resolve maps BatchExecutionStatus → ReconciliationState at write time R1).
+- Updated HybridRuntime.executeHybrid (8-step crash-safe sequence with independent derivation + bridge verification) and recoverPending (attempt-based).
+- Fixed a pre-existing wrong import path in types.ts:495 (./../../types → ../types) that surfaced after touching the file.
+- VERIFICATION: eslint clean (exit 0). tsc: zero errors in modified source files. 141/141 tests pass across phase-11b + phase-10 + phase-9a + phase-9c + architecture (the only failure is the pre-existing phase-9b DB test that requires PostgreSQL, unchanged). Dev server: HTTP 200, instrumentation hook runs cleanly.
+- HONEST STATUS: The four defects are fixed and proven by in-memory tests. The PostgreSQL-backed durability (criterion 3 + 8 against real Postgres) remains implemented-but-not-locally-proven (no reachable Postgres; the Neon connection string is on Vercel, and the sandbox's IPv6 egress to Neon is blocked — Prisma can't connect, though raw TCP can). CI runs the real PostgreSQL integration test.
+
+Stage Summary:
+- All four defects fixed:
+  1. Retry lifecycle: attempt-based model, no fabricated EXECUTED (proven).
+  2. finalityCertificate: actual consensus cert threaded via BatchExecutionResult (proven).
+  3. O2: enforced by @@unique([attemptId, finalityCertificate]) in schema.
+  4. Independent derivation: deriveIntendedTransactionId + submission-time verification (proven).
+- 141/141 non-DB tests pass. The critical Defect 1 test ("retry creates a NEW attempt that re-submits, not EXECUTED") passes.
+- The 6e31067 commit is superseded by this correction. Phase 11B is now structurally sound against the four defects, pending the PostgreSQL integration proof (CI).
