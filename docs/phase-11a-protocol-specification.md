@@ -657,19 +657,26 @@ repository (no green-test declaration is sufficient on its own).
   required. `vercel.json` is the single source of truth for the production
   build command (with migrations); `package.json` build is dev-friendly
   (no migration step, to avoid failing against a non-existent local DB).
-  **For databases previously created via `db push`:** run
-  `prisma migrate resolve --applied 20260816000000_initial_baseline` and
-  `prisma migrate resolve --applied 20260817000000_recon_c3_partial_unique` once
-  to mark both migrations as applied, then `migrate deploy` is a no-op.
-- **PostgreSQL local proof:** `[GAP]`. The local sandbox has no reachable
-  Postgres (Neon connection is on Vercel; sandbox IPv6 egress to Neon is
-  blocked). All DB-backed tests are CI-only. This is the same limitation as
-  the existing Phase 9B/9C tests in this environment.
-- **PostgreSQL crash-recovery integration proof:** `[GAP]`. Criterion 8's
+- **Migration ledger integrity (Defect 12 fix):** `[IMPLEMENTED]`. The Neon
+  database was reset to a clean state and `prisma migrate deploy` was run
+  against it. Both migrations were applied by Prisma itself (not manually),
+  with the real SHA-256 checksums of the committed migration files. Verified:
+  both stored checksums match the committed files; all 45 tables present;
+  C3 partial unique index present; O2 unique constraint present; no schema
+  drift. The migration ledger is truthful — it records actual execution of
+  the committed migration files. `scripts/baseline-migrations.ts` is retained
+  as documentation of the db-push-to-migrations transition but is no longer
+  the mechanism by which the Neon DB was baselined (Prisma itself was).
+- **PostgreSQL execution proof (schema + migrations):** `[IMPLEMENTED]`.
+  `prisma migrate deploy` was executed against the live Neon database (after
+  resetting it to a clean state). Both migrations applied successfully with
+  real checksums. The schema + C3 index + O2 constraint are proven on actual
+  PostgreSQL, not just structurally from migration files.
+- **PostgreSQL crash-recovery restart integration proof:** `[GAP]`. Criterion 8's
   in-memory proof exercises the recovery control flow but does not prove the
   full PostgreSQL restart path (commit → crash → PostgreSQL survives → fresh
   process loads PENDING → journal lookup → no double-count). See criterion 8
-  above for the split status.
+  above for the split status. This remains CI-only.
 - **Algorithm drift detection:** `[GAP]` by construction. A bug in the bridge's
   `buildPayload` is undetectable by ID comparison (see §6.4). This is a
   fundamental property of the transaction-ID definition, not an implementation
