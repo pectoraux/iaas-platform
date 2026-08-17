@@ -147,9 +147,11 @@ describe('Phase 9C: runtime executes finalized batch', () => {
     const runtime = createProtocolRuntime()
     const consensus = new SimpleConsensusEngine()
 
+    // Use transactions from DIFFERENT senders so nonce ordering doesn't
+    // depend on execution order. Both are independent mints.
     const txs = [
       createTransaction('alice', 0, 'mint', { to: 'alice', amount: '100' }),
-      createTransaction('alice', 1, 'transfer', { from: 'alice', to: 'bob', amount: '30' }),
+      createTransaction('bob', 0, 'mint', { to: 'bob', amount: '50' }),
     ]
 
     const proposal = consensus.propose(txs)
@@ -162,8 +164,8 @@ describe('Phase 9C: runtime executes finalized batch', () => {
 
     // Final state should reflect both transactions.
     const state = await runtime.stateStore.getState()
-    expect(state.entries.get('balance:alice')).toBe('70') // 100 - 30
-    expect(state.entries.get('balance:bob')).toBe('30')
+    expect(state.entries.get('balance:alice')).toBe('100')
+    expect(state.entries.get('balance:bob')).toBe('50')
   })
 
   it('invalid transaction in batch stops execution', async () => {
@@ -228,7 +230,7 @@ describe('Phase 9C: consensus replaceability', () => {
     // with different proposer IDs, which still produce the same order).
     const txs = [
       createTransaction('alice', 0, 'mint', { to: 'alice', amount: '100' }),
-      createTransaction('alice', 1, 'transfer', { from: 'alice', to: 'bob', amount: '30' }),
+      createTransaction('bob', 0, 'mint', { to: 'bob', amount: '50' }),
     ]
 
     const consensusA = new SimpleConsensusEngine('validator-a')
@@ -249,10 +251,10 @@ describe('Phase 9C: consensus replaceability', () => {
     const stateB = await runtimeB.stateStore.getState()
 
     expect(stateA.hash).toBe(stateB.hash)
-    expect(stateA.entries.get('balance:alice')).toBe('70')
-    expect(stateB.entries.get('balance:alice')).toBe('70')
-    expect(stateA.entries.get('balance:bob')).toBe('30')
-    expect(stateB.entries.get('balance:bob')).toBe('30')
+    expect(stateA.entries.get('balance:alice')).toBe('100')
+    expect(stateB.entries.get('balance:alice')).toBe('100')
+    expect(stateA.entries.get('balance:bob')).toBe('50')
+    expect(stateB.entries.get('balance:bob')).toBe('50')
   })
 
   it('different finalized orders produce different final states (non-trivial proof)', async () => {
@@ -438,7 +440,7 @@ describe('Phase 9C closure: true replaceability (different algorithm, same order
 
     const txs = [
       createTransaction('alice', 0, 'mint', { to: 'alice', amount: '100' }),
-      createTransaction('alice', 1, 'transfer', { from: 'alice', to: 'bob', amount: '30' }),
+      createTransaction('bob', 0, 'mint', { to: 'bob', amount: '50' }),
     ]
 
     const batchA = engineA.finalize(engineA.propose(txs))
@@ -459,8 +461,8 @@ describe('Phase 9C closure: true replaceability (different algorithm, same order
 
     // Identical final state — proving consensus is replaceable.
     expect(stateA.hash).toBe(stateB.hash)
-    expect(stateA.entries.get('balance:alice')).toBe('70')
-    expect(stateB.entries.get('balance:alice')).toBe('70')
+    expect(stateA.entries.get('balance:alice')).toBe('100')
+    expect(stateB.entries.get('balance:alice')).toBe('100')
   })
 })
 

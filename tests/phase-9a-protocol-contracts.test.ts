@@ -268,6 +268,44 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
     expect(snapshot.entries.get('test')).toBe('value')
   })
 
+  it('Phase 10 final: canonical transaction ID — same payload different key order → same ID', () => {
+    // This is the protocol-identity invariant: the transaction ID must be
+    // independent of object property insertion order.
+    const idA = computeTransactionId('nv1', 'alice', 0, {
+      type: 'transfer',
+      data: { from: 'alice', to: 'bob', amount: '30' },
+    })
+    const idB = computeTransactionId('nv1', 'alice', 0, {
+      type: 'transfer',
+      data: { amount: '30', to: 'bob', from: 'alice' }, // different key order
+    })
+    expect(idA).toBe(idB)
+  })
+
+  it('Phase 10 final: canonical transaction ID — different payload → different ID', () => {
+    const idA = computeTransactionId('nv1', 'alice', 0, {
+      type: 'transfer',
+      data: { from: 'alice', to: 'bob', amount: '30' },
+    })
+    const idB = computeTransactionId('nv1', 'alice', 0, {
+      type: 'transfer',
+      data: { from: 'alice', to: 'bob', amount: '50' }, // different amount
+    })
+    expect(idA).not.toBe(idB)
+  })
+
+  it('Phase 10 final: canonical transaction ID — nested objects also canonicalized', () => {
+    const idA = computeTransactionId('nv1', 'alice', 0, {
+      type: 'complex',
+      data: { outer: { z: '1', a: '2' }, inner: { m: '3', b: '4' } },
+    })
+    const idB = computeTransactionId('nv1', 'alice', 0, {
+      type: 'complex',
+      data: { inner: { b: '4', m: '3' }, outer: { a: '2', z: '1' } }, // different key order at all levels
+    })
+    expect(idA).toBe(idB)
+  })
+
   it('Phase 9B.2: NetworkVersion isolation — wrong networkVersionId rejected in executeTransaction', async () => {
     const runtime = createProtocolRuntime()
     const tx = createTransaction('wrong-nv', 'alice', 0, 'mint', { to: 'alice', amount: '100' })

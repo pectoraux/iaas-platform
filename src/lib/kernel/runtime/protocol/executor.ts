@@ -132,7 +132,46 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
 }
 
 /**
+ * Recursively sort object keys to produce a canonical JSON representation.
+ *
+ * This ensures that two objects with the same semantic content but different
+ * property insertion order produce the same serialized form — and therefore
+ * the same hash. This is a protocol-identity invariant:
+ *
+ *   { from: "a", to: "b", amount: "10" }
+ *   ===
+ *   { amount: "10", to: "b", from: "a" }
+ *
+ * Both produce the same canonical JSON and the same transaction ID.
+ */
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map(canonicalize)
+  }
+  const sortedKeys = Object.keys(value as Record<string, unknown>).sort()
+  const result: Record<string, unknown> = {}
+  for (const key of sortedKeys) {
+    result[key] = canonicalize((value as Record<string, unknown>)[key])
+  }
+  return result
+}
+
+/**
  * Compute a deterministic transaction ID from the transaction contents.
+ *
+ * Phase 10 final hardening: Uses CANONICAL serialization (recursive key sort)
+ * to ensure the transaction ID is independent of object property insertion
+ * order. This is a protocol-identity invariant:
+ *
+ *   same semantic content → same canonical JSON → same transaction ID
+ *
+ * The canonical form is:
+ *   1. Recursively sort all object keys (including nested objects/arrays)
+ *   2. JSON.stringify the canonicalized object
+ *   3. SHA-256 hash
  */
 export function computeTransactionId(
   networkVersionId: string,
@@ -140,6 +179,7 @@ export function computeTransactionId(
   nonce: number,
   payload: Record<string, unknown>,
 ): string {
-  const content = JSON.stringify({ networkVersionId, sender, nonce, payload })
+  const canonical = canonicalize({ networkVersionId, sender, nonce, payload })
+  const content = JSON.stringify(canonical)
   return createHash('sha256').update(content).digest('hex')
 }
