@@ -243,13 +243,12 @@ export class HybridRuntime implements NetworkRuntime {
       currentNonce,
     )
 
-    // 3. Route through consensus: propose → finalize → executeBatch.
-    // Phase 10 closure: The transaction goes through the normal Phase 9C
-    // finality path — it is NOT directly executed via executeTransaction().
-    const consensus = this.deps.protocolRuntime.deps.consensusEngine
-    const proposal = consensus.propose([transaction])
-    const batch: FinalizedBatch = consensus.finalize(proposal)
-    const protocolResults = await this.deps.protocolRuntime.executeBatch(batch)
+    // 3. Submit through the canonical protocol path:
+    //    propose → validateProposal → finalize → executeBatch.
+    // Phase 10 final closure: HybridRuntime uses ProtocolRuntime.submitTransaction()
+    // — it does NOT access protocolRuntime.deps directly. The protocol runtime
+    // owns its lifecycle; the hybrid runtime does not reach into its internals.
+    const protocolResults = await this.deps.protocolRuntime.submitTransaction(transaction)
 
     return { infrastructureResult, protocolResults }
   }

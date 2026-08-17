@@ -26,7 +26,8 @@ import { initializeBootstrap } from '../src/lib/bootstrap'
 import { resolveRuntime } from '../src/lib/kernel/runtime'
 import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
 import { InMemoryProtocolStateStore } from '../src/lib/kernel/runtime/protocol/state-store'
-import { DeterministicTransactionExecutor, TransferHandler, MintHandler, RecordDeliveryHandler, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
+import { DeterministicTransactionExecutor, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
+import { TransferHandler, MintHandler, RecordDeliveryHandler } from "../src/lib/bootstrap/handlers"
 import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
 import type { ProtocolTransaction, ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/types'
 import { getTemplate } from '../src/lib/domain/templates'
@@ -116,7 +117,7 @@ describe('Phase 9A: architecture — protocol runtime isolation', () => {
   it('ProtocolRuntime accepts ProtocolRuntimeDeps in constructor', () => {
     const path = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol-runtime.ts')
     const content = readFileSync(path, 'utf-8')
-    expect(content).toMatch(/constructor\(readonly deps:\s*ProtocolRuntimeDeps\)/)
+    expect(content).toMatch(/constructor\(private readonly deps:\s*ProtocolRuntimeDeps\)/)
   })
 
   it('protocol directory has the expected contract files', () => {

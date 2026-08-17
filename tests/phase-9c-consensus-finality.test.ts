@@ -18,7 +18,8 @@ import { join } from 'path'
 import { initializeBootstrap } from '../src/lib/bootstrap'
 import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
 import { InMemoryProtocolStateStore } from '../src/lib/kernel/runtime/protocol/state-store'
-import { DeterministicTransactionExecutor, TransferHandler, MintHandler, RecordDeliveryHandler, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
+import { DeterministicTransactionExecutor, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
+import { TransferHandler, MintHandler, RecordDeliveryHandler } from "../src/lib/bootstrap/handlers"
 import {
   InMemoryValidatorRegistry,
   SimpleConsensusEngine,

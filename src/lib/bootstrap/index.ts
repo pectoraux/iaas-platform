@@ -50,7 +50,8 @@ import { InfrastructureRuntime } from '@/lib/kernel/runtime/infrastructure-runti
 import { ProtocolRuntime } from '@/lib/kernel/runtime/protocol-runtime'
 import { HybridRuntime, DefaultHybridBridge } from '@/lib/kernel/runtime/hybrid-runtime'
 import { InMemoryProtocolStateStore } from '@/lib/kernel/runtime/protocol/state-store'
-import { DeterministicTransactionExecutor, TransferHandler, MintHandler, RecordDeliveryHandler } from '@/lib/kernel/runtime/protocol/executor'
+import { DeterministicTransactionExecutor } from '@/lib/kernel/runtime/protocol/executor'
+import { TransferHandler, MintHandler, RecordDeliveryHandler } from '@/lib/bootstrap/handlers'
 import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '@/lib/kernel/runtime/protocol/validator-consensus'
 
 let initialized = false

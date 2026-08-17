@@ -80,7 +80,7 @@ export class ProtocolRuntimeNotImplementedError extends Error {
 export class ProtocolRuntime implements NetworkRuntime {
   readonly kind = 'protocol' as const
 
-  constructor(readonly deps: ProtocolRuntimeDeps) {}
+  constructor(private readonly deps: ProtocolRuntimeDeps) {}
 
   /**
    * @returns The protocol state store (for direct state queries).
@@ -94,6 +94,13 @@ export class ProtocolRuntime implements NetworkRuntime {
    */
   get executor() {
     return this.deps.executor
+  }
+
+  /**
+   * @returns The consensus engine (for direct consensus queries).
+   */
+  get consensusEngine() {
+    return this.deps.consensusEngine
   }
 
   // -------------------------------------------------------------------------
@@ -213,6 +220,43 @@ export class ProtocolRuntime implements NetworkRuntime {
     }
     const state = await this.deps.stateStore.getState()
     return this.deps.executor.validate(transaction, state)
+  }
+
+  /**
+   * Submit a transaction through the full consensus/finality path.
+   *
+   * Phase 10 final closure: This is the canonical protocol submission path.
+   * It enforces the Phase 9C consensus sequence:
+   *
+   *   1. propose(transactions) → ConsensusProposal
+   *   2. validateProposal(proposal) → boolean (validator authorization)
+   *   3. finalize(proposal) → FinalizedBatch (ordered + certified)
+   *   4. executeBatch(batch) → execution results
+   *
+   * This method is the ONLY way external callers (including HybridRuntime)
+   * should submit protocol transactions. It ensures:
+   *   - Validator authorization is checked (not bypassed)
+   *   - Finality certificate is generated
+   *   - Certificate is verified before execution
+   *   - The protocol runtime owns its lifecycle (deps is private)
+   *
+   * @returns The execution results. Empty if the proposal was rejected
+   *          by validator authorization or certificate verification.
+   */
+  async submitTransaction(transaction: ProtocolTransaction): Promise<ProtocolExecutionResult[]> {
+    // 1. Propose.
+    const proposal = this.deps.consensusEngine.propose([transaction])
+
+    // 2. Validate the proposal (validator authorization).
+    if (!this.deps.consensusEngine.validateProposal(proposal)) {
+      return [] // rejected — no execution
+    }
+
+    // 3. Finalize (deterministic ordering + certificate).
+    const batch = this.deps.consensusEngine.finalize(proposal)
+
+    // 4. Execute the finalized batch (certificate verification + execution).
+    return this.executeBatch(batch)
   }
 
   /**
