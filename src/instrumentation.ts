@@ -24,4 +24,14 @@ export async function register(): Promise<void> {
   // that don't need it. The import is a side-effect + explicit init call.
   const { initializeBootstrap } = await import('@/lib/bootstrap')
   initializeBootstrap()
+
+  // Phase 11B: Crash recovery — resolve any PENDING commitments left over
+  // from a previous process crash. This is the spec §6.3 recovery path.
+  // Safe to call when there are no pending commitments (no-op).
+  const { runtimeRegistry } = await import('@/lib/kernel/runtime')
+  const { HybridRuntime } = await import('@/lib/kernel/runtime/hybrid-runtime')
+  const hybridRuntime = runtimeRegistry.resolve('hybrid')
+  if (hybridRuntime instanceof HybridRuntime) {
+    await hybridRuntime.recoverPending()
+  }
 }

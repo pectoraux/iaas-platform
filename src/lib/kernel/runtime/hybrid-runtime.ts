@@ -45,10 +45,20 @@ import type {
   ProtocolExecutionResult,
   FinalizedBatch,
   BatchExecutionResult,
-  PendingProtocolCommitment,
 } from './protocol/types'
 import { computeTransactionId } from './protocol/executor'
-import { randomUUID } from 'crypto'
+import type {
+  ReconciliationStore,
+  PhysicalExecutionEvidence,
+  PendingCommitment,
+  ProtocolOutcome,
+} from './protocol/reconciliation-types'
+import {
+  computeEvidence,
+  computeOutcome,
+  computeSyntheticExecutedOutcome,
+  mapBatchStatusToReconciliationState,
+} from './protocol/reconciliation-types'
 
 // ---------------------------------------------------------------------------
 // Hybrid Bridge — the only place that knows about both worlds
@@ -152,6 +162,14 @@ export interface HybridRuntimeDeps {
   bridge: HybridBridge
   /** The sender identity for protocol transactions created by the bridge. */
   protocolSender: string
+  /**
+   * Phase 11B: Durable store for hybrid reconciliation primitives.
+   *
+   * Required (spec §5). The bootstrap constructs an InMemoryReconciliationStore
+   * for dev (matching the InMemoryProtocolStateStore pattern); production and
+   * crash-recovery tests construct a PostgresReconciliationStore.
+   */
+  reconciliationStore: ReconciliationStore
 }
 
 // ---------------------------------------------------------------------------
@@ -200,51 +218,30 @@ export class HybridRuntime implements NetworkRuntime {
   // -------------------------------------------------------------------------
 
   /**
-   * Execute a hybrid assignment:
-   *   1. Execute physical work via InfrastructureRuntime.executeAssignment
-   *   2. Convert the result to a protocol transaction via the bridge
-   *   3. Route the transaction through consensus: propose → finalize → executeBatch
+   * Execute a hybrid assignment with DURABLE reconciliation (Phase 11B).
    *
-   * Phase 10 closure: The hybrid path NO LONGER bypasses consensus.
-   * The bridge produces a protocol transaction, which then goes through
-   * the normal Phase 9C finality path:
+   * Crash-safe sequence (spec §6.2):
+   *   1. InfrastructureRuntime.executeAssignment()        physical
+   *   2. Compute PhysicalExecutionEvidence (pure)         content-addressed
+   *   3. Derive transaction via bridge (pure)             intendedTransactionId = tx.id
+   *   4. ReconciliationStore.recordPending(...)           DURABLE WRITE #1
+   *   5. submitTransaction(transaction)                  protocol commit
+   *   6. Compute ProtocolOutcome (pure)                   precise BatchExecutionStatus
+   *   7. ReconciliationStore.resolve(commitmentId, ...)  DURABLE WRITE #2
    *
-   *   InfrastructureRuntime.executeAssignment()
-   *       ↓
-   *   HybridBridge.infrastructureResultToTransaction()
-   *       ↓
-   *   ProtocolRuntime (consensus: propose → finalize)
-   *       ↓
-   *   ProtocolRuntime.executeBatch(FinalizedBatch)
-   *       ↓
-   *   StateStore.commit(expectedVersion, writeSet, ...)
+   * If the process crashes after step 4 but before step 7, the commitment
+   * remains PENDING and is recovered on restart via recoverPending().
    *
-   * This preserves ALL three foundational boundaries:
-   *   Infrastructure ≠ Protocol
-   *   Consensus ≠ Execution
-   *   Vertical semantics ≠ Kernel semantics
+   * Anti-conflation (spec §7 R2): the commitment's ReconciliationState is the
+   * precise mapping of the BatchExecutionStatus — REJECTED_BY_CONSENSUS,
+   * EXECUTION_FAILED, INVALID_FINALITY_CERTIFICATE, and NO_TRANSACTIONS each
+   * map to a distinct state. The old Phase 10.5D conflation (all →
+   * RECONCILIATION_REQUIRED) is structurally impossible.
    *
    * @param input The infrastructure execution input.
    * @param currentNonce The sender's current protocol nonce.
    * @returns The infrastructure result, the protocol batch result, and
-   *          the pending commitment (with updated status).
-   */
-  /**
-   * Execute a hybrid assignment with durable reconciliation:
-   *   1. Execute physical work via InfrastructureRuntime.executeAssignment
-   *   2. Create a PendingProtocolCommitment (durable record)
-   *   3. Convert the result to a protocol transaction via the bridge
-   *   4. Submit through consensus: propose → validateProposal → finalize → executeBatch
-   *   5. Update the commitment based on the protocol result
-   *
-   * Phase 10.5D: The PendingProtocolCommitment is a durable record that
-   * prevents the physical world from getting ahead of protocol state
-   * without a trace. If consensus rejects or execution fails, the
-   * commitment has status RECONCILIATION_REQUIRED — the physical result
-   * is unreconciled and can be retried.
-   *
-   * @returns The infrastructure result, the protocol batch result, and
-   *          the pending commitment (with updated status).
+   *          the resolved commitment (with precise ReconciliationState).
    */
   async executeHybrid(
     input: RuntimeExecuteInput,
@@ -252,44 +249,170 @@ export class HybridRuntime implements NetworkRuntime {
   ): Promise<{
     infrastructureResult: RuntimeExecuteResult
     protocolResult: BatchExecutionResult
-    commitment: PendingProtocolCommitment
+    commitment: PendingCommitment
   }> {
+    const networkVersionId = this.deps.protocolRuntime.stateStore.networkVersionId
+
     // 1. Execute physical work via the infrastructure runtime.
     const infrastructureResult = await this.deps.infrastructureRuntime.executeAssignment(input)
 
-    // 2. Convert the result to a protocol transaction via the bridge.
+    // 2. Compute PhysicalExecutionEvidence (pure, content-addressed).
+    const evidence = computeEvidence(
+      input.assetId,
+      networkVersionId,
+      infrastructureResult,
+      new Date(),
+    )
+
+    // 3. Derive the protocol transaction via the bridge (pure).
+    //    The transaction ID is the intendedTransactionId (C2: deterministic
+    //    from evidence + sender + nonce + networkVersionId).
     const transaction = this.deps.bridge.infrastructureResultToTransaction(
       infrastructureResult,
-      this.deps.protocolRuntime.stateStore.networkVersionId,
+      networkVersionId,
+      this.deps.protocolSender,
+      currentNonce,
+    )
+    const intendedTransactionId = transaction.id
+
+    // 4. DURABLE WRITE #1: record evidence + PENDING commitment atomically.
+    //    C3: if a PENDING commitment for this evidence already exists (crash
+    //    retry), recordPending returns the existing one idempotently.
+    const commitment = await this.deps.reconciliationStore.recordPending(
+      evidence,
+      intendedTransactionId,
       this.deps.protocolSender,
       currentNonce,
     )
 
-    // 3. Create a durable PendingProtocolCommitment (PENDING).
-    const commitment: PendingProtocolCommitment = {
-      id: randomUUID(),
-      infrastructureResult,
-      transaction,
-      status: 'PENDING',
-      createdAt: new Date(),
+    // If the commitment is already resolved (crash retry that already
+    // completed before the crash), return it without re-submitting.
+    if (commitment.status !== 'PENDING') {
+      return {
+        infrastructureResult,
+        protocolResult: { status: 'EXECUTED', receipts: [] },
+        commitment,
+      }
     }
 
-    // 4. Submit through the canonical protocol path.
+    // 5. Submit through the canonical protocol path (consensus → executeBatch).
     const protocolResult = await this.deps.protocolRuntime.submitTransaction(transaction)
 
-    // 5. Update the commitment based on the protocol result.
-    commitment.batchResult = protocolResult
-    commitment.resolvedAt = new Date()
+    // 6. Compute the ProtocolOutcome (pure, precise BatchExecutionStatus).
+    const outcome = computeOutcome(
+      commitment.commitmentId,
+      transaction.id,
+      protocolResult,
+      new Date(),
+    )
 
-    if (protocolResult.status === 'EXECUTED') {
-      commitment.status = 'RECONCILED'
-    } else {
-      // REJECTED_BY_CONSENSUS, INVALID_FINALITY_CERTIFICATE, EXECUTION_FAILED,
-      // or NO_TRANSACTIONS — all mean the physical result is unreconciled.
-      commitment.status = 'RECONCILIATION_REQUIRED'
+    // 7. DURABLE WRITE #2: record outcome + advance commitment atomically.
+    //    The store maps BatchExecutionStatus → ReconciliationState (R1, R2).
+    const resolvedCommitment = await this.deps.reconciliationStore.resolve(
+      commitment.commitmentId,
+      outcome,
+    )
+
+    return { infrastructureResult, protocolResult, commitment: resolvedCommitment }
+  }
+
+  /**
+   * Crash recovery (Phase 11B, spec §6.3).
+   *
+   * On restart, load all PENDING commitments and resolve each:
+   *   - Re-derive the transaction from the evidence (deterministic — C2).
+   *   - Check bridge determinism (§6.4): if transaction.id !==
+   *     commitment.intendedTransactionId, flag
+   *     RECONCILIATION_REQUIRED_INVARIANT_VIOLATION.
+   *   - Check the ProtocolTransition journal: if the transaction already
+   *     committed before the crash, resolve as RECONCILED (synthetic EXECUTED
+   *     outcome). Otherwise, re-submit via submitTransaction.
+   *
+   * Idempotent: safe to call multiple times. Only PENDING commitments are
+   * processed; resolved commitments are skipped.
+   */
+  async recoverPending(): Promise<PendingCommitment[]> {
+    const pending = await this.deps.reconciliationStore.loadPending()
+    const resolved: PendingCommitment[] = []
+
+    for (const commitment of pending) {
+      const evidence = await this.deps.reconciliationStore.loadEvidence(
+        commitment.evidenceId,
+      )
+      if (!evidence) {
+        // Evidence missing — invariant violation (evidence is written
+        // atomically with the commitment, so this should never happen).
+        const outcome = computeOutcome(
+          commitment.commitmentId,
+          commitment.intendedTransactionId,
+          { status: 'NO_TRANSACTIONS', receipts: [], error: 'Evidence missing for PENDING commitment' },
+          new Date(),
+        )
+        resolved.push(
+          await this.deps.reconciliationStore.resolve(commitment.commitmentId, outcome),
+        )
+        continue
+      }
+
+      // Re-derive the transaction from the evidence (C2: deterministic).
+      const result = JSON.parse(evidence.resultJson) as RuntimeExecuteResult
+      const transaction = this.deps.bridge.infrastructureResultToTransaction(
+        result,
+        commitment.networkVersionId,
+        commitment.sender,
+        commitment.nonce,
+      )
+
+      // §6.4: bridge determinism enforcement.
+      if (transaction.id !== commitment.intendedTransactionId) {
+        const outcome = computeOutcome(
+          commitment.commitmentId,
+          transaction.id,
+          { status: 'NO_TRANSACTIONS', receipts: [], error: 'Bridge determinism violation: re-derived transaction ID does not match intendedTransactionId' },
+          new Date(),
+        )
+        resolved.push(
+          await this.deps.reconciliationStore.resolve(commitment.commitmentId, outcome),
+        )
+        continue
+      }
+
+      // Check if the protocol commit already succeeded (journal lookup).
+      // The ReconciliationStore owns this query (spec §6.3) — the runtime
+      // does NOT import the database directly (DI pattern, like
+      // PostgresProtocolStateStore).
+      const committedAt = await this.deps.reconciliationStore.findCommittedTransaction(
+        commitment.networkVersionId,
+        commitment.intendedTransactionId,
+      )
+
+      if (committedAt) {
+        // The protocol commit succeeded before the crash. Synthesize an
+        // EXECUTED outcome from the journal evidence (spec §6.3).
+        const outcome = computeSyntheticExecutedOutcome(
+          commitment.commitmentId,
+          commitment.intendedTransactionId,
+          committedAt,
+        )
+        resolved.push(
+          await this.deps.reconciliationStore.resolve(commitment.commitmentId, outcome),
+        )
+      } else {
+        // The protocol commit did not durably succeed. Re-submit.
+        const protocolResult = await this.deps.protocolRuntime.submitTransaction(transaction)
+        const outcome = computeOutcome(
+          commitment.commitmentId,
+          transaction.id,
+          protocolResult,
+          new Date(),
+        )
+        resolved.push(
+          await this.deps.reconciliationStore.resolve(commitment.commitmentId, outcome),
+        )
+      }
     }
 
-    return { infrastructureResult, protocolResult, commitment }
+    return resolved
   }
 
   // -------------------------------------------------------------------------

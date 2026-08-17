@@ -28,7 +28,7 @@
 // =============================================================================
 
 import { createHash, randomUUID } from 'crypto'
-import type { RuntimeExecuteResult } from './../../types'
+import type { RuntimeExecuteResult } from '../types'
 import type { BatchExecutionStatus, BatchExecutionResult } from './types'
 
 // ---------------------------------------------------------------------------
@@ -229,6 +229,18 @@ export interface PendingCommitment {
    * from evidence, not from a re-execution of the bridge). Spec §4.2 C2.
    */
   readonly intendedTransactionId: string
+  /**
+   * The sender identity for the protocol transaction. Stored so the bridge
+   * can re-derive the transaction at recovery (spec §6.3). Scalar, not a
+   * whole object — the spec §4.2 prohibits storing whole
+   * RuntimeExecuteResult/ProtocolTransaction, not operational scalars.
+   */
+  readonly sender: string
+  /**
+   * The sender's nonce at submission time. Stored so the bridge can re-derive
+   * the transaction at recovery (spec §6.3).
+   */
+  readonly nonce: number
   /** Current reconciliation status (PENDING before resolution). */
   status: ReconciliationState
   /** When the commitment was durably written. */
@@ -385,6 +397,8 @@ export interface ReconciliationStore {
   recordPending(
     evidence: PhysicalExecutionEvidence,
     intendedTransactionId: string,
+    sender: string,
+    nonce: number,
   ): Promise<PendingCommitment>
 
   /**
@@ -414,6 +428,26 @@ export interface ReconciliationStore {
    * Returns the evidence with its full resultJson, or null if not found.
    */
   loadEvidence(evidenceId: string): Promise<PhysicalExecutionEvidence | null>
+
+  /**
+   * Check if a protocol transaction has already been committed (journal
+   * lookup — spec §6.3).
+   *
+   * Returns the commit timestamp if the transaction is found in the
+   * ProtocolTransition journal, null otherwise.
+   *
+   * Used by crash recovery to detect transactions that committed before the
+   * crash but whose ProtocolOutcome was not durably recorded. If found,
+   * recovery synthesizes an EXECUTED outcome WITHOUT re-submitting (which
+   * would double-count).
+   *
+   * In-memory implementations return null (no journal). PostgreSQL
+   * implementations query the ProtocolTransition table.
+   */
+  findCommittedTransaction(
+    networkVersionId: string,
+    transactionId: string,
+  ): Promise<Date | null>
 }
 
 // ---------------------------------------------------------------------------
@@ -427,12 +461,16 @@ export interface ReconciliationStore {
 export function createPendingCommitment(
   evidence: PhysicalExecutionEvidence,
   intendedTransactionId: string,
+  sender: string,
+  nonce: number,
 ): PendingCommitment {
   return {
     commitmentId: randomUUID(),
     evidenceId: evidence.evidenceId,
     networkVersionId: evidence.networkVersionId,
     intendedTransactionId,
+    sender,
+    nonce,
     status: 'PENDING',
     createdAt: new Date(),
   }

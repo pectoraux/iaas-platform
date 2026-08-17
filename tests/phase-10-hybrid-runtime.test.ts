@@ -34,6 +34,7 @@ import { DeterministicTransactionExecutor } from "../src/lib/kernel/runtime/prot
 import { TransferHandler, MintHandler, RecordDeliveryHandler } from '../src/lib/bootstrap/handlers'
 import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
 import { SimulatedComputeAdapter } from '../src/lib/services/compute-adapter.service'
+import { InMemoryReconciliationStore } from '../src/lib/kernel/runtime/protocol/in-memory-reconciliation-store'
 import type { ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/types'
 
 beforeAll(() => {
@@ -67,6 +68,7 @@ function createHybridRuntime(): HybridRuntime {
     protocolRuntime,
     bridge: new DefaultHybridBridge(),
     protocolSender: 'hybrid-test-sender',
+    reconciliationStore: new InMemoryReconciliationStore(),
   })
 }
 
@@ -158,11 +160,17 @@ describe('Phase 10: hybrid execution', () => {
     expect(result.protocolResult.receipts[0].success).toBe(true)
     expect(result.protocolResult.receipts[0].receipt.transactionId).toBeTruthy()
 
-    // Phase 10.5D: A PendingProtocolCommitment was created and reconciled.
+    // Phase 11B: A PendingCommitment was created and reconciled.
+    // The commitment stores evidenceId + intendedTransactionId (hashes), not
+    // whole objects — per spec §4.2.
     expect(result.commitment).toBeDefined()
     expect(result.commitment.status).toBe('RECONCILED')
-    expect(result.commitment.infrastructureResult.success).toBe(true)
-    expect(result.commitment.transaction).toBeDefined()
+    expect(result.commitment.evidenceId).toBeTruthy()
+    expect(result.commitment.intendedTransactionId).toBe(
+      result.protocolResult.receipts[0].receipt.transactionId,
+    )
+    expect(result.commitment.resolvedAt).toBeDefined()
+    expect(result.commitment.outcomeId).toBeDefined()
 
     // The protocol state now has a record of the delivery.
     const state = await hybridRuntime.protocol.stateStore.getState()
@@ -215,6 +223,7 @@ describe('Phase 10: hybrid execution', () => {
       protocolRuntime,
       bridge: new DefaultHybridBridge(),
       protocolSender: 'hybrid-test-sender',
+      reconciliationStore: new InMemoryReconciliationStore(),
     })
 
     // Physical execution succeeds.
@@ -237,10 +246,13 @@ describe('Phase 10: hybrid execution', () => {
     // Protocol was rejected by consensus (no active validators).
     expect(result.protocolResult.status).toBe('REJECTED_BY_CONSENSUS')
 
-    // Phase 10.5D: The commitment is RECONCILIATION_REQUIRED.
-    expect(result.commitment.status).toBe('RECONCILIATION_REQUIRED')
-    expect(result.commitment.infrastructureResult.success).toBe(true)
-    expect(result.commitment.batchResult?.status).toBe('REJECTED_BY_CONSENSUS')
+    // Phase 11B: Anti-conflation — the precise cause is preserved.
+    // REJECTED_BY_CONSENSUS maps to RECONCILIATION_REQUIRED_CONSENSUS_REJECTION,
+    // NOT the old conflated RECONCILIATION_REQUIRED.
+    expect(result.commitment.status).toBe('RECONCILIATION_REQUIRED_CONSENSUS_REJECTION')
+    expect(result.commitment.resolvedAt).toBeDefined()
+    // The protocol result is still accessible.
+    expect(result.protocolResult.status).toBe('REJECTED_BY_CONSENSUS')
 
     // The protocol state was NOT changed (no protocol transition recorded).
     const state = await hybridRuntime.protocol.stateStore.getState()

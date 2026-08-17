@@ -1529,6 +1529,8 @@ model PendingCommitment {
   evidenceId             String   // FK to PhysicalExecutionEvidence
   networkVersionId       String
   intendedTransactionId  String   // deterministic from evidence + nonce (C2)
+  sender                 String   // for re-derivation at recovery (§6.3)
+  nonce                  Int      // for re-derivation at recovery (§6.3)
   status                 String   // ReconciliationState
   createdAt              DateTime @default(now())
   resolvedAt             DateTime?

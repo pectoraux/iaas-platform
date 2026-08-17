@@ -53,6 +53,7 @@ import { InMemoryProtocolStateStore } from '@/lib/kernel/runtime/protocol/state-
 import { DeterministicTransactionExecutor } from '@/lib/kernel/runtime/protocol/executor'
 import { TransferHandler, MintHandler, RecordDeliveryHandler } from '@/lib/bootstrap/handlers'
 import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '@/lib/kernel/runtime/protocol/validator-consensus'
+import { InMemoryReconciliationStore } from '@/lib/kernel/runtime/protocol/in-memory-reconciliation-store'
 
 let initialized = false
 
@@ -118,6 +119,7 @@ export function initializeBootstrap(): void {
     protocolRuntime,
     bridge: new DefaultHybridBridge(),
     protocolSender: 'hybrid-bridge',
+    reconciliationStore: new InMemoryReconciliationStore(),
   })
 
   // 5. Register all three runtimes with the RuntimeRegistry.
