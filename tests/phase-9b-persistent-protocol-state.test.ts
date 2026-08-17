@@ -36,7 +36,7 @@ import { instantiateTemplate } from '../src/lib/services/network.service'
 import { PostgresProtocolStateStore } from '../src/lib/kernel/runtime/protocol/postgres-state-store'
 import { DeterministicTransactionExecutor, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
 import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
-import { StubValidatorRegistry, StubConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
+import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
 import type { ProtocolTransaction, ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/types'
 
 let tenantId: string
@@ -81,8 +81,8 @@ function createPersistentRuntime(): ProtocolRuntime {
   const deps: ProtocolRuntimeDeps = {
     stateStore,
     executor: new DeterministicTransactionExecutor(),
-    validatorRegistry: new StubValidatorRegistry(),
-    consensusEngine: new StubConsensusEngine(),
+    validatorRegistry: new InMemoryValidatorRegistry(),
+    consensusEngine: new SimpleConsensusEngine(),
   }
   return new ProtocolRuntime(deps)
 }

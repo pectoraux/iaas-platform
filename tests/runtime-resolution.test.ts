@@ -44,7 +44,7 @@ import type {
 } from '../src/lib/kernel/adapters/infrastructure-adapter'
 import { InMemoryProtocolStateStore } from '../src/lib/kernel/runtime/protocol/state-store'
 import { DeterministicTransactionExecutor } from '../src/lib/kernel/runtime/protocol/executor'
-import { StubValidatorRegistry, StubConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
+import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
 import type { ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/types'
 
 // Helper: create a ProtocolRuntime with stub deps for testing.
@@ -53,8 +53,8 @@ function createProtocolRuntime() {
   const deps: ProtocolRuntimeDeps = {
     stateStore,
     executor: new DeterministicTransactionExecutor(),
-    validatorRegistry: new StubValidatorRegistry(),
-    consensusEngine: new StubConsensusEngine(),
+    validatorRegistry: new InMemoryValidatorRegistry(),
+    consensusEngine: new SimpleConsensusEngine(),
   }
   return new ProtocolRuntime(deps)
 }

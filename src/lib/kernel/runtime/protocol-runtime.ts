@@ -42,6 +42,7 @@ import type {
   ProtocolTransaction,
   ProtocolExecutionResult,
   ProtocolReceipt,
+  FinalizedBatch,
 } from './protocol/types'
 import { StaleVersionError } from './protocol/types'
 
@@ -211,6 +212,41 @@ export class ProtocolRuntime implements NetworkRuntime {
     }
     const state = await this.deps.stateStore.getState()
     return this.deps.executor.validate(transaction, state)
+  }
+
+  /**
+   * Execute a finalized batch of transactions in their consensus-determined order.
+   *
+   * Phase 9C: This is the consensus integration point. The consensus engine
+   * produces a FinalizedBatch (ordered + certified). The runtime executes
+   * each transaction in order through the executor + state store.
+   *
+   * CRITICAL INVARIANT:
+   *   Consensus decides ORDERING. The executor decides STATE TRANSITIONS.
+   *   The runtime applies the ordering through the executor. Neither layer
+   *   knows how the other works.
+   *
+   * Each transaction is executed sequentially. If a transaction fails
+   * (validation or stale version), the batch stops — the remaining
+   * transactions are NOT executed. The caller can retry them in a new batch.
+   *
+   * @returns An array of execution results (one per transaction, in order).
+   *          Stops at the first failure.
+   */
+  async executeBatch(batch: FinalizedBatch): Promise<ProtocolExecutionResult[]> {
+    const results: ProtocolExecutionResult[] = []
+
+    for (const transaction of batch.orderedTransactions) {
+      const result = await this.executeTransaction(transaction)
+      results.push(result)
+
+      if (!result.success) {
+        // Stop at the first failure — remaining transactions are NOT executed.
+        break
+      }
+    }
+
+    return results
   }
 
   // -------------------------------------------------------------------------

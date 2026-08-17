@@ -51,7 +51,7 @@ import { ProtocolRuntime } from '@/lib/kernel/runtime/protocol-runtime'
 import { HybridRuntime } from '@/lib/kernel/runtime/hybrid-runtime'
 import { InMemoryProtocolStateStore } from '@/lib/kernel/runtime/protocol/state-store'
 import { DeterministicTransactionExecutor } from '@/lib/kernel/runtime/protocol/executor'
-import { StubValidatorRegistry, StubConsensusEngine } from '@/lib/kernel/runtime/protocol/validator-consensus'
+import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '@/lib/kernel/runtime/protocol/validator-consensus'
 
 let initialized = false
 
@@ -98,8 +98,8 @@ export function initializeBootstrap(): void {
   const protocolRuntime = new ProtocolRuntime({
     stateStore: protocolStateStore,
     executor: protocolExecutor,
-    validatorRegistry: new StubValidatorRegistry(),
-    consensusEngine: new StubConsensusEngine(),
+    validatorRegistry: new InMemoryValidatorRegistry(),
+    consensusEngine: new SimpleConsensusEngine(),
   })
 
   // 4. Register all three runtimes with the RuntimeRegistry.

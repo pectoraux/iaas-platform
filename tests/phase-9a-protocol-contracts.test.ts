@@ -27,7 +27,7 @@ import { resolveRuntime } from '../src/lib/kernel/runtime'
 import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
 import { InMemoryProtocolStateStore } from '../src/lib/kernel/runtime/protocol/state-store'
 import { DeterministicTransactionExecutor, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
-import { StubValidatorRegistry, StubConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
+import { InMemoryValidatorRegistry, SimpleConsensusEngine, AlternateOrderingConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
 import type { ProtocolTransaction, ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/types'
 import { getTemplate } from '../src/lib/domain/templates'
 
@@ -41,8 +41,8 @@ function createProtocolRuntime(): ProtocolRuntime {
   const deps: ProtocolRuntimeDeps = {
     stateStore,
     executor: new DeterministicTransactionExecutor(),
-    validatorRegistry: new StubValidatorRegistry(),
-    consensusEngine: new StubConsensusEngine(),
+    validatorRegistry: new InMemoryValidatorRegistry(),
+    consensusEngine: new SimpleConsensusEngine(),
   }
   return new ProtocolRuntime(deps)
 }

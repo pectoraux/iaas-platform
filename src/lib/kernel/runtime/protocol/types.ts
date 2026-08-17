@@ -306,22 +306,32 @@ export interface ValidatorInfo {
 /**
  * A consensus engine that orders and finalizes transactions.
  *
- * Phase 9A: This is a contract definition only. The implementation is a
- * stub that throws NotImplemented. Real consensus lands in Phase 9C.
+ * Phase 9C: The consensus engine decides ORDERING and FINALITY. It does NOT
+ * implement state mutation semantics — that's the executor's job.
  *
- * The consensus engine is deliberately separate from the executor:
- *   - The executor is deterministic (same input → same output).
- *   - The consensus engine is non-deterministic (ordering, voting, finality).
+ * The flow:
+ *   1. propose(transactions) → ConsensusProposal (raw batch)
+ *   2. validateProposal(proposal) → boolean (admissibility check)
+ *   3. finalize(proposal) → FinalizedBatch (ordered + certified)
+ *
+ * The runtime then executes the FinalizedBatch in order through the executor.
+ *
+ * REPLACEABILITY: Any consensus engine that emits the same finalized order
+ * produces the same final state — because the executor is deterministic.
  */
 export interface ConsensusEngine {
-  /** Propose a block/batch of transactions for consensus. */
+  /** Propose a batch of transactions for consensus. */
   propose(transactions: ProtocolTransaction[]): ConsensusProposal
 
-  /** Validate a proposal from another validator. */
+  /** Validate a proposal from a validator. */
   validateProposal(proposal: ConsensusProposal): boolean
 
-  /** Finalize a proposal (after consensus is reached). */
-  finalize(proposal: ConsensusProposal): ProtocolReceipt[]
+  /**
+   * Finalize a proposal → produces the finalized ordered batch.
+   * The FinalizedBatch contains the transactions in their execution order
+   * + a finality certificate.
+   */
+  finalize(proposal: ConsensusProposal): FinalizedBatch
 }
 
 /**
@@ -332,6 +342,26 @@ export interface ConsensusProposal {
   transactions: ProtocolTransaction[]
   proposer: string
   proposedAt: Date
+}
+
+/**
+ * A finalized batch of transactions with a deterministic ordering and
+ * a finality certificate.
+ *
+ * This is what the protocol runtime executes: it takes the ordered
+ * transactions and executes them in order through the executor + state store.
+ */
+export interface FinalizedBatch {
+  /** The proposal that was finalized. */
+  proposalId: string
+  /** The transactions in their finalized execution order. */
+  orderedTransactions: ProtocolTransaction[]
+  /** A deterministic hash certifying this exact ordering. */
+  finalityCertificate: string
+  /** When finality was reached. */
+  finalizedAt: Date
+  /** Which validator finalized this batch. */
+  finalizedBy: string
 }
 
 // ---------------------------------------------------------------------------
