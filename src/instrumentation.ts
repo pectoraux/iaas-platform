@@ -25,13 +25,21 @@ export async function register(): Promise<void> {
   const { initializeBootstrap } = await import('@/lib/bootstrap')
   initializeBootstrap()
 
-  // Phase 11B: Crash recovery — resolve any PENDING commitments left over
-  // from a previous process crash. This is the spec §6.3 recovery path.
-  // Safe to call when there are no pending commitments (no-op).
+  // Phase 11B: Crash recovery + C3 index setup.
+  // - ensureC3UniqueIndex: creates the partial unique index on
+  //   ReconciliationAttempt(evidenceId) WHERE status='PENDING'. This is
+  //   race-proof under PostgreSQL (Defect 5 fix). No-op for in-memory.
+  // - recoverPending: resolves any PENDING attempts left over from a previous
+  //   process crash (spec §6.3). Safe no-op when none exist.
   const { runtimeRegistry } = await import('@/lib/kernel/runtime')
   const { HybridRuntime } = await import('@/lib/kernel/runtime/hybrid-runtime')
   const hybridRuntime = runtimeRegistry.resolve('hybrid')
   if (hybridRuntime instanceof HybridRuntime) {
+    // Defect 5 fix: ensure the partial unique index exists before recovery.
+    // For Postgres this runs CREATE UNIQUE INDEX IF NOT EXISTS (race-proof C3).
+    // For in-memory this is a no-op.
+    await hybridRuntime.reconciliationStore.ensureC3UniqueIndex()
+    // Spec §6.3: resolve any PENDING attempts left over from a previous crash.
     await hybridRuntime.recoverPending()
   }
 }

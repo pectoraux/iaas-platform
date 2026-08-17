@@ -57,7 +57,6 @@ import {
   computeEvidence,
   computeOutcome,
   computeSyntheticExecutedOutcome,
-  deriveIntendedTransactionId,
 } from './protocol/reconciliation-types'
 
 // ---------------------------------------------------------------------------
@@ -75,6 +74,14 @@ import {
  *
  * ARCHITECTURAL RULE: The bridge does NOT import adapters, consensus, or
  * state stores. It receives data and produces data.
+ *
+ * PHASE 11B FIX (Defect 7 — vertical coupling):
+ *   The bridge OWNS the deterministic transaction-ID derivation contract.
+ *   The generic reconciliation kernel does NOT know the payload shape
+ *   (record_delivery, etc.) — that's vertical semantics owned by the bridge.
+ *   `deriveTransactionId` lets the kernel compute the expected transaction ID
+ *   from evidence WITHOUT calling the bridge's full transaction builder,
+ *   while keeping the payload-shape knowledge in the bridge (not the kernel).
  */
 export interface HybridBridge {
   /**
@@ -97,6 +104,32 @@ export interface HybridBridge {
     sender: string,
     nonce: number,
   ): ProtocolTransaction
+
+  /**
+   * Derive the expected ProtocolTransaction.id from evidence, WITHOUT
+   * building the full transaction object.
+   *
+   * This is the independent-derivation contract (spec §6.4). The kernel
+   * calls this to compute intendedTransactionId before calling the bridge's
+   * full transaction builder, then verifies the bridge's output matches.
+   * Mismatch → bridge drift.
+   *
+   * The bridge OWNS the payload shape (e.g., 'record_delivery' data). The
+   * kernel does NOT know the payload type — that's vertical semantics owned
+   * by the bridge. This keeps the kernel vertical-neutral (spec §2 rule 4).
+   *
+   * @param resultJson The canonical RuntimeExecuteResult JSON from evidence.
+   * @param networkVersionId The network version for protocol isolation.
+   * @param sender The sender identity.
+   * @param nonce The sender's nonce.
+   * @returns The expected ProtocolTransaction.id.
+   */
+  deriveTransactionId(
+    resultJson: string,
+    networkVersionId: string,
+    sender: string,
+    nonce: number,
+  ): string
 }
 
 // ---------------------------------------------------------------------------
@@ -108,22 +141,25 @@ export interface HybridBridge {
  * into 'record_delivery' protocol transactions.
  *
  * The protocol transaction payload is:
- *   { type: 'record_delivery', data: { quantity, unit, assetId, telemetry } }
+ *   { type: 'record_delivery', data: { quantity, unit, success } }
  *
- * The protocol state stores the delivered quantity as a balance:
- *   'delivery:<assetId>' → cumulative quantity
+ * The protocol state stores the delivered quantity as a balance.
  *
- * This is deliberately simple — it proves the bridge works without
- * defining a specific hybrid application semantics.
+ * PHASE 11B FIX (Defect 7): the bridge owns BOTH the transaction builder
+ * AND the ID derivation. The 'record_delivery' payload shape lives here, in
+ * the bridge — NOT in the generic reconciliation kernel.
  */
 export class DefaultHybridBridge implements HybridBridge {
-  infrastructureResultToTransaction(
-    executionResult: RuntimeExecuteResult,
-    networkVersionId: string,
-    sender: string,
-    nonce: number,
-  ): ProtocolTransaction {
-    const payload = {
+  /**
+   * Build the payload from a runtime result. This is the vertical-specific
+   * shape owned by THIS bridge. A different bridge (e.g., for a storage
+   * vertical) would build a different payload.
+   */
+  private buildPayload(executionResult: RuntimeExecuteResult): {
+    type: string
+    data: Record<string, unknown>
+  } {
+    return {
       type: 'record_delivery',
       data: {
         quantity: executionResult.actualQuantity,
@@ -131,7 +167,15 @@ export class DefaultHybridBridge implements HybridBridge {
         success: executionResult.success,
       },
     }
+  }
 
+  infrastructureResultToTransaction(
+    executionResult: RuntimeExecuteResult,
+    networkVersionId: string,
+    sender: string,
+    nonce: number,
+  ): ProtocolTransaction {
+    const payload = this.buildPayload(executionResult)
     const id = computeTransactionId(networkVersionId, sender, nonce, payload)
 
     return {
@@ -143,6 +187,20 @@ export class DefaultHybridBridge implements HybridBridge {
       signature: 'hybrid-bridge-signature',
       submittedAt: new Date('2024-01-01T00:00:00Z'), // deterministic
     }
+  }
+
+  deriveTransactionId(
+    resultJson: string,
+    networkVersionId: string,
+    sender: string,
+    nonce: number,
+  ): string {
+    // Reconstruct the runtime result from the evidence's stored JSON, then
+    // build the payload the same way infrastructureResultToTransaction does.
+    // The ID is derived from the payload — same inputs → same ID.
+    const result = JSON.parse(resultJson) as RuntimeExecuteResult
+    const payload = this.buildPayload(result)
+    return computeTransactionId(networkVersionId, sender, nonce, payload)
   }
 }
 
@@ -213,6 +271,14 @@ export class HybridRuntime implements NetworkRuntime {
     return this.deps.infrastructureRuntime
   }
 
+  /**
+   * @returns The reconciliation store (for startup index setup + recovery).
+   * Phase 11B Defect 5 fix: used by instrumentation to call ensureC3UniqueIndex.
+   */
+  get reconciliationStore() {
+    return this.deps.reconciliationStore
+  }
+
   // -------------------------------------------------------------------------
   // Hybrid-specific entry point
   // -------------------------------------------------------------------------
@@ -270,15 +336,16 @@ export class HybridRuntime implements NetworkRuntime {
       new Date(),
     )
 
-    // 3. Independently derive intendedTransactionId (Defect 4 fix).
-    //    This does NOT call the bridge — it computes the expected tx ID
-    //    directly from the evidence. The bridge output is verified against
-    //    this in step 5.
-    const intendedTransactionId = deriveIntendedTransactionId(
-      evidence,
+    // 3. Independently derive intendedTransactionId (Defect 4 fix, corrected).
+    //    The bridge OWNS the derivation contract (Defect 7 fix — the kernel
+    //    does NOT know the payload shape). The kernel calls the bridge's
+    //    deriveTransactionId with the evidence's resultJson, then verifies
+    //    the bridge's full transaction builder produces the same ID.
+    const intendedTransactionId = this.deps.bridge.deriveTransactionId(
+      evidence.resultJson,
+      networkVersionId,
       this.deps.protocolSender,
       currentNonce,
-      computeTransactionId,
     )
 
     // 4. DURABLE WRITE #1: record evidence + a NEW PENDING attempt atomically.

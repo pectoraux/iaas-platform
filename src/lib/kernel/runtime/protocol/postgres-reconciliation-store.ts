@@ -27,9 +27,13 @@ export class PostgresReconciliationStore implements ReconciliationStore {
   /**
    * Atomic: writes evidence + a NEW PENDING attempt, in one tx.
    *
-   * C3 (corrected): rejects if a PENDING attempt already exists for this
-   * evidenceId (concurrent retry race). Terminal attempts do NOT block new
-   * attempts — a retry after failure legitimately creates a new PENDING row.
+   * C3 (corrected — race-proof, Defect 5 fix): the partial unique index
+   *   CREATE UNIQUE INDEX recon_attempt_pending_unique
+   *     ON "ReconciliationAttempt" ("evidenceId") WHERE "status" = 'PENDING'
+   * is the source of truth. Two concurrent INSERTs of PENDING for the same
+   * evidenceId cannot both succeed — one fails with P2002. The application-
+   * level check-then-insert is a fast-path optimization, NOT the correctness
+   * guarantee.
    *
    * ALWAYS creates a new attempt. Never returns an existing terminal attempt.
    */
@@ -39,49 +43,52 @@ export class PostgresReconciliationStore implements ReconciliationStore {
     sender: string,
     nonce: number,
   ): Promise<ReconciliationAttempt> {
-    return db.$transaction(async (tx) => {
-      // C3: check for an existing PENDING attempt for this evidence.
-      const existingPending = await tx.reconciliationAttempt.findFirst({
-        where: { evidenceId: evidence.evidenceId, status: 'PENDING' },
+    try {
+      return await db.$transaction(async (tx) => {
+        // Evidence is immutable (E1).
+        await tx.physicalExecutionEvidence.upsert({
+          where: { evidenceId: evidence.evidenceId },
+          create: {
+            evidenceId: evidence.evidenceId,
+            executionAssignmentId: evidence.executionAssignmentId,
+            runtimeKind: evidence.runtimeKind,
+            networkVersionId: evidence.networkVersionId,
+            resultDigest: evidence.resultDigest,
+            resultJson: evidence.resultJson,
+            occurredAt: evidence.occurredAt,
+          },
+          update: {},
+        })
+
+        // ALWAYS create a new attempt row. The partial unique index
+        // (ensureC3UniqueIndex) enforces C3 at the DB level — if a PENDING
+        // attempt already exists for this evidenceId, this INSERT fails with
+        // P2002 and we catch it below.
+        const attempt = await tx.reconciliationAttempt.create({
+          data: {
+            evidenceId: evidence.evidenceId,
+            networkVersionId: evidence.networkVersionId,
+            intendedTransactionId,
+            sender,
+            nonce,
+            status: 'PENDING',
+          },
+        })
+
+        return toReconciliationAttempt(attempt)
       })
-      if (existingPending) {
+    } catch (err) {
+      // P2002 = unique constraint violation. The partial unique index caught
+      // a concurrent PENDING attempt for this evidenceId (C3 race-proof).
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         throw new Error(
           `ReconciliationStore.recordPending: a PENDING attempt already exists ` +
-            `for evidenceId ${evidence.evidenceId} (attemptId ${existingPending.attemptId}). ` +
-            `Concurrent retry race — resolve the existing attempt before creating a new one (C3).`,
+            `for evidenceId ${evidence.evidenceId} (C3, enforced by partial unique index). ` +
+            `Concurrent retry race — resolve the existing attempt before creating a new one.`,
         )
       }
-
-      // Evidence is immutable (E1). Upsert so re-derivation is idempotent at
-      // the evidence level (the attempt uniqueness is the stronger guard).
-      await tx.physicalExecutionEvidence.upsert({
-        where: { evidenceId: evidence.evidenceId },
-        create: {
-          evidenceId: evidence.evidenceId,
-          executionAssignmentId: evidence.executionAssignmentId,
-          runtimeKind: evidence.runtimeKind,
-          networkVersionId: evidence.networkVersionId,
-          resultDigest: evidence.resultDigest,
-          resultJson: evidence.resultJson,
-          occurredAt: evidence.occurredAt,
-        },
-        update: {},
-      })
-
-      // ALWAYS create a new attempt row.
-      const attempt = await tx.reconciliationAttempt.create({
-        data: {
-          evidenceId: evidence.evidenceId,
-          networkVersionId: evidence.networkVersionId,
-          intendedTransactionId,
-          sender,
-          nonce,
-          status: 'PENDING',
-        },
-      })
-
-      return toReconciliationAttempt(attempt)
-    })
+      throw err
+    }
   }
 
   /**
@@ -194,6 +201,22 @@ export class PostgresReconciliationStore implements ReconciliationStore {
       select: { createdAt: true },
     })
     return transition?.createdAt ?? null
+  }
+
+  /**
+   * Ensure the partial unique index for C3 exists (Defect 5 fix).
+   *
+   * Race-proof under PostgreSQL default (READ COMMITTED) isolation: two
+   * concurrent INSERTs of PENDING for the same evidenceId cannot both
+   * succeed — one fails with a unique violation.
+   *
+   * Idempotent (IF NOT EXISTS).
+   */
+  async ensureC3UniqueIndex(): Promise<void> {
+    await db.$executeRawUnsafe(
+      `CREATE UNIQUE INDEX IF NOT EXISTS "recon_attempt_pending_unique" ` +
+        `ON "ReconciliationAttempt" ("evidenceId") WHERE "status" = 'PENDING'`,
+    )
   }
 }
 

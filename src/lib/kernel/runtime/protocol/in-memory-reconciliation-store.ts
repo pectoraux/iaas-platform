@@ -119,4 +119,12 @@ export class InMemoryReconciliationStore implements ReconciliationStore {
   ): Promise<Date | null> {
     return null
   }
+
+  /**
+   * No-op for in-memory store (single-threaded, no concurrent races).
+   * The partial unique index is a PostgreSQL concept.
+   */
+  async ensureC3UniqueIndex(): Promise<void> {
+    // no-op — in-memory store has no concurrent races
+  }
 }

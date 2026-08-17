@@ -219,6 +219,23 @@ export type PendingCommitment = ReconciliationAttempt
 // ---------------------------------------------------------------------------
 
 /**
+ * Sentinel value for outcomes where no batch was finalized (pre-finalization
+ * rejections: REJECTED_BY_CONSENSUS, NO_TRANSACTIONS). Used INSTEAD of NULL
+ * so that the @@unique([attemptId, finalityCertificate]) constraint actually
+ * enforces O2.
+ *
+ * PHASE 11B FIX (Defect 6 — O2 nullable loophole): PostgreSQL UNIQUE allows
+ * multiple NULL values, so using NULL for pre-finalization outcomes would
+ * let an attempt accumulate multiple (attemptId, NULL) rows. The sentinel
+ * '' (empty string) is a real value that the constraint treats as equal to
+ * itself, so O2 is genuinely enforced.
+ *
+ * '' is chosen because a valid finality certificate is always a 64-char
+ * SHA-256 hex; '' is never a valid certificate, so there's no collision risk.
+ */
+export const NO_FINALITY_CERTIFICATE = ''
+
+/**
  * Durable record of what the protocol layer returned for a given attempt.
  *
  * IDENTITY (spec §4.3): content-addressed.
@@ -227,15 +244,15 @@ export type PendingCommitment = ReconciliationAttempt
  * INVARIANTS (spec §4.3):
  *   O1. status is the EXACT BatchExecutionStatus. Never rewritten.
  *   O2. One outcome per (attemptId, finalityCertificate). ENFORCED by
- *       @@unique([attemptId, finalityCertificate]) in the schema. A
- *       re-submission producing a different certificate creates a NEW outcome.
+ *       @@unique([attemptId, finalityCertificate]) in the schema, using the
+ *       NO_FINALITY_CERTIFICATE sentinel instead of NULL (Defect 6 fix —
+ *       PostgreSQL UNIQUE allows multiple NULLs, which broke O2).
  *   O3. Does NOT store the receipts array; stores a digest.
  *
  * PHASE 11B CORRECTION (finalityCertificate):
- *   The `finalityCertificate` field now holds the ACTUAL consensus certificate
- *   (SHA-256 of ordered tx IDs from computeFinalityCertificate), threaded
- *   through BatchExecutionResult. Previously it held the transaction ID, which
- *   was a protocol-significant field recording the wrong fact.
+ *   The `finalityCertificate` field holds the ACTUAL consensus certificate
+ *   (SHA-256 of ordered tx IDs), threaded from BatchExecutionResult.
+ *   Pre-finalization outcomes use NO_FINALITY_CERTIFICATE (''), not NULL.
  */
 export interface ProtocolOutcome {
   readonly outcomeId: string
@@ -247,8 +264,11 @@ export interface ProtocolOutcome {
    * reconciliation detect bridge drift — spec §6.4).
    */
   readonly transactionId: string
-  /** The actual consensus certificate (null if rejected pre-finalization). */
-  readonly finalityCertificate: string | null
+  /**
+   * The actual consensus certificate, or NO_FINALITY_CERTIFICATE ('') if the
+   * batch was rejected pre-finalization. Never NULL (Defect 6 fix).
+   */
+  readonly finalityCertificate: string
   /** The precise BatchExecutionStatus (spec §4.3 O1). */
   readonly status: BatchExecutionStatus
   /** SHA-256 of the canonical receipts array (spec §4.3 O3). */
@@ -260,8 +280,9 @@ export interface ProtocolOutcome {
 /**
  * Compute a ProtocolOutcome from a batch result + attempt.
  *
- * PHASE 11B FIX: reads batchResult.finalityCertificate (the actual consensus
- * certificate), NOT the transaction ID.
+ * PHASE 11B FIX (Defect 6): uses NO_FINALITY_CERTIFICATE ('') instead of NULL
+ * for pre-finalization outcomes, so O2 is genuinely enforced by the unique
+ * constraint.
  *
  * PURE: same inputs → same outcomeId.
  */
@@ -271,7 +292,7 @@ export function computeOutcome(
   batchResult: BatchExecutionResult,
   recordedAt: Date,
 ): ProtocolOutcome {
-  const finalityCertificate = batchResult.finalityCertificate
+  const finalityCertificate = batchResult.finalityCertificate ?? NO_FINALITY_CERTIFICATE
   const receiptsDigest = batchResult.receipts.length > 0
     ? sha256(batchResult.receipts)
     : null
@@ -300,11 +321,9 @@ export function computeOutcome(
  * commit succeeded before the crash, so the transition journal contains the
  * transaction, but no outcome was durably recorded.
  *
- * The finalityCertificate for a single-transaction batch is derivable as
- * SHA-256(transactionId) (computeFinalityCertificate joins ordered IDs with
- * ':', so for one tx it's SHA-256(txId)). We recompute it the same way to
- * ensure the synthetic outcome's identity matches what a real outcome would
- * have been.
+ * The finalityCertificate for a single-transaction batch is SHA-256(txId)
+ * (computeFinalityCertificate joins ordered IDs with ':', so for one tx it's
+ * SHA-256(txId)).
  *
  * PURE: same inputs → same outcomeId.
  */
@@ -313,11 +332,6 @@ export function computeSyntheticExecutedOutcome(
   transactionId: string,
   recordedAt: Date,
 ): ProtocolOutcome {
-  // computeFinalityCertificate for a single-transaction batch:
-  //   SHA-256(orderedTransactions.map(tx => tx.id).join(':'))
-  // For one tx: SHA-256(transactionId + ':') — wait, no join trailing.
-  // Actually join(':') on a single-element array produces just the element.
-  // So finalityCertificate = SHA-256(transactionId).
   const finalityCertificate = createHash('sha256').update(transactionId).digest('hex')
 
   const outcomeId = sha256({
@@ -336,51 +350,6 @@ export function computeSyntheticExecutedOutcome(
     error: null,
     recordedAt,
   }
-}
-
-// ---------------------------------------------------------------------------
-// Independent transaction ID derivation (Defect 4 fix)
-// ---------------------------------------------------------------------------
-
-/**
- * Independently compute the expected ProtocolTransaction.id from evidence,
- * WITHOUT calling the bridge.
- *
- * This mirrors the bridge's transaction-ID computation (computeTransactionId
- * from networkVersionId + sender + nonce + payload), but the payload is
- * derived from the evidence's resultJson. The bridge must produce a
- * transaction whose .id equals this value; if it doesn't, that's bridge drift
- * (Defect 4).
- *
- * PHASE 11B FIX (Defect 4): the intendedTransactionId is computed INDEPENDENTLY
- * and stored on the attempt. The bridge output is verified against it at
- * submission time (not just at recovery). This closes the gap where the
- * original code simply took transaction.id from the bridge output.
- *
- * NOTE: this requires knowing the payload type the bridge will produce. The
- * DefaultHybridBridge produces a 'record_delivery' payload from
- * { quantity, unit, success }. This function encodes that contract. A
- * different bridge would require a different derivation function; the bridge
- * contract is the source of truth for the payload shape.
- */
-export function deriveIntendedTransactionId(
-  evidence: PhysicalExecutionEvidence,
-  sender: string,
-  nonce: number,
-  computeTxId: (networkVersionId: string, sender: string, nonce: number, payload: Record<string, unknown>) => string,
-): string {
-  const result = JSON.parse(evidence.resultJson) as RuntimeExecuteResult
-  // The DefaultHybridBridge payload contract:
-  //   { type: 'record_delivery', data: { quantity, unit, success } }
-  const payload = {
-    type: 'record_delivery',
-    data: {
-      quantity: result.actualQuantity,
-      unit: result.actualUnit,
-      success: result.success,
-    },
-  }
-  return computeTxId(evidence.networkVersionId, sender, nonce, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +422,26 @@ export interface ReconciliationStore {
     networkVersionId: string,
     transactionId: string,
   ): Promise<Date | null>
+
+  /**
+   * Ensure the partial unique index for C3 exists (Defect 5 fix).
+   *
+   * C3 (race-proof): at most one PENDING attempt per evidence at a time,
+   * enforced by a PostgreSQL partial unique index:
+   *   CREATE UNIQUE INDEX IF NOT EXISTS recon_attempt_pending_unique
+   *     ON "ReconciliationAttempt" ("evidenceId") WHERE "status" = 'PENDING'
+   *
+   * This is race-proof under PostgreSQL default (READ COMMITTED) isolation:
+   * two concurrent INSERTs of PENDING for the same evidenceId cannot both
+   * succeed — one fails with a unique violation. The application-level
+   * check-then-insert is NOT relied upon for correctness.
+   *
+   * The PostgresReconciliationStore executes this via $executeRawUnsafe. The
+   * InMemoryReconciliationStore is a no-op (single-threaded, no race).
+   *
+   * Idempotent: safe to call multiple times (IF NOT EXISTS).
+   */
+  ensureC3UniqueIndex(): Promise<void>
 }
 
 // ---------------------------------------------------------------------------

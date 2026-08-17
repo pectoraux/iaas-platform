@@ -1521,15 +1521,16 @@ model PhysicalExecutionEvidence {
 ///   be followed by a NEW attempt that legitimately re-submits.
 ///
 /// C3 (corrected): at most one PENDING attempt per evidence at a time.
-///   Enforced by a partial unique index on (evidenceId) WHERE status = 'PENDING'.
-///   Terminal attempts do NOT block new attempts.
+///   ENFORCED by a PostgreSQL partial unique index, created via raw SQL
+///   migration (Prisma doesn't support partial unique indexes declaratively):
+///     CREATE UNIQUE INDEX ON "ReconciliationAttempt" ("evidenceId") WHERE "status" = 'PENDING'
+///   This is race-proof under PostgreSQL default (READ COMMITTED) isolation:
+///   two concurrent INSERTs of PENDING for the same evidenceId cannot both
+///   succeed — one will fail with a unique violation. The application-level
+///   check-then-insert is NOT relied upon for correctness (Defect 5 fix).
 ///
 /// C4: an attempt never transitions backwards. PENDING → {RECONCILED, <cause>}
 ///   is the only forward edge. A new attempt is a NEW row.
-///
-/// Note: Prisma doesn't support partial unique indexes declaratively; the
-/// store enforces C3 at the application level (checking for existing PENDING
-/// before inserting). The index on (evidenceId, status) supports this lookup.
 model ReconciliationAttempt {
   attemptId               String   @id @default(cuid())
   evidenceId             String   // FK to PhysicalExecutionEvidence
@@ -1542,7 +1543,7 @@ model ReconciliationAttempt {
   resolvedAt             DateTime?
   outcomeId              String?  // FK to ProtocolOutcome
 
-  @@index([evidenceId, status]) // C3 lookup: existing PENDING for evidence
+  @@index([evidenceId, status]) // supports the partial unique index lookups
   @@index([networkVersionId])
   @@index([status])
   @@index([intendedTransactionId])
@@ -1555,28 +1556,28 @@ model ReconciliationAttempt {
 
 /// Phase 11B §4.3: ProtocolOutcome — durable record of what the protocol layer
 /// returned for a given attempt. Content-addressed by outcomeId.
-/// Append-only (O2 — now ENFORCED by @@unique([attemptId, finalityCertificate])).
-/// Stores the precise BatchExecutionStatus (O1), never collapsed. Stores a
-/// receipts digest, not the array (O3 — receipts live in the ProtocolTransition
-/// journal).
+/// Append-only (O2 — now GENUINELY enforced).
 ///
-/// PHASE 11B FIX: finalityCertificate holds the ACTUAL consensus certificate
-/// (SHA-256 of ordered tx IDs), threaded from BatchExecutionResult. Previously
-/// it held the transaction ID — a protocol-significant field recording the
-/// wrong fact.
-/// PHASE 11B FIX: O2 uniqueness now enforced by @@unique([attemptId, finalityCertificate]).
-///   Previously it was application convention only.
+/// PHASE 11B FIX (Defect 6 — O2 nullable loophole):
+///   finalityCertificate is NON-NULLABLE. Pre-finalization outcomes
+///   (REJECTED_BY_CONSENSUS, NO_TRANSACTIONS) use the sentinel ''
+///   (NO_FINALITY_CERTIFICATE constant) instead of NULL. This makes
+///   @@unique([attemptId, finalityCertificate]) actually enforce O2 —
+///   PostgreSQL UNIQUE allows multiple NULLs, but treats '' as a real value.
+///
+/// PHASE 11B FIX (Defect 2): finalityCertificate holds the ACTUAL consensus
+/// certificate (SHA-256 of ordered tx IDs), threaded from BatchExecutionResult.
 model ProtocolOutcome {
   outcomeId            String   @id // content-addressed SHA-256
   attemptId            String   // FK to ReconciliationAttempt
   transactionId        String   // the ProtocolTransaction.id actually submitted
-  finalityCertificate  String?  // the ACTUAL consensus cert (null if rejected pre-finalization)
+  finalityCertificate  String   // ACTUAL consensus cert, or '' sentinel for pre-finalization (Defect 6 fix — non-nullable)
   status               String   // exact BatchExecutionStatus (O1)
   receiptsDigest       String?  // SHA-256 of canonical receipts (O3)
   error                String?
   recordedAt           DateTime @default(now())
 
-  @@unique([attemptId, finalityCertificate]) // O2: one outcome per (attempt, certificate)
+  @@unique([attemptId, finalityCertificate]) // O2: genuinely enforced (non-nullable, Defect 6 fix)
   @@index([attemptId])
   @@index([transactionId])
 }
