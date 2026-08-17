@@ -1,13 +1,13 @@
 // =============================================================================
-// Kernel: In-Memory Protocol State Store (Phase 9B)
+// Kernel: In-Memory Protocol State Store (Phase 9B.2)
 // =============================================================================
 // A deterministic, versioned key-value state store. This is the simplest
 // implementation — no persistence, no disk, just in-memory maps.
 //
-// Phase 9B: The interface is now ASYNC and version-checked (optimistic
-// concurrency). This in-memory implementation implements the SAME async
-// contract as the PostgreSQL implementation — the test implementation is
-// NOT a different protocol.
+// Phase 9B.2: The store has NO shared mutable staging buffer. The commit
+// method receives the write set directly from the caller. This eliminates
+// the concurrency bug where two transactions using the same store could
+// interleave staged mutations.
 //
 // DETERMINISM:
 //   The state hash is computed from the entries in canonical (sorted-key)
@@ -16,33 +16,24 @@
 //   invariant: given the same state, execution is deterministic.
 //
 // OPTIMISTIC CONCURRENCY:
-//   commit(expectedVersion) checks that the current version matches
-//   expectedVersion. If not, it throws StaleVersionError. This prevents
-//   two transactions from both committing against the same state.
+//   commit(expectedVersion, writeSet) checks that the current version matches
+//   expectedVersion. If not, it throws StaleVersionError.
 // =============================================================================
 
 import { createHash } from 'crypto'
-import type { ProtocolStateStore, ProtocolStateSnapshot } from './types'
+import type { ProtocolStateStore, ProtocolStateSnapshot, WriteSet } from './types'
 import { StaleVersionError } from './types'
 
 /**
  * In-memory implementation of ProtocolStateStore.
  *
- * Maintains:
- *   - A current committed state (versioned snapshot)
- *   - A staged set of changes (pending put/delete operations)
- *   - A history of all committed snapshots (for deterministic replay)
- *
- * The hash is SHA-256 of the canonical JSON representation of the entries
- * (sorted keys). This ensures determinism.
- *
- * Phase 9B: All methods are async (matching the persistent implementation).
- * The commit method is version-checked (optimistic concurrency).
+ * Phase 9B.2: No shared mutable staging buffer. The commit method receives
+ * the write set directly. Two concurrent transactions using the same store
+ * CANNOT interleave their mutations.
  */
 export class InMemoryProtocolStateStore implements ProtocolStateStore {
   readonly networkVersionId: string
   private currentEntries: Map<string, string> = new Map()
-  private stagedEntries: Map<string, string | null> = new Map() // null = delete
   private history: ProtocolStateSnapshot[] = []
   private version = 0
 
@@ -63,46 +54,28 @@ export class InMemoryProtocolStateStore implements ProtocolStateStore {
   }
 
   async get(key: string): Promise<string | undefined> {
-    // Check staged changes first.
-    if (this.stagedEntries.has(key)) {
-      const staged = this.stagedEntries.get(key)!
-      return staged === null ? undefined : staged
-    }
     return this.currentEntries.get(key)
   }
 
-  put(key: string, value: string): void {
-    this.stagedEntries.set(key, value)
-  }
-
-  delete(key: string): void {
-    this.stagedEntries.set(key, null) // null = delete
-  }
-
-  async commit(expectedVersion: number, _transactionHash?: string): Promise<ProtocolStateSnapshot> {
+  async commit(expectedVersion: number, writeSet: WriteSet, _transactionHash?: string): Promise<ProtocolStateSnapshot> {
     // Optimistic concurrency check: the expected version must match.
     if (expectedVersion !== this.version) {
       throw new StaleVersionError(expectedVersion, this.version)
     }
 
-    // Apply staged changes to current entries.
-    for (const [key, value] of this.stagedEntries) {
-      if (value === null) {
-        this.currentEntries.delete(key)
+    // Apply the write set to current entries.
+    for (const entry of writeSet) {
+      if (entry.op === 'put') {
+        this.currentEntries.set(entry.key, entry.value)
       } else {
-        this.currentEntries.set(key, value)
+        this.currentEntries.delete(entry.key)
       }
     }
-    this.stagedEntries.clear()
-    this.version++
 
+    this.version++
     const snapshot = this.createSnapshot()
     this.history.push(snapshot)
     return snapshot
-  }
-
-  rollback(): void {
-    this.stagedEntries.clear()
   }
 
   async getSnapshot(version: number): Promise<ProtocolStateSnapshot | undefined> {
@@ -114,29 +87,17 @@ export class InMemoryProtocolStateStore implements ProtocolStateStore {
   // -------------------------------------------------------------------------
 
   private createSnapshot(): ProtocolStateSnapshot {
-    // Create a read-only copy of the current entries.
     const entries = new Map(this.currentEntries)
     const hash = this.computeHash(entries)
-    return {
-      version: this.version,
-      hash,
-      entries,
-    }
+    return { version: this.version, hash, entries }
   }
 
-  /**
-   * Compute a deterministic hash from the entries.
-   * The entries are serialized in canonical (sorted-key) JSON form,
-   * then SHA-256 hashed. This ensures two stores with the same entries
-   * produce the same hash, regardless of insertion order.
-   */
   private computeHash(entries: Map<string, string>): string {
     const sortedKeys = Array.from(entries.keys()).sort()
     const canonical: Record<string, string> = {}
     for (const key of sortedKeys) {
       canonical[key] = entries.get(key)!
     }
-    const json = JSON.stringify(canonical)
-    return createHash('sha256').update(json).digest('hex')
+    return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
   }
 }

@@ -136,19 +136,42 @@ export class StaleVersionError extends Error {
 }
 
 /**
+ * A write set: the set of key-value changes to apply in a single atomic commit.
+ *
+ * Phase 9B.2: This replaces the old shared `stagedEntries` map. Each
+ * transaction carries its OWN write set — there is no shared mutable
+ * staging buffer on the store. This eliminates the concurrency bug where
+ * two transactions using the same store could interleave staged mutations.
+ *
+ * A write set entry is either:
+ *   - { op: 'put', key, value } — set a key
+ *   - { op: 'delete', key } — delete a key
+ */
+export type WriteSetEntry =
+  | { op: 'put'; key: string; value: string }
+  | { op: 'delete'; key: string }
+
+/**
+ * A write set: an array of key-value changes to apply atomically.
+ * Carried by the transaction, not by the store.
+ */
+export type WriteSet = WriteSetEntry[]
+
+/**
  * A deterministic, versioned key-value state store.
  *
- * Phase 9B: The interface is ASYNC and version-checked. The commit method
- * takes an `expectedVersion` parameter — if the current version doesn't
- * match, the commit fails with `StaleVersionError`. This is optimistic
- * concurrency control (OCC):
+ * Phase 9B.2: The store has NO shared mutable staging buffer. The commit
+ * method receives the write set directly from the caller. This eliminates
+ * the concurrency bug where two transactions using the same store could
+ * interleave staged mutations.
  *
- *   Tx A ── read version 10 ── execute ── commit(10) → 11 ✅
- *   Tx B ── read version 10 ── execute ── commit(10) → StaleVersionError ❌
+ * The flow is:
+ *   state = store.getState()           // read current state (async)
+ *   writeSet = executor.apply(tx, state).writeSet  // pure calculation
+ *   store.commit(state.version, writeSet, tx.id)   // atomic commit (async)
  *
- * The store maintains a current state snapshot. Each commit produces a new
- * version with a deterministic hash. The store is the source of truth for
- * protocol state — NOT the generic Execution model.
+ * The store is the source of truth for protocol state — NOT the generic
+ * Execution model.
  *
  * DETERMINISM: The hash of a snapshot is computed from its entries in a
  * canonical order (sorted keys). Two snapshots with the same entries have
@@ -169,37 +192,32 @@ export interface ProtocolStateStore {
   get(key: string): Promise<string | undefined>
 
   /**
-   * Stage a key-value update (does not commit).
-   * Must be called after getState() (reads the current version).
-   */
-  put(key: string, value: string): void
-
-  /** Stage a key deletion (does not commit). */
-  delete(key: string): void
-
-  /**
-   * Commit staged changes → produces a new versioned snapshot.
+   * Commit a write set → produces a new versioned snapshot.
    *
    * OPTIMISTIC CONCURRENCY: If `expectedVersion` doesn't match the current
    * committed version, the commit fails with `StaleVersionError`. This
    * prevents two transactions from both committing against the same state.
    *
    * ATOMIC: The commit is all-or-nothing. If it fails, the state is
-   * unchanged and staged changes are discarded.
+   * unchanged.
+   *
+   * ISOLATED WRITE SET (Phase 9B.2): The write set is passed directly —
+   * there is no shared mutable staging buffer. Two concurrent transactions
+   * using the same store CANNOT interleave their mutations.
    *
    * TRANSITION JOURNAL (Phase 9B.1): If `transactionHash` is provided,
    * persistent implementations record a ProtocolTransition entry atomically
-   * with the state snapshot. This creates an append-only journal of state
-   * transitions that consensus can agree on.
+   * with the state snapshot.
    *
    * @param expectedVersion The version the caller read (for OCC).
-   * @param transactionHash Optional hash of the transaction that produced
-   *   this transition (for the transition journal).
+   * @param writeSet The key-value changes to apply (carried by the caller).
+   * @param transactionHash Optional hash of the transaction (for journal).
    */
-  commit(expectedVersion: number, transactionHash?: string): Promise<ProtocolStateSnapshot>
-
-  /** Rollback staged changes (discard without committing). */
-  rollback(): void
+  commit(
+    expectedVersion: number,
+    writeSet: WriteSet,
+    transactionHash?: string,
+  ): Promise<ProtocolStateSnapshot>
 
   /** Get a snapshot at a specific version (for deterministic replay). */
   getSnapshot(version: number): Promise<ProtocolStateSnapshot | undefined>
@@ -246,7 +264,7 @@ export interface ProtocolTransactionExecutor {
    *
    * If the transaction is invalid, returns valid=false + error.
    */
-  apply(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): { valid: boolean; newEntries: Map<string, string>; error?: string }
+  apply(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): { valid: boolean; writeSet: WriteSet; error?: string }
 }
 
 // ---------------------------------------------------------------------------

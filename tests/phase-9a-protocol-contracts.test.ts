@@ -154,27 +154,17 @@ describe('Phase 9A: deterministic state store', () => {
     const store = new InMemoryProtocolStateStore('nv1')
     expect((await store.getState()).version).toBe(0)
 
-    store.put('alice', '100')
-    const snapshot = await store.commit(0)
+    const writeSet = [{ op: 'put' as const, key: 'alice', value: '100' }]
+    const snapshot = await store.commit(0, writeSet)
     expect(snapshot.version).toBe(1)
     expect(snapshot.entries.get('alice')).toBe('100')
     expect((await store.getState()).version).toBe(1)
   })
 
-  it('rollback discards staged changes', async () => {
-    const store = new InMemoryProtocolStateStore('nv1', { alice: '100' })
-    store.put('alice', '200')
-    store.rollback()
-    expect(await store.get('alice')).toBe('100') // unchanged
-    expect((await store.getState()).version).toBe(0) // no new version
-  })
-
   it('getSnapshot retrieves historical versions', async () => {
     const store = new InMemoryProtocolStateStore('nv1')
-    store.put('v1', 'a')
-    await store.commit(0)
-    store.put('v2', 'b')
-    await store.commit(1)
+    await store.commit(0, [{ op: 'put', key: 'v1', value: 'a' }])
+    await store.commit(1, [{ op: 'put', key: 'v2', value: 'b' }])
 
     expect((await store.getSnapshot(0))?.entries.get('v1')).toBeUndefined()
     expect((await store.getSnapshot(1))?.entries.get('v1')).toBe('a')
@@ -183,12 +173,12 @@ describe('Phase 9A: deterministic state store', () => {
 
   it('Phase 9B: commit with stale version throws StaleVersionError', async () => {
     const store = new InMemoryProtocolStateStore('nv1')
-    store.put('alice', '100')
-    await store.commit(0) // version → 1
+    await store.commit(0, [{ op: 'put', key: 'alice', value: '100' }]) // version → 1
 
-    store.put('bob', '50')
     // Try to commit with the OLD expected version (0) — should fail.
-    await expect(store.commit(0)).rejects.toThrow(/Stale version/)
+    await expect(
+      store.commit(0, [{ op: 'put', key: 'bob', value: '50' }]),
+    ).rejects.toThrow(/Stale version/)
   })
 })
 
@@ -197,7 +187,7 @@ describe('Phase 9A: deterministic state store', () => {
 // ---------------------------------------------------------------------------
 
 describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', () => {
-  it('apply: mint transaction calculates new balance', async () => {
+  it('apply: mint transaction calculates write set', async () => {
     const store = new InMemoryProtocolStateStore('nv1')
     const executor = new DeterministicTransactionExecutor()
     const state = await store.getState()
@@ -205,19 +195,23 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
 
     const calc = executor.apply(tx, state)
     expect(calc.valid).toBe(true)
-    expect(calc.newEntries.get('balance:alice')).toBe('100')
+    // Write set should contain balance:alice and nonce:alice
+    const puts = calc.writeSet.filter(e => e.op === 'put')
+    expect(puts.find(e => e.key === 'balance:alice')?.value).toBe('100')
+    expect(puts.find(e => e.key === 'nonce:alice')?.value).toBe('1')
   })
 
-  it('apply: transfer transaction calculates balance movement', async () => {
-    const store = new InMemoryProtocolStateStore('nv1', { 'balance:alice': '100' })
+  it('apply: transfer transaction calculates write set', async () => {
+    const store = new InMemoryProtocolStateStore('nv1', { 'balance:alice': '100', 'nonce:alice': '0' })
     const executor = new DeterministicTransactionExecutor()
     const state = await store.getState()
     const tx = createTransaction('nv1', 'alice', 0, 'transfer', { from: 'alice', to: 'bob', amount: '30' })
 
     const calc = executor.apply(tx, state)
     expect(calc.valid).toBe(true)
-    expect(calc.newEntries.get('balance:alice')).toBe('70')
-    expect(calc.newEntries.get('balance:bob')).toBe('30')
+    const puts = calc.writeSet.filter(e => e.op === 'put')
+    expect(puts.find(e => e.key === 'balance:alice')?.value).toBe('70')
+    expect(puts.find(e => e.key === 'balance:bob')?.value).toBe('30')
   })
 
   it('apply: insufficient balance returns invalid (pure — no store mutation)', async () => {
@@ -229,6 +223,7 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
     const calc = executor.apply(tx, state)
     expect(calc.valid).toBe(false)
     expect(calc.error).toMatch(/Insufficient balance/)
+    expect(calc.writeSet).toEqual([]) // empty write set
   })
 
   it('validate: invalid nonce rejected', async () => {
@@ -241,7 +236,7 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
     expect(error).toMatch(/Invalid nonce/)
   })
 
-  it('deterministic: same state + transaction → same calculated entries', async () => {
+  it('deterministic: same state + transaction → same write set', async () => {
     const store1 = new InMemoryProtocolStateStore('nv1')
     const store2 = new InMemoryProtocolStateStore('nv1')
     const executor = new DeterministicTransactionExecutor()
@@ -252,20 +247,37 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
     const calc1 = executor.apply(tx, state1)
     const calc2 = executor.apply(tx, state2)
 
-    // Same resulting entries.
     expect(calc1.valid).toBe(calc2.valid)
-    // Compare entries (maps don't have structural equality, so compare keys).
-    const keys1 = Array.from(calc1.newEntries.keys()).sort()
-    const keys2 = Array.from(calc2.newEntries.keys()).sort()
-    expect(keys1).toEqual(keys2)
-    for (const key of keys1) {
-      expect(calc1.newEntries.get(key)).toBe(calc2.newEntries.get(key))
-    }
+    expect(calc1.writeSet).toEqual(calc2.writeSet)
+  })
+
+  it('Phase 9B.2: store has NO put/delete/rollback methods (no shared staging)', () => {
+    const store = new InMemoryProtocolStateStore('nv1')
+    expect(typeof (store as any).put).toBe('undefined')
+    expect(typeof (store as any).delete).toBe('undefined')
+    expect(typeof (store as any).rollback).toBe('undefined')
+  })
+
+  it('Phase 9B.2: commit takes a write set directly', async () => {
+    const store = new InMemoryProtocolStateStore('nv1')
+    const state = await store.getState()
+    const writeSet = [{ op: 'put' as const, key: 'test', value: 'value' }]
+    const snapshot = await store.commit(state.version, writeSet)
+    expect(snapshot.version).toBe(1)
+    expect(snapshot.entries.get('test')).toBe('value')
+  })
+
+  it('Phase 9B.2: NetworkVersion isolation — wrong networkVersionId rejected', async () => {
+    const runtime = createProtocolRuntime()
+    // The runtime's store has networkVersionId='test-nv'.
+    // Pass a transaction with a DIFFERENT networkVersionId.
+    const tx = createTransaction('wrong-nv', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
+    const result = await runtime.executeTransaction(tx)
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/does not match store/)
   })
 
   it('Phase 9B.1: executor does NOT import or use ProtocolStateStore', () => {
-    // The executor is a pure calculator — it should NOT take a store in
-    // its constructor or import the store type.
     const executor = new DeterministicTransactionExecutor()
     expect(typeof executor.validate).toBe('function')
     expect(typeof executor.apply).toBe('function')
@@ -274,19 +286,14 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
   it('Phase 9B.1: executor source does NOT import ProtocolStateStore', () => {
     const executorPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol', 'executor.ts')
     const content = readFileSync(executorPath, 'utf-8')
-    // The executor must NOT import the state store — it's a pure calculator.
     expect(content).not.toMatch(/import.*ProtocolStateStore/)
     expect(content).not.toMatch(/import.*state-store/)
   })
 
-  it('Phase 9B.1: ProtocolRuntime coordinates load → validate → apply → commit (not executor)', () => {
-    // The runtime's executeTransaction should call executor.apply (pure)
-    // and stateStore.commit (async) — NOT delegate entirely to the executor.
+  it('Phase 9B.1: ProtocolRuntime coordinates load → apply → commit (not executor)', () => {
     const runtimePath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol-runtime.ts')
     const content = readFileSync(runtimePath, 'utf-8')
-    // The runtime must call executor.apply (not executor.execute).
     expect(content).toMatch(/executor\.apply\(/)
-    // The runtime must call stateStore.commit (not the executor).
     expect(content).toMatch(/stateStore\.commit\(/)
   })
 })

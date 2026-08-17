@@ -29,17 +29,22 @@ import type {
   ProtocolReceipt,
   ProtocolStateSnapshot,
   ProtocolTransactionExecutor,
+  WriteSet,
 } from './types'
 
 /**
  * The result of calculating a transaction's state transition.
  * This is a PURE value — no side effects, no store mutation.
+ *
+ * Phase 9B.2: Returns a WriteSet (not raw entries) — the write set is
+ * the isolated set of changes the runtime should commit. There is no
+ * shared staging buffer; the write set is carried by the caller.
  */
 export interface TransitionCalculation {
   /** Whether the transaction is valid. */
   valid: boolean
-  /** The new entries after applying the transaction (only if valid). */
-  newEntries: Map<string, string>
+  /** The write set to commit (only if valid). */
+  writeSet: WriteSet
   /** Error message if invalid. */
   error?: string
 }
@@ -93,71 +98,28 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
   /**
    * Calculate the state transition for a transaction.
    * PURE: does not mutate the store or the input state.
-   * Returns the new entries that would result from applying the transaction.
    *
-   * If the transaction is invalid, returns valid=false + error.
+   * Phase 9B.2: Returns a WriteSet — the isolated set of key-value changes
+   * the runtime should commit. The write set is derived by diffing the
+   * old entries against the calculated new entries. There is no shared
+   * staging buffer; the write set is carried by the caller.
+   *
+   * If the transaction is invalid, returns valid=false + empty write set + error.
    */
   apply(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): TransitionCalculation {
     const validationError = this.validate(transaction, state)
     if (validationError) {
-      return { valid: false, newEntries: new Map(state.entries), error: validationError }
+      return { valid: false, writeSet: [], error: validationError }
     }
 
     // Calculate the new entries (pure — does not mutate the input state).
     const newEntries = new Map(state.entries)
     this.applyTransactionToEntries(transaction, newEntries)
 
-    return { valid: true, newEntries }
-  }
+    // Compute the write set (diff between old and new).
+    const writeSet = this.computeWriteSet(state.entries, newEntries)
 
-  /**
-   * Execute a transaction against the current state.
-   *
-   * Phase 9B.1: This method is DEPRECATED. The runtime should use
-   * validate() + apply() + coordinate the commit itself. This method
-   * is kept for backward compatibility with Phase 9A tests but delegates
-   * to the same pure calculation.
-   *
-   * @deprecated Use ProtocolRuntime.executeTransaction() instead.
-   */
-  async execute(
-    transaction: ProtocolTransaction,
-    state: ProtocolStateSnapshot,
-  ): Promise<ProtocolExecutionResult> {
-    const calc = this.apply(transaction, state)
-
-    if (!calc.valid) {
-      return {
-        success: false,
-        resultingState: state,
-        receipt: {
-          transactionId: transaction.id,
-          beforeStateHash: state.hash,
-          afterStateHash: state.hash, // unchanged
-          executedAt: transaction.submittedAt, // deterministic
-          executor: 'deterministic-executor',
-        },
-        error: calc.error,
-      }
-    }
-
-    // NOTE: This method does NOT commit — the runtime must stage + commit.
-    // This is a pure calculation result.
-    return {
-      success: true,
-      resultingState: {
-        version: state.version + 1,
-        hash: this.computeHash(calc.newEntries),
-        entries: calc.newEntries,
-      },
-      receipt: {
-        transactionId: transaction.id,
-        beforeStateHash: state.hash,
-        afterStateHash: this.computeHash(calc.newEntries),
-        executedAt: transaction.submittedAt, // deterministic
-        executor: 'deterministic-executor',
-      },
-    }
+    return { valid: true, writeSet }
   }
 
   // -------------------------------------------------------------------------
@@ -235,6 +197,30 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
         break
       }
     }
+  }
+
+  /**
+   * Compute the write set (diff) between old and new entries.
+   * Returns only the keys that changed.
+   */
+  private computeWriteSet(oldEntries: ReadonlyMap<string, string>, newEntries: Map<string, string>): WriteSet {
+    const writeSet: WriteSet = []
+    const allKeys = new Set([...oldEntries.keys(), ...newEntries.keys()])
+
+    for (const key of allKeys) {
+      const oldValue = oldEntries.get(key)
+      const newValue = newEntries.get(key)
+
+      if (newValue === undefined && oldValue !== undefined) {
+        // Key was deleted.
+        writeSet.push({ op: 'delete', key })
+      } else if (newValue !== undefined && oldValue !== newValue) {
+        // Key was added or changed.
+        writeSet.push({ op: 'put', key, value: newValue })
+      }
+    }
+
+    return writeSet
   }
 
   /**

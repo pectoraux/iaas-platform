@@ -125,14 +125,12 @@ describe('Phase 9B: versioning', () => {
   it('every successful commit produces exactly N+1', async () => {
     const store = new PostgresProtocolStateStore(networkVersionId)
     const state0 = await store.getState()
-    expect(state0.version).toBeGreaterThanOrEqual(0) // genesis or existing
+    expect(state0.version).toBeGreaterThanOrEqual(0)
 
-    store.put('versioning-test', 'value1')
-    const state1 = await store.commit(state0.version)
+    const state1 = await store.commit(state0.version, [{ op: 'put', key: 'versioning-test', value: 'value1' }])
     expect(state1.version).toBe(state0.version + 1)
 
-    store.put('versioning-test', 'value2')
-    const state2 = await store.commit(state1.version)
+    const state2 = await store.commit(state1.version, [{ op: 'put', key: 'versioning-test', value: 'value2' }])
     expect(state2.version).toBe(state0.version + 2)
   })
 })
@@ -176,16 +174,16 @@ describe('Phase 9B: optimistic concurrency', () => {
     const stateB = await storeB.getState()
     expect(stateA.version).toBe(stateB.version) // same version
 
-    // Both stage changes.
-    storeA.put('concurrent-a', 'value-a')
-    storeB.put('concurrent-b', 'value-b')
+    // Both calculate their write sets (isolated — no shared staging).
+    const writeSetA = [{ op: 'put' as const, key: 'concurrent-a', value: 'value-a' }]
+    const writeSetB = [{ op: 'put' as const, key: 'concurrent-b', value: 'value-b' }]
 
     // A commits first — succeeds.
-    const commitA = await storeA.commit(stateA.version)
+    const commitA = await storeA.commit(stateA.version, writeSetA)
     expect(commitA.version).toBe(stateA.version + 1)
 
     // B tries to commit with the OLD version — should fail (StaleVersionError).
-    await expect(storeB.commit(stateB.version)).rejects.toThrow(/Stale version/)
+    await expect(storeB.commit(stateB.version, writeSetB)).rejects.toThrow(/Stale version/)
 
     // B's changes were NOT committed — reload and verify.
     const stateAfter = await storeB.getState()
@@ -304,9 +302,8 @@ describe('Phase 9B.1: transition journal', () => {
     const store = new PostgresProtocolStateStore(networkVersionId)
     const state = await store.getState()
 
-    store.put('no-journal-test', 'value')
     // Commit WITHOUT a transactionHash — no transition should be recorded.
-    await store.commit(state.version)
+    await store.commit(state.version, [{ op: 'put', key: 'no-journal-test', value: 'value' }])
 
     const transition = await db.protocolTransition.findFirst({
       where: {

@@ -117,53 +117,58 @@ export class ProtocolRuntime implements NetworkRuntime {
    * ASYNC: The state store is async (supports persistent backends).
    */
   async executeTransaction(transaction: ProtocolTransaction): Promise<ProtocolExecutionResult> {
+    // Phase 9B.2: NetworkVersion isolation check — reject transactions
+    // bound to a different NetworkVersion than the store.
+    if (transaction.networkVersionId !== this.deps.stateStore.networkVersionId) {
+      return {
+        success: false,
+        resultingState: await this.deps.stateStore.getState(),
+        receipt: {
+          transactionId: transaction.id,
+          beforeStateHash: '',
+          afterStateHash: '',
+          executedAt: transaction.submittedAt,
+          executor: 'protocol-runtime',
+        },
+        error: `Transaction networkVersionId '${transaction.networkVersionId}' does not match store '${this.deps.stateStore.networkVersionId}'`,
+      }
+    }
+
     // 1. Load the current state (async).
     const beforeState = await this.deps.stateStore.getState()
 
-    // 2-3. Calculate the transition (pure — no store mutation).
+    // 2-3. Calculate the transition (pure — returns an isolated WriteSet).
     const calc = this.deps.executor.apply(transaction, beforeState)
 
     if (!calc.valid) {
-      // Validation failed — state unchanged.
       return {
         success: false,
         resultingState: beforeState,
         receipt: {
           transactionId: transaction.id,
           beforeStateHash: beforeState.hash,
-          afterStateHash: beforeState.hash, // unchanged
-          executedAt: transaction.submittedAt, // deterministic
+          afterStateHash: beforeState.hash,
+          executedAt: transaction.submittedAt,
           executor: 'protocol-runtime',
         },
         error: calc.error,
       }
     }
 
-    // 4. Stage the calculated entries on the store.
-    // Clear any previous staged changes, then apply the calculated entries.
-    this.deps.stateStore.rollback()
-    for (const [key, value] of calc.newEntries) {
-      // Only stage keys that differ from the current state.
-      const currentValue = beforeState.entries.get(key)
-      if (currentValue !== value) {
-        if (value === undefined) {
-          this.deps.stateStore.delete(key)
-        } else {
-          this.deps.stateStore.put(key, value)
-        }
-      }
-    }
-
-    // 5. Commit with optimistic concurrency (async, version-checked).
+    // 4-5. Commit the write set with optimistic concurrency (async, version-checked).
+    // Phase 9B.2: The write set is passed directly — no shared staging buffer.
     try {
-      const afterState = await this.deps.stateStore.commit(beforeState.version, transaction.id)
+      const afterState = await this.deps.stateStore.commit(
+        beforeState.version,
+        calc.writeSet,
+        transaction.id,
+      )
 
-      // 6. Build the receipt.
       const receipt: ProtocolReceipt = {
         transactionId: transaction.id,
         beforeStateHash: beforeState.hash,
         afterStateHash: afterState.hash,
-        executedAt: transaction.submittedAt, // deterministic
+        executedAt: transaction.submittedAt,
         executor: 'protocol-runtime',
       }
 
@@ -173,7 +178,6 @@ export class ProtocolRuntime implements NetworkRuntime {
         receipt,
       }
     } catch (err) {
-      // StaleVersionError — another transaction committed first.
       if (err instanceof StaleVersionError) {
         const currentState = await this.deps.stateStore.getState()
         return {

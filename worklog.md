@@ -2689,3 +2689,37 @@ Stage Summary:
 - The executor is now a pure calculator — it does NOT own persistence. The runtime coordinates load → validate → calculate → stage → commit → receipt.
 - The transition journal records each state transition atomically with the snapshot. This creates an append-only journal that consensus can agree on.
 - Phase 9B.1 is complete. Phase 9C (minimal consensus/finality) is ready.
+
+---
+Task ID: Phase-9B.2-Isolated-Write-Sets-And-NetworkVersion-Isolation
+Agent: orchestrator
+Task: Fix the shared mutable staging buffer concurrency bug. Remove put/delete/rollback from both stores. Commit receives the write set directly. Add NetworkVersion isolation check. Remove deprecated execute() from executor.
+
+Work Log:
+- FIX #1 — ISOLATED WRITE SETS (shared staging buffer removed):
+  - Removed `put()`, `delete()`, `rollback()`, and `stagedEntries` from BOTH InMemoryProtocolStateStore and PostgresProtocolStateStore.
+  - `commit(expectedVersion, writeSet, transactionHash?)` now receives the write set directly from the caller. There is NO shared mutable staging buffer.
+  - Two concurrent transactions using the same store CANNOT interleave their mutations — each carries its own write set.
+  - Added `WriteSet` type: `WriteSetEntry[]` where `WriteSetEntry = { op: 'put', key, value } | { op: 'delete', key }`.
+  - The executor's `apply()` now returns a `WriteSet` (not raw entries) — it computes the diff between old and new entries.
+  - The runtime calls `store.commit(beforeState.version, calc.writeSet, transaction.id)` — the write set is passed directly.
+- FIX #2 — NETWORKVERSION ISOLATION:
+  - ProtocolRuntime.executeTransaction now checks `transaction.networkVersionId !== stateStore.networkVersionId` before execution. If they differ, returns success=false with an error message.
+  - A transaction constructed for NetworkVersion A cannot be submitted to a runtime/store for NetworkVersion B.
+- CLEANUP — REMOVED DEPRECATED execute():
+  - The `execute()` method is removed from the executor. `apply()` is the sole executor API. There is exactly one execution model.
+  - The `ProtocolTransactionExecutor` interface now has only `validate()` + `apply()`.
+- TESTS:
+  - Updated all Phase 9A tests for the new write-set API.
+  - Updated all Phase 9B tests for the new commit signature.
+  - Added: store has NO put/delete/rollback methods (no shared staging).
+  - Added: commit takes a write set directly.
+  - Added: NetworkVersion isolation — wrong networkVersionId rejected.
+  - The P9B.4 optimistic concurrency test now uses isolated write sets (writeSetA, writeSetB) — verifies only A's changes are committed, B gets StaleVersionError.
+- VERIFICATION: bun run lint clean. tsc: 106 errors (all pre-existing, zero new). 153 non-DB tests pass. Dev server: / route HTTP 200, no errors.
+
+Stage Summary:
+- The shared mutable staging buffer is gone. Each transaction carries its own write set — the OCC check now protects the exact transition being committed.
+- NetworkVersion isolation is enforced at the runtime boundary.
+- The deprecated execute() is removed — apply() is the sole executor API.
+- Phase 9B.2 is complete. Phase 9B is now truly production-safe enough to hand to consensus. Phase 9C can begin.
