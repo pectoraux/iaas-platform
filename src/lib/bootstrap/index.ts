@@ -50,7 +50,7 @@ import { InfrastructureRuntime } from '@/lib/kernel/runtime/infrastructure-runti
 import { ProtocolRuntime } from '@/lib/kernel/runtime/protocol-runtime'
 import { HybridRuntime, DefaultHybridBridge } from '@/lib/kernel/runtime/hybrid-runtime'
 import { InMemoryProtocolStateStore } from '@/lib/kernel/runtime/protocol/state-store'
-import { DeterministicTransactionExecutor } from '@/lib/kernel/runtime/protocol/executor'
+import { DeterministicTransactionExecutor, TransferHandler, MintHandler, RecordDeliveryHandler } from '@/lib/kernel/runtime/protocol/executor'
 import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '@/lib/kernel/runtime/protocol/validator-consensus'
 
 let initialized = false
@@ -95,6 +95,13 @@ export function initializeBootstrap(): void {
   //    correct networkVersionId.
   const protocolStateStore = new InMemoryProtocolStateStore('bootstrap-protocol-store')
   const protocolExecutor = new DeterministicTransactionExecutor()
+  // Phase 10 closure: Register built-in transaction handlers.
+  // The executor is vertical-neutral — it delegates to these handlers.
+  // New verticals register their own handlers via registerHandler()
+  // WITHOUT modifying the executor source.
+  protocolExecutor.registerHandler('transfer', new TransferHandler())
+  protocolExecutor.registerHandler('mint', new MintHandler())
+  protocolExecutor.registerHandler('record_delivery', new RecordDeliveryHandler())
   const protocolRuntime = new ProtocolRuntime({
     stateStore: protocolStateStore,
     executor: protocolExecutor,

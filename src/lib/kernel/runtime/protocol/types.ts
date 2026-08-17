@@ -238,7 +238,13 @@ export interface ProtocolStateStore {
  *   1. validate(transaction, state) — checks signature, nonce, domain rules
  *   2. apply(transaction, state) — calculates the new entries (pure)
  *
- * The RUNTIME is responsible for:
+ * Phase 10 closure: The executor delegates transaction-type-specific logic
+ * to injectable TransactionHandlers. The executor itself only handles
+ * generic concerns (signature, nonce). Transaction handlers are registered
+ * per-type and are the ONLY place that knows about domain-specific semantics
+ * (transfer, mint, record_delivery, etc.).
+ *
+ * THE RUNTIME is responsible for:
  *   - Loading state from the store (async)
  *   - Calling executor.validate + executor.apply
  *   - Staging the calculated entries on the store
@@ -265,6 +271,43 @@ export interface ProtocolTransactionExecutor {
    * If the transaction is invalid, returns valid=false + error.
    */
   apply(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): { valid: boolean; writeSet: WriteSet; error?: string }
+
+  /**
+   * Register a transaction handler for a specific payload type.
+   * Phase 10 closure: This is the extension point. New verticals register
+   * their own transaction handlers WITHOUT modifying the executor's switch
+   * statement. The executor remains vertical-neutral.
+   */
+  registerHandler(payloadType: string, handler: TransactionHandler): void
+}
+
+/**
+ * A handler for a specific transaction payload type.
+ *
+ * Phase 10 closure: Each handler owns the domain-specific validation + state
+ * transition for its transaction type. The executor delegates to the
+ * registered handler — no switch statement in the generic executor.
+ *
+ * The handler is a PURE CALCULATOR (like the executor):
+ *   - validate: checks domain rules (pure, no I/O)
+ *   - apply: mutates the passed-in entries map (pure, no store access)
+ *
+ * Handlers are registered by the bootstrap/composition root, NOT by the
+ * executor itself. This keeps the executor vertical-neutral.
+ */
+export interface TransactionHandler {
+  /**
+   * Validate a transaction's domain-specific rules.
+   * Returns null if valid, or an error message.
+   * PURE: does not mutate state.
+   */
+  validate(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): string | null
+
+  /**
+   * Apply the transaction's state transition to the entries map.
+   * PURE: mutates only the passed-in map, no store access.
+   */
+  apply(transaction: ProtocolTransaction, entries: Map<string, string>): void
 }
 
 // ---------------------------------------------------------------------------

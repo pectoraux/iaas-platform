@@ -1,113 +1,88 @@
 // =============================================================================
-// Kernel: Deterministic Transaction Executor (Phase 9B.1)
+// Kernel: Deterministic Transaction Executor (Phase 10 closure)
 // =============================================================================
-// A deterministic transaction executor that CALCULATES state transitions.
+// A deterministic transaction executor that delegates domain-specific logic
+// to injectable TransactionHandlers.
 //
-// Phase 9B.1: The executor is now a PURE CALCULATOR. It does NOT own
-// persistence — it does not read from or commit to the state store.
-// The executor takes a state snapshot + transaction, validates, and returns
-// the resulting entries. The RUNTIME coordinates the load → validate →
-// calculate → stage → commit → receipt flow.
+// Phase 10 closure: The executor NO LONGER contains a switch statement with
+// hard-coded transaction types. Instead, it delegates to registered
+// TransactionHandler instances. The executor itself only handles generic
+// concerns (signature, nonce). Transaction handlers are the ONLY place
+// that knows about domain-specific semantics (transfer, mint,
+// record_delivery, etc.).
 //
-// This separation makes consensus integration easier: the consensus engine
-// can use the executor to calculate transitions without committing, then
-// order them, then commit in order.
+// This keeps the executor vertical-neutral: a new vertical registers its
+// own transaction handlers WITHOUT modifying the executor.
 //
 // THE CRITICAL INVARIANT:
 //   Given the same state + transaction, the calculation is identical.
 //
-// Reference state-transition protocol:
-//   - 'transfer' transactions move a balance from one account to another
-//   - 'mint' transactions create balance (for testing/initialization)
-//   - State keys: 'balance:<account>' → string (decimal)
+// DETERMINISM:
+//   The executor does NOT use Date.now() or Math.random().
+//   All calculations are pure functions of (state, transaction).
 // =============================================================================
 
 import { createHash } from 'crypto'
 import type {
   ProtocolTransaction,
-  ProtocolExecutionResult,
-  ProtocolReceipt,
   ProtocolStateSnapshot,
   ProtocolTransactionExecutor,
+  TransactionHandler,
   WriteSet,
 } from './types'
 
 /**
  * The result of calculating a transaction's state transition.
- * This is a PURE value — no side effects, no store mutation.
- *
- * Phase 9B.2: Returns a WriteSet (not raw entries) — the write set is
- * the isolated set of changes the runtime should commit. There is no
- * shared staging buffer; the write set is carried by the caller.
  */
 export interface TransitionCalculation {
-  /** Whether the transaction is valid. */
   valid: boolean
-  /** The write set to commit (only if valid). */
   writeSet: WriteSet
-  /** Error message if invalid. */
   error?: string
 }
 
 /**
- * A deterministic transaction executor for the reference state-transition
- * protocol.
+ * A deterministic transaction executor that delegates to injectable handlers.
  *
- * Phase 9B.1: The executor is a PURE CALCULATOR. It does NOT read from or
- * commit to the state store. All methods are synchronous (no I/O).
+ * Phase 10 closure: The executor is vertical-neutral. It handles only:
+ *   - Signature check (non-empty)
+ *   - Nonce check (matches expected)
+ *   - Handler delegation (validate + apply)
  *
- * The executor:
- *   1. validate(transaction, state) — checks signature, nonce, domain rules
- *   2. apply(transaction, state) — calculates the new entries (pure)
- *
- * The RUNTIME is responsible for:
- *   - Loading state from the store (async)
- *   - Calling executor.validate + executor.apply
- *   - Staging the calculated entries on the store
- *   - Committing with optimistic concurrency (async)
- *   - Building the receipt
- *
- * Determinism:
- *   The executor does NOT use Date.now() or Math.random().
- *   All calculations are pure functions of (state, transaction).
+ * Domain-specific logic (transfer, mint, record_delivery, etc.) lives in
+ * registered TransactionHandler instances. New verticals register their
+ * handlers via registerHandler() — the executor source is NOT modified.
  */
 export class DeterministicTransactionExecutor implements ProtocolTransactionExecutor {
+  private readonly handlers = new Map<string, TransactionHandler>()
+
+  registerHandler(payloadType: string, handler: TransactionHandler): void {
+    if (this.handlers.has(payloadType)) {
+      throw new Error(`Handler already registered for payload type '${payloadType}'`)
+    }
+    this.handlers.set(payloadType, handler)
+  }
+
   validate(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): string | null {
-    // Signature check (simplified — real implementation would verify the signature).
+    // Generic: signature check.
     if (!transaction.signature) {
       return 'Transaction signature is empty'
     }
 
-    // Nonce check: the sender's nonce must match the expected nonce.
+    // Generic: nonce check.
     const expectedNonce = this.getExpectedNonce(state, transaction.sender)
     if (transaction.nonce !== expectedNonce) {
       return `Invalid nonce: expected ${expectedNonce}, got ${transaction.nonce}`
     }
 
-    // Payload-type-specific validation.
-    switch (transaction.payload.type) {
-      case 'transfer':
-        return this.validateTransfer(transaction, state)
-      case 'mint':
-        return this.validateMint(transaction, state)
-      case 'record_delivery':
-        return this.validateRecordDelivery(transaction, state)
-      default:
-        return `Unknown transaction type: ${transaction.payload.type}`
+    // Domain-specific: delegate to the registered handler.
+    const handler = this.handlers.get(transaction.payload.type)
+    if (!handler) {
+      return `Unknown transaction type: ${transaction.payload.type}`
     }
+
+    return handler.validate(transaction, state)
   }
 
-  /**
-   * Calculate the state transition for a transaction.
-   * PURE: does not mutate the store or the input state.
-   *
-   * Phase 9B.2: Returns a WriteSet — the isolated set of key-value changes
-   * the runtime should commit. The write set is derived by diffing the
-   * old entries against the calculated new entries. There is no shared
-   * staging buffer; the write set is carried by the caller.
-   *
-   * If the transaction is invalid, returns valid=false + empty write set + error.
-   */
   apply(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): TransitionCalculation {
     const validationError = this.validate(transaction, state)
     if (validationError) {
@@ -116,7 +91,10 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
 
     // Calculate the new entries (pure — does not mutate the input state).
     const newEntries = new Map(state.entries)
-    this.applyTransactionToEntries(transaction, newEntries)
+
+    // Delegate to the registered handler.
+    const handler = this.handlers.get(transaction.payload.type)!
+    handler.apply(transaction, newEntries)
 
     // Compute the write set (diff between old and new).
     const writeSet = this.computeWriteSet(state.entries, newEntries)
@@ -134,7 +112,35 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
     return value ? parseInt(value, 10) : 0
   }
 
-  private validateTransfer(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): string | null {
+  private computeWriteSet(oldEntries: ReadonlyMap<string, string>, newEntries: Map<string, string>): WriteSet {
+    const writeSet: WriteSet = []
+    const allKeys = new Set([...oldEntries.keys(), ...newEntries.keys()])
+
+    for (const key of allKeys) {
+      const oldValue = oldEntries.get(key)
+      const newValue = newEntries.get(key)
+
+      if (newValue === undefined && oldValue !== undefined) {
+        writeSet.push({ op: 'delete', key })
+      } else if (newValue !== undefined && oldValue !== newValue) {
+        writeSet.push({ op: 'put', key, value: newValue })
+      }
+    }
+
+    return writeSet
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Built-in transaction handlers (registered by the bootstrap, not the executor)
+// ---------------------------------------------------------------------------
+
+/**
+ * Handler for 'transfer' transactions.
+ * Moves balance from one account to another.
+ */
+export class TransferHandler implements TransactionHandler {
+  validate(transaction: ProtocolTransaction, state: ProtocolStateSnapshot): string | null {
     const { from, to, amount } = transaction.payload.data
     if (!from || !to || amount === undefined) {
       return 'Transfer requires from, to, and amount'
@@ -151,7 +157,29 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
     return null
   }
 
-  private validateMint(transaction: ProtocolTransaction, _state: ProtocolStateSnapshot): string | null {
+  apply(transaction: ProtocolTransaction, entries: Map<string, string>): void {
+    const { from, to, amount } = transaction.payload.data
+    const fromKey = `balance:${from}`
+    const toKey = `balance:${to}`
+    const nonceKey = `nonce:${transaction.sender}`
+    const fromBalance = entries.get(fromKey)
+    const toBalance = entries.get(toKey)
+    const currentFrom = fromBalance ? parseFloat(fromBalance) : 0
+    const currentTo = toBalance ? parseFloat(toBalance) : 0
+    const transferAmount = parseFloat(amount as string)
+
+    entries.set(fromKey, (currentFrom - transferAmount).toString())
+    entries.set(toKey, (currentTo + transferAmount).toString())
+    entries.set(nonceKey, (transaction.nonce + 1).toString())
+  }
+}
+
+/**
+ * Handler for 'mint' transactions.
+ * Creates balance (testing only — would require governance in production).
+ */
+export class MintHandler implements TransactionHandler {
+  validate(transaction: ProtocolTransaction, _state: ProtocolStateSnapshot): string | null {
     const { to, amount } = transaction.payload.data
     if (!to || amount === undefined) {
       return 'Mint requires to and amount'
@@ -163,13 +191,30 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
     return null
   }
 
-  /**
-   * Validate a 'record_delivery' transaction (from the HybridBridge).
-   * Records infrastructure execution results as protocol state.
-   *
-   * State keys: 'delivery:<sender>' → cumulative quantity (string)
-   */
-  private validateRecordDelivery(transaction: ProtocolTransaction, _state: ProtocolStateSnapshot): string | null {
+  apply(transaction: ProtocolTransaction, entries: Map<string, string>): void {
+    const { to, amount } = transaction.payload.data
+    const toKey = `balance:${to}`
+    const nonceKey = `nonce:${transaction.sender}`
+    const toBalance = entries.get(toKey)
+    const currentTo = toBalance ? parseFloat(toBalance) : 0
+    const mintAmount = parseFloat(amount as string)
+
+    entries.set(toKey, (currentTo + mintAmount).toString())
+    entries.set(nonceKey, (transaction.nonce + 1).toString())
+  }
+}
+
+/**
+ * Handler for 'record_delivery' transactions (from the HybridBridge).
+ * Records infrastructure execution results as protocol state.
+ *
+ * Phase 10 closure: This handler is NOT in the generic executor. It is
+ * registered by the bootstrap alongside the hybrid runtime. A different
+ * vertical with a different delivery semantics would register a different
+ * handler — the executor source is never modified.
+ */
+export class RecordDeliveryHandler implements TransactionHandler {
+  validate(transaction: ProtocolTransaction, _state: ProtocolStateSnapshot): string | null {
     const { quantity, unit } = transaction.payload.data
     if (quantity === undefined || unit === undefined) {
       return 'record_delivery requires quantity and unit'
@@ -177,96 +222,22 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
     return null
   }
 
-  /**
-   * Apply a transaction to a mutable entries map (pure mutation of the
-   * passed-in map — does not touch any store).
-   */
-  private applyTransactionToEntries(transaction: ProtocolTransaction, entries: Map<string, string>): void {
-    const sender = transaction.sender
-    const nonceKey = `nonce:${sender}`
+  apply(transaction: ProtocolTransaction, entries: Map<string, string>): void {
+    const { quantity, unit } = transaction.payload.data
+    const deliveryKey = `delivery:${transaction.sender}`
+    const nonceKey = `nonce:${transaction.sender}`
+    const currentDelivery = entries.get(deliveryKey)
+    const currentAmount = currentDelivery ? parseFloat(currentDelivery) : 0
+    const deliveryAmount = parseFloat(quantity as string)
 
-    switch (transaction.payload.type) {
-      case 'transfer': {
-        const { from, to, amount } = transaction.payload.data
-        const fromKey = `balance:${from}`
-        const toKey = `balance:${to}`
-        const fromBalance = entries.get(fromKey)
-        const toBalance = entries.get(toKey)
-        const currentFrom = fromBalance ? parseFloat(fromBalance) : 0
-        const currentTo = toBalance ? parseFloat(toBalance) : 0
-        const transferAmount = parseFloat(amount as string)
-
-        entries.set(fromKey, (currentFrom - transferAmount).toString())
-        entries.set(toKey, (currentTo + transferAmount).toString())
-        entries.set(nonceKey, (transaction.nonce + 1).toString())
-        break
-      }
-      case 'mint': {
-        const { to, amount } = transaction.payload.data
-        const toKey = `balance:${to}`
-        const toBalance = entries.get(toKey)
-        const currentTo = toBalance ? parseFloat(toBalance) : 0
-        const mintAmount = parseFloat(amount as string)
-
-        entries.set(toKey, (currentTo + mintAmount).toString())
-        entries.set(nonceKey, (transaction.nonce + 1).toString())
-        break
-      }
-      case 'record_delivery': {
-        const { quantity, unit } = transaction.payload.data
-        const deliveryKey = `delivery:${transaction.sender}`
-        const currentDelivery = entries.get(deliveryKey)
-        const currentAmount = currentDelivery ? parseFloat(currentDelivery) : 0
-        const deliveryAmount = parseFloat(quantity as string)
-
-        entries.set(deliveryKey, (currentAmount + deliveryAmount).toString())
-        entries.set(`delivery_unit:${transaction.sender}`, unit as string)
-        entries.set(nonceKey, (transaction.nonce + 1).toString())
-        break
-      }
-    }
-  }
-
-  /**
-   * Compute the write set (diff) between old and new entries.
-   * Returns only the keys that changed.
-   */
-  private computeWriteSet(oldEntries: ReadonlyMap<string, string>, newEntries: Map<string, string>): WriteSet {
-    const writeSet: WriteSet = []
-    const allKeys = new Set([...oldEntries.keys(), ...newEntries.keys()])
-
-    for (const key of allKeys) {
-      const oldValue = oldEntries.get(key)
-      const newValue = newEntries.get(key)
-
-      if (newValue === undefined && oldValue !== undefined) {
-        // Key was deleted.
-        writeSet.push({ op: 'delete', key })
-      } else if (newValue !== undefined && oldValue !== newValue) {
-        // Key was added or changed.
-        writeSet.push({ op: 'put', key, value: newValue })
-      }
-    }
-
-    return writeSet
-  }
-
-  /**
-   * Compute a deterministic SHA-256 hash from entries.
-   */
-  private computeHash(entries: Map<string, string>): string {
-    const sortedKeys = Array.from(entries.keys()).sort()
-    const canonical: Record<string, string> = {}
-    for (const key of sortedKeys) {
-      canonical[key] = entries.get(key)!
-    }
-    return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
+    entries.set(deliveryKey, (currentAmount + deliveryAmount).toString())
+    entries.set(`delivery_unit:${transaction.sender}`, unit as string)
+    entries.set(nonceKey, (transaction.nonce + 1).toString())
   }
 }
 
 /**
  * Compute a deterministic transaction ID from the transaction contents.
- * This ensures the same transaction always produces the same ID.
  */
 export function computeTransactionId(
   networkVersionId: string,

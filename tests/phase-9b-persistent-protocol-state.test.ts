@@ -34,7 +34,7 @@ import { db } from '../src/lib/db'
 import { createTenant } from '../src/lib/services/tenant.service'
 import { instantiateTemplate } from '../src/lib/services/network.service'
 import { PostgresProtocolStateStore } from '../src/lib/kernel/runtime/protocol/postgres-state-store'
-import { DeterministicTransactionExecutor, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
+import { DeterministicTransactionExecutor, TransferHandler, MintHandler, RecordDeliveryHandler, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
 import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
 import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
 import type { ProtocolTransaction, ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/types'
@@ -80,7 +80,7 @@ function createPersistentRuntime(): ProtocolRuntime {
   const stateStore = new PostgresProtocolStateStore(networkVersionId)
   const deps: ProtocolRuntimeDeps = {
     stateStore,
-    executor: new DeterministicTransactionExecutor(),
+    executor: createExecutorWithHandlers(),
     validatorRegistry: new InMemoryValidatorRegistry(),
     consensusEngine: new SimpleConsensusEngine(),
   }
@@ -142,7 +142,7 @@ describe('Phase 9B: versioning', () => {
 describe('Phase 9B: atomicity', () => {
   it('failed transaction (insufficient balance) leaves state unchanged', async () => {
     const store = new PostgresProtocolStateStore(networkVersionId)
-    const executor = new DeterministicTransactionExecutor()
+    const executor = createExecutorWithHandlers()
 
     const stateBefore = await store.getState()
 
@@ -314,3 +314,12 @@ describe('Phase 9B.1: transition journal', () => {
     expect(transition).toBeNull()
   })
 })
+
+// Helper: create an executor with all built-in handlers registered.
+function createExecutorWithHandlers() {
+  const executor = new DeterministicTransactionExecutor()
+  executor.registerHandler('transfer', new TransferHandler())
+  executor.registerHandler('mint', new MintHandler())
+  executor.registerHandler('record_delivery', new RecordDeliveryHandler())
+  return executor
+}

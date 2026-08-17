@@ -80,7 +80,7 @@ export class ProtocolRuntimeNotImplementedError extends Error {
 export class ProtocolRuntime implements NetworkRuntime {
   readonly kind = 'protocol' as const
 
-  constructor(private readonly deps: ProtocolRuntimeDeps) {}
+  constructor(readonly deps: ProtocolRuntimeDeps) {}
 
   /**
    * @returns The protocol state store (for direct state queries).

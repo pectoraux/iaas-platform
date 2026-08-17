@@ -26,7 +26,7 @@ import { initializeBootstrap } from '../src/lib/bootstrap'
 import { resolveRuntime } from '../src/lib/kernel/runtime'
 import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
 import { InMemoryProtocolStateStore } from '../src/lib/kernel/runtime/protocol/state-store'
-import { DeterministicTransactionExecutor, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
+import { DeterministicTransactionExecutor, TransferHandler, MintHandler, RecordDeliveryHandler, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
 import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
 import type { ProtocolTransaction, ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/types'
 import { getTemplate } from '../src/lib/domain/templates'
@@ -40,7 +40,7 @@ function createProtocolRuntime(): ProtocolRuntime {
   const stateStore = new InMemoryProtocolStateStore('test-nv')
   const deps: ProtocolRuntimeDeps = {
     stateStore,
-    executor: new DeterministicTransactionExecutor(),
+    executor: createExecutorWithHandlers(),
     validatorRegistry: new InMemoryValidatorRegistry(),
     consensusEngine: new SimpleConsensusEngine(),
   }
@@ -116,7 +116,7 @@ describe('Phase 9A: architecture — protocol runtime isolation', () => {
   it('ProtocolRuntime accepts ProtocolRuntimeDeps in constructor', () => {
     const path = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol-runtime.ts')
     const content = readFileSync(path, 'utf-8')
-    expect(content).toMatch(/constructor\(private readonly deps:\s*ProtocolRuntimeDeps\)/)
+    expect(content).toMatch(/constructor\(readonly deps:\s*ProtocolRuntimeDeps\)/)
   })
 
   it('protocol directory has the expected contract files', () => {
@@ -189,7 +189,7 @@ describe('Phase 9A: deterministic state store', () => {
 describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', () => {
   it('apply: mint transaction calculates write set', async () => {
     const store = new InMemoryProtocolStateStore('nv1')
-    const executor = new DeterministicTransactionExecutor()
+    const executor = createExecutorWithHandlers()
     const state = await store.getState()
     const tx = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
 
@@ -203,7 +203,7 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
 
   it('apply: transfer transaction calculates write set', async () => {
     const store = new InMemoryProtocolStateStore('nv1', { 'balance:alice': '100', 'nonce:alice': '0' })
-    const executor = new DeterministicTransactionExecutor()
+    const executor = createExecutorWithHandlers()
     const state = await store.getState()
     const tx = createTransaction('nv1', 'alice', 0, 'transfer', { from: 'alice', to: 'bob', amount: '30' })
 
@@ -216,7 +216,7 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
 
   it('apply: insufficient balance returns invalid (pure — no store mutation)', async () => {
     const store = new InMemoryProtocolStateStore('nv1')
-    const executor = new DeterministicTransactionExecutor()
+    const executor = createExecutorWithHandlers()
     const state = await store.getState()
     const tx = createTransaction('nv1', 'alice', 0, 'transfer', { from: 'alice', to: 'bob', amount: '10' })
 
@@ -228,7 +228,7 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
 
   it('validate: invalid nonce rejected', async () => {
     const store = new InMemoryProtocolStateStore('nv1', { 'nonce:alice': '1' })
-    const executor = new DeterministicTransactionExecutor()
+    const executor = createExecutorWithHandlers()
     const state = await store.getState()
     const tx = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
 
@@ -239,7 +239,7 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
   it('deterministic: same state + transaction → same write set', async () => {
     const store1 = new InMemoryProtocolStateStore('nv1')
     const store2 = new InMemoryProtocolStateStore('nv1')
-    const executor = new DeterministicTransactionExecutor()
+    const executor = createExecutorWithHandlers()
     const state1 = await store1.getState()
     const state2 = await store2.getState()
     const tx = createTransaction('nv1', 'alice', 0, 'mint', { to: 'alice', amount: '100' })
@@ -288,7 +288,7 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
     // write set (isolated). Tx A commits first; Tx B gets StaleVersionError.
     // The resulting state contains ONLY A's changes — not a mixture of A+B.
     const store = new InMemoryProtocolStateStore('nv1')
-    const executor = new DeterministicTransactionExecutor()
+    const executor = createExecutorWithHandlers()
 
     // Both read the same state (version 0).
     const state = await store.getState()
@@ -318,7 +318,7 @@ describe('Phase 9A/9B.1: deterministic transaction executor (pure calculator)', 
   })
 
   it('Phase 9B.1: executor does NOT import or use ProtocolStateStore', () => {
-    const executor = new DeterministicTransactionExecutor()
+    const executor = createExecutorWithHandlers()
     expect(typeof executor.validate).toBe('function')
     expect(typeof executor.apply).toBe('function')
   })
@@ -405,3 +405,12 @@ describe('Phase 9A: protocol-network template', () => {
     expect(template!.vertical).toBe('protocol')
   })
 })
+
+// Helper: create an executor with all built-in handlers registered.
+function createExecutorWithHandlers() {
+  const executor = new DeterministicTransactionExecutor()
+  executor.registerHandler('transfer', new TransferHandler())
+  executor.registerHandler('mint', new MintHandler())
+  executor.registerHandler('record_delivery', new RecordDeliveryHandler())
+  return executor
+}

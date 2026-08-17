@@ -43,7 +43,7 @@ import type {
   HealthStatus,
 } from '../src/lib/kernel/adapters/infrastructure-adapter'
 import { InMemoryProtocolStateStore } from '../src/lib/kernel/runtime/protocol/state-store'
-import { DeterministicTransactionExecutor } from '../src/lib/kernel/runtime/protocol/executor'
+import { DeterministicTransactionExecutor, TransferHandler, MintHandler, RecordDeliveryHandler } from '../src/lib/kernel/runtime/protocol/executor'
 import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
 import type { ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/types'
 
@@ -52,7 +52,7 @@ function createProtocolRuntime() {
   const stateStore = new InMemoryProtocolStateStore('test-nv')
   const deps: ProtocolRuntimeDeps = {
     stateStore,
-    executor: new DeterministicTransactionExecutor(),
+    executor: createExecutorWithHandlers(),
     validatorRegistry: new InMemoryValidatorRegistry(),
     consensusEngine: new SimpleConsensusEngine(),
   }
@@ -748,3 +748,12 @@ describe('Phase 7.5: immutable state inspection', () => {
     expect(reg.adaptersForAssetType('nonexistent')).toEqual([])
   })
 })
+
+// Helper: create an executor with all built-in handlers registered.
+function createExecutorWithHandlers() {
+  const executor = new DeterministicTransactionExecutor()
+  executor.registerHandler('transfer', new TransferHandler())
+  executor.registerHandler('mint', new MintHandler())
+  executor.registerHandler('record_delivery', new RecordDeliveryHandler())
+  return executor
+}

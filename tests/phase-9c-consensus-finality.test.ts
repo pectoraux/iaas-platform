@@ -18,7 +18,7 @@ import { join } from 'path'
 import { initializeBootstrap } from '../src/lib/bootstrap'
 import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
 import { InMemoryProtocolStateStore } from '../src/lib/kernel/runtime/protocol/state-store'
-import { DeterministicTransactionExecutor, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
+import { DeterministicTransactionExecutor, TransferHandler, MintHandler, RecordDeliveryHandler, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
 import {
   InMemoryValidatorRegistry,
   SimpleConsensusEngine,
@@ -36,7 +36,7 @@ function createProtocolRuntime(): ProtocolRuntime {
   const stateStore = new InMemoryProtocolStateStore('test-nv')
   const deps: ProtocolRuntimeDeps = {
     stateStore,
-    executor: new DeterministicTransactionExecutor(),
+    executor: createExecutorWithHandlers(),
     validatorRegistry: new InMemoryValidatorRegistry(),
     consensusEngine: new SimpleConsensusEngine(),
   }
@@ -173,7 +173,7 @@ describe('Phase 9C: runtime executes finalized batch', () => {
     })
     const runtime = new ProtocolRuntime({
       stateStore,
-      executor: new DeterministicTransactionExecutor(),
+      executor: createExecutorWithHandlers(),
       validatorRegistry: new InMemoryValidatorRegistry(),
       consensusEngine: new SimpleConsensusEngine(),
     })
@@ -211,7 +211,7 @@ describe('Phase 9C: consensus replaceability', () => {
       const stateStore = new InMemoryProtocolStateStore('test-nv')
       return new ProtocolRuntime({
         stateStore,
-        executor: new DeterministicTransactionExecutor(),
+        executor: createExecutorWithHandlers(),
         validatorRegistry: new InMemoryValidatorRegistry(),
         consensusEngine: consensus,
       })
@@ -270,7 +270,7 @@ describe('Phase 9C: consensus replaceability', () => {
       })
       return new ProtocolRuntime({
         stateStore,
-        executor: new DeterministicTransactionExecutor(),
+        executor: createExecutorWithHandlers(),
         validatorRegistry: new InMemoryValidatorRegistry(),
         consensusEngine: new SimpleConsensusEngine(),
       })
@@ -426,7 +426,7 @@ describe('Phase 9C closure: true replaceability (different algorithm, same order
       const stateStore = new InMemoryProtocolStateStore('test-nv')
       return new ProtocolRuntime({
         stateStore,
-        executor: new DeterministicTransactionExecutor(),
+        executor: createExecutorWithHandlers(),
         validatorRegistry: new InMemoryValidatorRegistry(),
         consensusEngine: new SimpleConsensusEngine(),
       })
@@ -524,7 +524,7 @@ describe('Phase 9C closure: batch failure semantics', () => {
     })
     const runtime = new ProtocolRuntime({
       stateStore,
-      executor: new DeterministicTransactionExecutor(),
+      executor: createExecutorWithHandlers(),
       validatorRegistry: new InMemoryValidatorRegistry(),
       consensusEngine: new SimpleConsensusEngine(),
     })
@@ -555,3 +555,12 @@ describe('Phase 9C closure: batch failure semantics', () => {
     expect(results.length).toBeLessThanOrEqual(2)
   })
 })
+
+// Helper: create an executor with all built-in handlers registered.
+function createExecutorWithHandlers() {
+  const executor = new DeterministicTransactionExecutor()
+  executor.registerHandler('transfer', new TransferHandler())
+  executor.registerHandler('mint', new MintHandler())
+  executor.registerHandler('record_delivery', new RecordDeliveryHandler())
+  return executor
+}

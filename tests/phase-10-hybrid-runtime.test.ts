@@ -30,7 +30,7 @@ import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
 import { HybridRuntime, DefaultHybridBridge } from '../src/lib/kernel/runtime/hybrid-runtime'
 import { AdapterRegistry } from '../src/lib/kernel/runtime/adapter-registry'
 import { InMemoryProtocolStateStore } from '../src/lib/kernel/runtime/protocol/state-store'
-import { DeterministicTransactionExecutor } from '../src/lib/kernel/runtime/protocol/executor'
+import { DeterministicTransactionExecutor, TransferHandler, MintHandler, RecordDeliveryHandler } from '../src/lib/kernel/runtime/protocol/executor'
 import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
 import { SimulatedComputeAdapter } from '../src/lib/services/compute-adapter.service'
 import type { ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/types'
@@ -54,7 +54,7 @@ function createHybridRuntime(): HybridRuntime {
   const stateStore = new InMemoryProtocolStateStore('hybrid-test-nv')
   const protocolDeps: ProtocolRuntimeDeps = {
     stateStore,
-    executor: new DeterministicTransactionExecutor(),
+    executor: createExecutorWithHandlers(),
     validatorRegistry: new InMemoryValidatorRegistry(),
     consensusEngine: new SimpleConsensusEngine(),
   }
@@ -151,9 +151,10 @@ describe('Phase 10: hybrid execution', () => {
     expect(result.infrastructureResult.success).toBe(true)
     expect(parseFloat(result.infrastructureResult.actualQuantity)).toBeCloseTo(9.5, 1)
 
-    // Protocol result: a transaction was executed, creating a state transition.
-    expect(result.protocolResult.success).toBe(true)
-    expect(result.protocolResult.receipt.transactionId).toBeTruthy()
+    // Protocol result: a transaction was executed via consensus (propose → finalize → executeBatch).
+    expect(result.protocolResults.length).toBeGreaterThan(0)
+    expect(result.protocolResults[0].success).toBe(true)
+    expect(result.protocolResults[0].receipt.transactionId).toBeTruthy()
 
     // The protocol state now has a record of the delivery.
     const state = await hybridRuntime.protocol.stateStore.getState()
@@ -269,3 +270,12 @@ describe('Phase 10: protocol → infrastructure direction', () => {
     expect(stateAfter.version).toBe(stateBefore.version) // unchanged
   })
 })
+
+// Helper: create an executor with all built-in handlers registered.
+function createExecutorWithHandlers() {
+  const executor = new DeterministicTransactionExecutor()
+  executor.registerHandler('transfer', new TransferHandler())
+  executor.registerHandler('mint', new MintHandler())
+  executor.registerHandler('record_delivery', new RecordDeliveryHandler())
+  return executor
+}

@@ -43,6 +43,7 @@ import type { ProtocolRuntime } from './protocol-runtime'
 import type {
   ProtocolTransaction,
   ProtocolExecutionResult,
+  FinalizedBatch,
 } from './protocol/types'
 import { computeTransactionId } from './protocol/executor'
 
@@ -199,23 +200,37 @@ export class HybridRuntime implements NetworkRuntime {
    * Execute a hybrid assignment:
    *   1. Execute physical work via InfrastructureRuntime.executeAssignment
    *   2. Convert the result to a protocol transaction via the bridge
-   *   3. Execute the protocol transaction via ProtocolRuntime.executeTransaction
+   *   3. Route the transaction through consensus: propose → finalize → executeBatch
    *
-   * This proves the two worlds can interact WITHOUT coupling:
-   *   - Infrastructure produces telemetry/actuals.
-   *   - The bridge converts them to a protocol transaction.
-   *   - Protocol executes the transaction deterministically.
+   * Phase 10 closure: The hybrid path NO LONGER bypasses consensus.
+   * The bridge produces a protocol transaction, which then goes through
+   * the normal Phase 9C finality path:
+   *
+   *   InfrastructureRuntime.executeAssignment()
+   *       ↓
+   *   HybridBridge.infrastructureResultToTransaction()
+   *       ↓
+   *   ProtocolRuntime (consensus: propose → finalize)
+   *       ↓
+   *   ProtocolRuntime.executeBatch(FinalizedBatch)
+   *       ↓
+   *   StateStore.commit(expectedVersion, writeSet, ...)
+   *
+   * This preserves ALL three foundational boundaries:
+   *   Infrastructure ≠ Protocol
+   *   Consensus ≠ Execution
+   *   Vertical semantics ≠ Kernel semantics
    *
    * @param input The infrastructure execution input.
    * @param currentNonce The sender's current protocol nonce.
-   * @returns Both the infrastructure result and the protocol execution result.
+   * @returns The infrastructure result and the protocol execution results.
    */
   async executeHybrid(
     input: RuntimeExecuteInput,
     currentNonce: number,
   ): Promise<{
     infrastructureResult: RuntimeExecuteResult
-    protocolResult: ProtocolExecutionResult
+    protocolResults: ProtocolExecutionResult[]
   }> {
     // 1. Execute physical work via the infrastructure runtime.
     const infrastructureResult = await this.deps.infrastructureRuntime.executeAssignment(input)
@@ -228,10 +243,15 @@ export class HybridRuntime implements NetworkRuntime {
       currentNonce,
     )
 
-    // 3. Execute the protocol transaction via the protocol runtime.
-    const protocolResult = await this.deps.protocolRuntime.executeTransaction(transaction)
+    // 3. Route through consensus: propose → finalize → executeBatch.
+    // Phase 10 closure: The transaction goes through the normal Phase 9C
+    // finality path — it is NOT directly executed via executeTransaction().
+    const consensus = this.deps.protocolRuntime.deps.consensusEngine
+    const proposal = consensus.propose([transaction])
+    const batch: FinalizedBatch = consensus.finalize(proposal)
+    const protocolResults = await this.deps.protocolRuntime.executeBatch(batch)
 
-    return { infrastructureResult, protocolResult }
+    return { infrastructureResult, protocolResults }
   }
 
   // -------------------------------------------------------------------------
