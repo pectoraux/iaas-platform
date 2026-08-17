@@ -45,6 +45,7 @@ import type {
   FinalizedBatch,
 } from './protocol/types'
 import { StaleVersionError } from './protocol/types'
+import { computeFinalityCertificate } from './protocol/validator-consensus'
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -221,19 +222,36 @@ export class ProtocolRuntime implements NetworkRuntime {
    * produces a FinalizedBatch (ordered + certified). The runtime executes
    * each transaction in order through the executor + state store.
    *
+   * PHASE 9C CLOSURE — FINALITY CERTIFICATE VERIFICATION:
+   *   Before executing ANY transaction, the runtime recomputes the finality
+   *   certificate from the batch's orderedTransactions and compares it to
+   *   the supplied finalityCertificate. If they don't match, the batch is
+   *   REJECTED — no transactions are executed. This prevents a tampered
+   *   batch from being executed.
+   *
+   * BATCH FAILURE SEMANTICS:
+   *   A finalized batch is an ordered execution schedule, NOT an atomic
+   *   database transaction. If transaction N fails, transactions 1..N-1
+   *   remain committed. Transactions N+1.. are NOT executed. The caller
+   *   can retry the remaining transactions in a new batch.
+   *
    * CRITICAL INVARIANT:
    *   Consensus decides ORDERING. The executor decides STATE TRANSITIONS.
    *   The runtime applies the ordering through the executor. Neither layer
    *   knows how the other works.
    *
-   * Each transaction is executed sequentially. If a transaction fails
-   * (validation or stale version), the batch stops — the remaining
-   * transactions are NOT executed. The caller can retry them in a new batch.
-   *
    * @returns An array of execution results (one per transaction, in order).
-   *          Stops at the first failure.
+   *          Stops at the first failure. Returns an empty array if the
+   *          certificate is invalid.
    */
   async executeBatch(batch: FinalizedBatch): Promise<ProtocolExecutionResult[]> {
+    // Phase 9C closure: Verify the finality certificate BEFORE execution.
+    const recomputedCertificate = computeFinalityCertificate(batch.orderedTransactions)
+    if (recomputedCertificate !== batch.finalityCertificate) {
+      // Tampered batch — reject without executing any transactions.
+      return []
+    }
+
     const results: ProtocolExecutionResult[] = []
 
     for (const transaction of batch.orderedTransactions) {

@@ -27,7 +27,7 @@ import { resolveRuntime } from '../src/lib/kernel/runtime'
 import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
 import { InMemoryProtocolStateStore } from '../src/lib/kernel/runtime/protocol/state-store'
 import { DeterministicTransactionExecutor, computeTransactionId } from '../src/lib/kernel/runtime/protocol/executor'
-import { InMemoryValidatorRegistry, SimpleConsensusEngine, AlternateOrderingConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
+import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '../src/lib/kernel/runtime/protocol/validator-consensus'
 import type { ProtocolTransaction, ProtocolRuntimeDeps } from '../src/lib/kernel/runtime/protocol/types'
 import { getTemplate } from '../src/lib/domain/templates'
 

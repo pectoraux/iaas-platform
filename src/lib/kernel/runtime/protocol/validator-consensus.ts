@@ -27,6 +27,7 @@ import type {
   ConsensusProposal,
   ProtocolTransaction,
   ProtocolReceipt,
+  FinalizedBatch,
 } from './types'
 
 // ---------------------------------------------------------------------------
@@ -90,18 +91,22 @@ export class InMemoryValidatorRegistry implements ValidatorRegistry {
  */
 export class SimpleConsensusEngine implements ConsensusEngine {
   private readonly proposerId: string
+  private readonly validatorRegistry: ValidatorRegistry | null
 
   /**
    * @param proposerId The identity of this validator (for proposals).
+   * @param validatorRegistry Optional registry for proposal authorization.
+   *   If provided, validateProposal rejects proposals from unregistered/inactive
+   *   validators. If null, all structurally valid proposals are accepted
+   *   (for testing without a registry).
    */
-  constructor(proposerId: string = 'validator-0') {
+  constructor(proposerId: string = 'validator-0', validatorRegistry?: ValidatorRegistry) {
     this.proposerId = proposerId
+    this.validatorRegistry = validatorRegistry ?? null
   }
 
   /**
    * Propose a batch of transactions for consensus.
-   * The proposal contains the transactions in their original order —
-   * the finalized order is determined by `finalize()`.
    */
   propose(transactions: ProtocolTransaction[]): ConsensusProposal {
     return {
@@ -115,38 +120,40 @@ export class SimpleConsensusEngine implements ConsensusEngine {
   /**
    * Validate a proposal from a validator.
    *
-   * Phase 9C: Always accepts (single-validator mode). In a multi-validator
-   * system, this would verify signatures, check proposer authorization, etc.
+   * Phase 9C closure: If a ValidatorRegistry is provided, rejects proposals
+   * from unregistered or inactive validators. This connects the validator
+   * registry to the consensus authorization boundary.
    */
   validateProposal(proposal: ConsensusProposal): boolean {
-    // Basic structural validation.
     if (!proposal.proposalId || !proposal.transactions || !proposal.proposer) {
       return false
     }
+
+    // Phase 9C closure: Validator authorization.
+    if (this.validatorRegistry) {
+      const activeValidators = this.validatorRegistry.getActiveValidators()
+      const isAuthorized = activeValidators.some((v) => v.validatorId === proposal.proposer)
+      if (!isAuthorized) {
+        return false
+      }
+    }
+
     return true
   }
 
   /**
-   * Finalize a proposal — produces the finalized ordered batch + receipts.
+   * Finalize a proposal — produces the finalized ordered batch.
    *
    * DETERMINISTIC ORDERING: Transactions are sorted by their transaction ID.
-   * This ensures that any two validators seeing the same transaction set
-   * produce the same finalized order.
-   *
-   * FINALITY CERTIFICATE: A SHA-256 hash of the ordered transaction IDs.
-   * This certifies that the batch was finalized in this specific order.
+   * FINALITY CERTIFICATE: SHA-256 of the ordered transaction IDs (via the
+   * shared computeFinalityCertificate function).
    */
   finalize(proposal: ConsensusProposal): FinalizedBatch {
-    // Deterministic ordering: sort by transaction ID.
     const orderedTransactions = [...proposal.transactions].sort((a, b) =>
       a.id.localeCompare(b.id),
     )
 
-    // Finality certificate: hash of the ordered transaction IDs.
-    const orderedIds = orderedTransactions.map((tx) => tx.id).join(':')
-    const finalityCertificate = createHash('sha256')
-      .update(orderedIds)
-      .digest('hex')
+    const finalityCertificate = computeFinalityCertificate(orderedTransactions)
 
     return {
       proposalId: proposal.proposalId,
@@ -159,79 +166,101 @@ export class SimpleConsensusEngine implements ConsensusEngine {
 }
 
 // ---------------------------------------------------------------------------
-// FinalizedBatch — the output of consensus
+// Deterministic certificate computation (shared by consensus + runtime)
 // ---------------------------------------------------------------------------
 
 /**
- * A finalized batch of transactions with a deterministic ordering and
- * a finality certificate.
+ * Compute a deterministic finality certificate from an ordered transaction set.
  *
- * This is what the protocol runtime executes: it takes the ordered
- * transactions and executes them in order through the executor + state store.
+ * Phase 9C closure: This function is SHARED between the consensus engine
+ * (which generates the certificate) and the runtime (which verifies it).
+ * Both must agree on the exact certificate computation — a tampered batch
+ * will produce a different certificate and be rejected.
  *
- * The finality certificate proves that the batch was finalized in this
- * specific order. Any validator that produces the same certificate agrees
- * on the same ordering.
+ * The certificate is SHA-256 of the ordered transaction IDs joined by ':'.
+ * This is intentionally simple for Phase 9C. Future phases may bind the
+ * certificate to more than just the ordered IDs.
  */
-export interface FinalizedBatch {
-  /** The proposal that was finalized. */
-  proposalId: string
-  /** The transactions in their finalized execution order. */
-  orderedTransactions: ProtocolTransaction[]
-  /** A deterministic hash certifying this exact ordering. */
-  finalityCertificate: string
-  /** When finality was reached. */
-  finalizedAt: Date
-  /** Which validator finalized this batch. */
-  finalizedBy: string
+export function computeFinalityCertificate(orderedTransactions: ProtocolTransaction[]): string {
+  const orderedIds = orderedTransactions.map((tx) => tx.id).join(':')
+  return createHash('sha256').update(orderedIds).digest('hex')
 }
 
 // ---------------------------------------------------------------------------
-// ReplaceableConsensusEngine — for the replaceability proof
+// BucketSortedConsensusEngine — true replaceability proof
 // ---------------------------------------------------------------------------
 
 /**
- * A second consensus implementation with a DIFFERENT internal mechanism
- * (reverse ordering) but the same interface. Used to prove that the
- * protocol runtime produces the same final state when the consensus
- * engine emits the same finalized order.
+ * A second consensus implementation that produces the SAME finalized order
+ * as SimpleConsensusEngine but via a DIFFERENT algorithm.
+ *
+ * SimpleConsensusEngine uses: Array.sort() (lexicographic comparison)
+ * BucketSortedConsensusEngine uses: bucket-by-first-character, then sort within buckets
+ *
+ * Both produce identical output for the same input — proving that consensus
+ * is replaceable: the state machine consumes only the finalized order, not
+ * the algorithm that produced it.
  *
  * Phase 9C: This exists ONLY for the replaceability test. It is not
  * registered in the bootstrap.
  */
-export class AlternateOrderingConsensusEngine extends SimpleConsensusEngine {
-  private readonly altProposerId: string
+export class BucketSortedConsensusEngine implements ConsensusEngine {
+  private readonly proposerId: string
 
-  constructor(proposerId: string = 'validator-alt') {
-    super(proposerId)
-    this.altProposerId = proposerId
+  constructor(proposerId: string = 'validator-bucket') {
+    this.proposerId = proposerId
   }
+
+  propose(transactions: ProtocolTransaction[]): ConsensusProposal {
+    return {
+      proposalId: randomUUID(),
+      transactions: [...transactions],
+      proposer: this.proposerId,
+      proposedAt: new Date(),
+    }
+  }
+
+  validateProposal(proposal: ConsensusProposal): boolean {
+    if (!proposal.proposalId || !proposal.transactions || !proposal.proposer) {
+      return false
+    }
+    return true
+  }
+
   /**
-   * Override finalize to use a DIFFERENT internal mechanism (reverse sort).
-   * If the test passes the SAME transaction set to both engines, they
-   * produce DIFFERENT orders — proving that consensus is replaceable and
-   * that different orderings produce different states.
-   *
-   * For the replaceability proof where both engines must produce the SAME
-   * order, the test constructs transactions whose IDs are already sorted,
-   * so both forward and reverse sort produce the same result.
+   * Finalize using a DIFFERENT algorithm (bucket sort) that produces the
+   * SAME result as SimpleConsensusEngine's lexicographic sort.
    */
   finalize(proposal: ConsensusProposal): FinalizedBatch {
-    const orderedTransactions = [...proposal.transactions].sort((a, b) =>
-      b.id.localeCompare(a.id), // reverse
-    )
+    // Bucket by first character of tx ID.
+    const buckets = new Map<string, ProtocolTransaction[]>()
+    for (const tx of proposal.transactions) {
+      const firstChar = tx.id.charAt(0)
+      let bucket = buckets.get(firstChar)
+      if (!bucket) {
+        bucket = []
+        buckets.set(firstChar, bucket)
+      }
+      bucket.push(tx)
+    }
 
-    const orderedIds = orderedTransactions.map((tx) => tx.id).join(':')
-    const finalityCertificate = createHash('sha256')
-      .update(orderedIds)
-      .digest('hex')
+    // Sort bucket keys, then sort within each bucket, and concatenate.
+    const orderedTransactions: ProtocolTransaction[] = []
+    const sortedBucketKeys = Array.from(buckets.keys()).sort()
+    for (const key of sortedBucketKeys) {
+      const bucket = buckets.get(key)!
+      bucket.sort((a, b) => a.id.localeCompare(b.id))
+      orderedTransactions.push(...bucket)
+    }
+
+    const finalityCertificate = computeFinalityCertificate(orderedTransactions)
 
     return {
       proposalId: proposal.proposalId,
       orderedTransactions,
       finalityCertificate,
       finalizedAt: new Date(),
-      finalizedBy: this.altProposerId,
+      finalizedBy: this.proposerId,
     }
   }
 }
