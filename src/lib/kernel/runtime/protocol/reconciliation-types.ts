@@ -176,9 +176,13 @@ export function mapBatchStatusToReconciliationState(
  *   <cause>} is the only forward edge. A new attempt is a NEW row, not a
  *   backwards transition.
  *
- *   C2: intendedTransactionId is computed INDEPENDENTLY from evidence (via
- *   deriveIntendedTransactionId), NOT taken from the bridge output. The
- *   bridge's output is verified against it at submission time (Defect 4 fix).
+ *   C2: intendedTransactionId is derived from the STORED EVIDENCE via the
+ *   bridge's deriveTransactionId contract (spec §6.4). At submission time,
+ *   the bridge's full transaction builder produces a transaction from the LIVE
+ *   result; the kernel compares transaction.id against the stored
+ *   intendedTransactionId. Mismatch → input drift (live result differs from
+ *   stored evidence). See the HybridBridge interface for the honest scope of
+ *   this independence (separation of input, not independent algorithm).
  */
 export interface ReconciliationAttempt {
   /** UUID, operational handle. */
@@ -424,22 +428,26 @@ export interface ReconciliationStore {
   ): Promise<Date | null>
 
   /**
-   * Ensure the partial unique index for C3 exists (Defect 5 fix).
+   * Ensure the partial unique index for C3 exists (Defect 5 + 9 fix).
    *
    * C3 (race-proof): at most one PENDING attempt per evidence at a time,
    * enforced by a PostgreSQL partial unique index:
    *   CREATE UNIQUE INDEX IF NOT EXISTS recon_attempt_pending_unique
    *     ON "ReconciliationAttempt" ("evidenceId") WHERE "status" = 'PENDING'
    *
-   * This is race-proof under PostgreSQL default (READ COMMITTED) isolation:
-   * two concurrent INSERTs of PENDING for the same evidenceId cannot both
-   * succeed — one fails with a unique violation. The application-level
-   * check-then-insert is NOT relied upon for correctness.
+   * SCHEMA LIFECYCLE (Defect 9 fix): the index is created by a proper Prisma
+   * migration (prisma/migrations/20260817000000_recon_c3_partial_unique/), which
+   * is the source of truth. This method is a SAFETY NET — it runs
+   * `CREATE UNIQUE INDEX IF NOT EXISTS` on startup to handle environments that
+   * haven't run the migration (e.g., a fresh dev DB created via `db push`
+   * without migrations). It is idempotent and does not replace the migration.
+   *
+   * Race-proof under PostgreSQL default (READ COMMITTED) isolation: two
+   * concurrent INSERTs of PENDING for the same evidenceId cannot both
+   * succeed — one fails with a unique violation.
    *
    * The PostgresReconciliationStore executes this via $executeRawUnsafe. The
    * InMemoryReconciliationStore is a no-op (single-threaded, no race).
-   *
-   * Idempotent: safe to call multiple times (IF NOT EXISTS).
    */
   ensureC3UniqueIndex(): Promise<void>
 }

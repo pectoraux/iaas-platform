@@ -6,8 +6,16 @@
 | Artifact type | Specification (not implementation) |
 | Supersedes | Phase 10.5D in-memory commitment model |
 | Implementation gate | Phase 11B |
-| Status | **Draft for audit** |
-| Repo HEAD at authoring | `48e8c13` (`main`) |
+| Status | **Corrected to match `2b04989` implementation** |
+| Repo HEAD at authoring | `2b04989` (`main`) |
+
+> **Note on spec/code conformance:** This document was originally authored at
+> `48e8c13` describing the target state. The Phase 11B implementation
+> (`6e31067` → `43aebb8` → `2b04989`) corrected several design issues found in
+> audits (attempt-based lifecycle, non-nullable sentinel certificate, partial
+> unique index, bridge-owned derivation). This document has been updated to
+> match the `2b04989` implementation. Where the original spec and the code now
+> differ, the code is authoritative and this spec reflects it.
 
 ---
 
@@ -24,10 +32,9 @@ It defines:
 6. The **completeness criteria** that must hold before the protocol may be called
    economically or operationally complete.
 
-Where the current repository (`48e8c13`) already satisfies a clause, it is marked
-`[IMPLEMENTED]`. Where it does not, it is marked `[GAP]`. Nothing in this document
-is a claim of completion; the `[GAP]` markers are the load-bearing parts of the
-specification and are the primary input to Phase 11B.
+Where the repository (`2b04989`) satisfies a clause, it is marked
+`[IMPLEMENTED]`. Where it does not, it is marked `[GAP]`. The `[GAP]` markers
+are the remaining work.
 
 ---
 
@@ -193,63 +200,80 @@ The `RuntimeExecuteResult` is currently stored whole inside
 `PendingProtocolCommitment.infrastructureResult` (`types.ts:482`), with no
 content address and no separation of evidence from intent.
 
-### 4.2 PendingCommitment
+### 4.2 ReconciliationAttempt (corrected from PendingCommitment)
 
-**Responsibility:** Durable record that links a `PhysicalExecutionEvidence` to a
-protocol transaction that **should** be derived from it. This is the "I owe the
-protocol a transition" record. It is the crash barrier.
+**Responsibility:** A reconciliation *attempt* — links `PhysicalExecutionEvidence`
+to a single protocol transaction submission try. This is the crash barrier.
 
-**Identity:** Own UUID (`commitmentId`) for human/operational addressing, PLUS a
-deterministic derived key `(evidenceId, intendedTransactionId)` so that crash
-recovery can detect a re-derivation of the same intent without double-counting.
+**PHASE 11B CORRECTION (attempt lifecycle):** The original 11A spec used a
+single `PendingCommitment` per evidence with `UNIQUE(evidenceId)`. This caused
+a critical defect (`6e31067`): a retry after a terminal failure returned the
+SAME resolved commitment, and `executeHybrid` misreported it as `EXECUTED`
+without submitting. The corrected model uses **`ReconciliationAttempt`** —
+multiple attempts can exist per evidence. A failed terminal attempt can be
+followed by a NEW attempt that legitimately re-submits. The fabricated-EXECUTED
+path is structurally impossible.
+
+**Identity:** Own UUID (`attemptId`) for operational addressing.
 
 **Fields:**
 
 | Field | Meaning |
 |---|---|
-| `commitmentId` | UUID, operational handle |
+| `attemptId` | UUID, operational handle |
 | `evidenceId` | FK to `PhysicalExecutionEvidence` (durable) |
 | `networkVersionId` | Protocol scope |
-| `intendedTransactionId` | The deterministic `ProtocolTransaction.id` the bridge WILL derive (computed from evidence, not from the live result) |
+| `intendedTransactionId` | The deterministic `ProtocolTransaction.id` the bridge MUST produce (derived from the stored evidence via the bridge's `deriveTransactionId` contract — see §6.4) |
+| `sender` | The sender identity (for re-derivation at recovery — §6.3) |
+| `nonce` | The sender's nonce (for re-derivation at recovery — §6.3) |
 | `status` | `PENDING` \| `RECONCILED` \| `<precise cause>` (see §7) |
-| `createdAt` | When the commitment was durably written |
+| `createdAt` | When the attempt was durably written |
 | `resolvedAt?` | When the protocol outcome was durably recorded, if ever |
-| `protocolOutcomeRef?` | FK to the recorded `ProtocolOutcome` (by outcome ID), if resolved |
+| `outcomeId?` | FK to the recorded `ProtocolOutcome`, if resolved |
 
-**Critical difference from 10.5D:** the commitment does **not** store the whole
+**Critical difference from 10.5D:** the attempt does **not** store the whole
 `RuntimeExecuteResult` or the whole `ProtocolTransaction`. It stores `evidenceId`
 (a hash) and `intendedTransactionId` (a hash). The full objects remain in their
-own tables (evidence table; protocol transition journal). The commitment is a
-*durable linkage record*, not a bag of objects.
+own tables. The attempt is a *durable linkage record*, not a bag of objects.
 
 **Invariants:**
 
-- C1. A commitment in `PENDING` status means: the physical action occurred and
+- C1. An attempt in `PENDING` status means: the physical action occurred and
   is durably evidenced, AND the protocol outcome is not yet durably recorded.
-- C2. The `intendedTransactionId` is computed **from the evidence**, not from a
-  re-execution of the bridge. Because evidence is content-addressed and the
-  bridge is a pure function of the result, `intendedTransactionId` is
-  deterministic. This is what makes crash re-derivation safe.
-- C3. There is at most one `PENDING` commitment per `evidenceId`. Enforced by a
-  `UNIQUE(evidenceId)` constraint on the commitments in `PENDING`/non-terminal
-  states (or equivalently a partial unique index). Re-deriving the same evidence
-  after a crash must find the existing commitment, not create a duplicate.
-- C4. A commitment never transitions backwards. `PENDING → {RECONCILED,
-  <cause>}` is the only forward edge. Terminal causes are not auto-retried by the
-  kernel; retry is an operator/reconciliation-engine decision (out of scope per
-  §3).
+- C2. The `intendedTransactionId` is derived from the STORED EVIDENCE via the
+  bridge's `deriveTransactionId` contract (§6.4). At submission time, the
+  bridge's full transaction builder produces a transaction from the LIVE
+  result; the kernel compares `transaction.id` against the stored
+  `intendedTransactionId`. Mismatch → input drift (the live result differs
+  from the stored evidence). This is separation-of-input independence, NOT
+  independent-algorithm independence (see §6.4 for the honest scope).
+- C3. At most one `PENDING` attempt per `evidenceId` at a time. ENFORCED by a
+  PostgreSQL **partial unique index** (not application-level check-then-insert,
+  which is not race-proof under READ COMMITTED):
+  ```sql
+  CREATE UNIQUE INDEX recon_attempt_pending_unique
+    ON "ReconciliationAttempt" ("evidenceId") WHERE "status" = 'PENDING'
+  ```
+  This is created by a proper Prisma migration
+  (`prisma/migrations/20260817000000_recon_c3_partial_unique/`). The runtime
+  `ensureC3UniqueIndex()` is a SAFETY NET for environments that haven't run the
+  migration, NOT the primary creation path. Terminal attempts do NOT block new
+  attempts — a retry after failure creates a new PENDING row.
+- C4. An attempt never transitions backwards. `PENDING → {RECONCILED,
+  <cause>}` is the only forward edge. A new attempt is a NEW row, not a
+  backwards transition. Terminal causes are not auto-retried by the kernel.
 
-**Status at `48e8c13`:** `[GAP]`. The type exists (`types.ts:478-493`) but stores
-whole objects, has no `evidenceId`, no `intendedTransactionId`, no uniqueness
-constraint, and is never persisted.
+**Status at `2b04989`:** `[IMPLEMENTED]`. The `ReconciliationAttempt` type
+exists, stores hashes not whole objects, and the partial unique index is created
+by a Prisma migration + runtime safety net.
 
 ### 4.3 ProtocolOutcome
 
 **Responsibility:** Durable record of what the protocol layer returned for a
-given `intendedTransactionId`. This is the captured `BatchExecutionResult`,
-preserved **with its precise `BatchExecutionStatus`**, never collapsed.
+given attempt. This is the captured `BatchExecutionResult`, preserved **with its
+precise `BatchExecutionStatus`**, never collapsed.
 
-**Identity:** `outcomeId = SHA-256(commitmentId, intendedTransactionId,
+**Identity:** `outcomeId = SHA-256(attemptId, transactionId,
 finalityCertificate, status)`.
 
 **Fields:**
@@ -257,9 +281,9 @@ finalityCertificate, status)`.
 | Field | Meaning |
 |---|---|
 | `outcomeId` | Content hash above |
-| `commitmentId` | FK back to the commitment |
-| `transactionId` | The `ProtocolTransaction.id` actually submitted (equals `intendedTransactionId` if the bridge is deterministic; recording both lets reconciliation detect bridge drift) |
-| `finalityCertificate` | The certificate of the finalized batch (or `null` if rejected pre-finalization) |
+| `attemptId` | FK back to the attempt |
+| `transactionId` | The `ProtocolTransaction.id` actually submitted (equals `intendedTransactionId` if the bridge is deterministic; recording both lets reconciliation detect input drift) |
+| `finalityCertificate` | The ACTUAL consensus certificate (SHA-256 of ordered tx IDs), or the `NO_FINALITY_CERTIFICATE` sentinel (`''`) if rejected pre-finalization. **Non-nullable** (see O2 below). |
 | `status` | The precise `BatchExecutionStatus` (`EXECUTED` \| `EXECUTION_FAILED` \| `REJECTED_BY_CONSENSUS` \| `INVALID_FINALITY_CERTIFICATE` \| `NO_TRANSACTIONS`) |
 | `receiptsDigest?` | SHA-256 of the canonical receipts array (the receipts themselves live in the protocol transition journal; the outcome stores a digest, not the array) |
 | `error?` | The error string from the batch result |
@@ -269,17 +293,19 @@ finalityCertificate, status)`.
 
 - O1. The `status` field is the **exact** `BatchExecutionStatus` returned by
   `submitTransaction`. It is never rewritten into a coarser value.
-- O2. One outcome per `(commitmentId, finalityCertificate)`. A re-submission
-  after a crash that produces a different certificate produces a *new* outcome
-  row; the history is append-only.
+- O2. One outcome per `(attemptId, finalityCertificate)`. ENFORCED by
+  `@@unique([attemptId, finalityCertificate])` in the schema. **Non-nullable**
+  `finalityCertificate` (using the `NO_FINALITY_CERTIFICATE = ''` sentinel for
+  pre-finalization outcomes) closes the NULL loophole — PostgreSQL `UNIQUE`
+  allows multiple NULLs, so nullable `finalityCertificate` would NOT enforce O2
+  for `REJECTED_BY_CONSENSUS` / `NO_TRANSACTIONS` outcomes. The sentinel `''` is
+  a real value the constraint treats as equal to itself.
 - O3. The outcome does **not** store the receipts array; it stores a digest. The
   receipts are already durably recorded by the protocol transition journal
-  (`ProtocolTransition` in `prisma/schema.prisma`). Storing them again would
-  duplicate the system of record.
+  (`ProtocolTransition` in `prisma/schema.prisma`).
 
-**Status at `48e8c13`:** `[GAP]`. No `ProtocolOutcome` type exists. The
-`BatchExecutionResult` is currently held transiently on the in-memory
-commitment (`types.ts:492`) and discarded on process exit.
+**Status at `2b04989`:** `[IMPLEMENTED]`. `finalityCertificate` is non-nullable
+with the `NO_FINALITY_CERTIFICATE` sentinel; O2 is genuinely enforced.
 
 ### 4.4 ReconciliationState
 
@@ -288,8 +314,8 @@ its `ProtocolOutcome.status` but expressed in terms of the *reconciliation
 action* required, not the batch status. This is where the precise cause is
 preserved (see §7).
 
-**Identity:** Not content-addressed; it is a lifecycle tag on the commitment.
-Stored as the `status` field of `PendingCommitment` after resolution.
+**Identity:** Not content-addressed; it is a lifecycle tag on the attempt.
+Stored as the `status` field of `ReconciliationAttempt` after resolution.
 
 **Mapping (outcome.status → reconciliation state):**
 
@@ -452,21 +478,52 @@ deterministic from evidence) and the canonical-identity invariant (same inputs
 recovery could double-count. The spec therefore **requires** the bridge to be a
 pure function of `(evidence, networkVersionId, sender, nonce)`.
 
-### 6.4 Bridge determinism requirement
+### 6.4 Bridge determinism requirement (corrected)
 
-The `HybridBridge.infrastructureResultToTransaction` contract (currently at
-`hybrid-runtime.ts:84-90`) must be strengthened: the produced
-`ProtocolTransaction.id` must equal the `intendedTransactionId` computed in
-step 3 from the evidence. Phase 11B must add a check that aborts the resolution
-if `transaction.id !== commitment.intendedTransactionId`, recording a
-`RECONCILIATION_REQUIRED_INVARIANT_VIOLATION` outcome. A bridge that derives a
-different transaction than its evidence predicted is a bug, and the spec forbids
-silently accepting it.
+The `HybridBridge` interface defines two methods:
+- `infrastructureResultToTransaction(result, ...)` — builds the full transaction
+  from a live result.
+- `deriveTransactionId(resultJson, ...)` — computes the expected
+  `ProtocolTransaction.id` from the evidence's stored result JSON, WITHOUT
+  building the full transaction object.
 
-**Status at `48e8c13`:** the bridge is effectively deterministic today (it calls
-`computeTransactionId`), but the determinism is **not enforced** at the
-reconciliation boundary — there is no check, because there is no reconciliation
-boundary. `[GAP]`.
+The kernel calls `deriveTransactionId` at `recordPending` time (computing
+`intendedTransactionId` from the stored evidence), then calls
+`infrastructureResultToTransaction` at submit time (producing a transaction from
+the live result), and compares `transaction.id` against the stored
+`intendedTransactionId`. Mismatch → input drift (the live result differs from
+the stored evidence), resolved as `RECONCILIATION_REQUIRED_INVARIANT_VIOLATION`.
+
+**HONEST SCOPE — separation of input, not independent algorithm (Defect 10):**
+
+Both methods share the bridge's `buildPayload` implementation. This means the
+guarantee is **separation of input** independence (the stored evidence vs. the
+live result), NOT **independent algorithm** independence. The transaction ID is
+defined as `SHA-256(canonical(networkVersionId, sender, nonce, payload))`, and
+the payload is defined by the bridge's `buildPayload`. There is no independent
+payload to hash — the payload IS the bridge's output. So a bug in `buildPayload`
+itself (algorithm drift) is **undetectable by any ID comparison**, because both
+sides use the same payload definition.
+
+What this DOES detect:
+- **Input drift**: the live `RuntimeExecuteResult` differs from the stored
+  evidence result (e.g., the adapter returns different telemetry on retry).
+  This is what spec §6.4 requires.
+
+What this does NOT detect:
+- **Algorithm drift**: `buildPayload` produces the wrong payload shape. This is
+  undetectable by construction — the transaction ID is a function of the
+  bridge's payload, so there's no independent reference.
+
+The kernel does NOT know the payload shape (e.g., `record_delivery`) — that's
+vertical semantics owned by the bridge. This keeps the kernel vertical-neutral
+(spec §2 rule 4). A test asserts `reconciliation-types.ts` does not contain
+`record_delivery`.
+
+**Status at `2b04989`:** `[IMPLEMENTED]`. The bridge owns
+`deriveTransactionId`; the kernel calls it and verifies. The honest scope
+(separation of input) is documented above. Algorithm drift is acknowledged as
+undetectable by construction.
 
 ---
 
@@ -516,38 +573,56 @@ repository (no green-test declaration is sufficient on its own).
    returned when any transaction fails; `EXECUTED` only when all succeed.
    (Satisfied at `48e8c13`.)
 
-2. **`[GAP]`** Four-primitive object model: `PhysicalExecutionEvidence`,
-   `PendingCommitment`, `ProtocolOutcome`, `ReconciliationState` exist as
-   distinct types with the fields and invariants in §4.
+2. **`[IMPLEMENTED]`** Four-primitive object model: `PhysicalExecutionEvidence`,
+   `ReconciliationAttempt`, `ProtocolOutcome`, `ReconciliationState` exist as
+   distinct types with the fields and invariants in §4. (Satisfied at `2b04989`.)
 
-3. **`[GAP]`** Durable `ReconciliationStore` with the contract in §5.1,
+3. **`[IMPLEMENTED]`** Durable `ReconciliationStore` with the contract in §5.1,
    backed by the three Prisma models in §5.2, using atomic `db.$transaction`
-   writes (the same bar as `PostgresProtocolStateStore`).
+   writes. (Satisfied at `2b04989`. PostgreSQL proven only in CI; local
+   environment has no reachable Postgres.)
 
-4. **`[GAP]`** Crash-safe sequencing (§6.2): `recordPending` is durably written
-   **before** `submitTransaction` is called. The current ordering (commitment
-   created after submission is attempted, in memory) is non-conforming.
+4. **`[IMPLEMENTED]`** Crash-safe sequencing (§6.2): `recordPending` is durably
+   written **before** `submitTransaction` is called. (Satisfied at `6e31067`.)
 
-5. **`[GAP]`** Crash recovery (§6.3): on restart, `loadPending()` is invoked and
-   each `PENDING` commitment is resolved via journal lookup or re-submission,
-   idempotently.
+5. **`[IMPLEMENTED]`** Crash recovery (§6.3): on restart, `loadPending()` is
+   invoked and each `PENDING` attempt is resolved via journal lookup or
+   re-submission, idempotently. (Satisfied at `6e31067`.)
 
-6. **`[GAP]`** Anti-conflation (§7): `ReconciliationState` preserves the precise
-   `BatchExecutionStatus`. R2 is enforced structurally (no two statuses share a
-   state).
+6. **`[IMPLEMENTED]`** Anti-conflation (§7): `ReconciliationState` preserves the
+   precise `BatchExecutionStatus`. R2 is enforced structurally (no two statuses
+   share a state). (Satisfied at `43aebb8`.)
 
-7. **`[GAP]`** Bridge determinism enforcement (§6.4): the reconciliation
+7. **`[IMPLEMENTED]`** Bridge determinism enforcement (§6.4): the reconciliation
    boundary aborts and flags `RECONCILIATION_REQUIRED_INVARIANT_VIOLATION` if
    the bridge produces a transaction whose ID differs from the
-   `intendedTransactionId` derived from the evidence.
+   `intendedTransactionId` derived from the evidence. **Honest scope**:
+   separation-of-input independence (detects input drift), not
+   independent-algorithm independence (algorithm drift is undetectable by
+   construction — see §6.4). (Satisfied at `2b04989`.)
 
-8. **Audit evidence:** the architecture tests must include a crash-recovery
-   proof — a `PENDING` commitment survives a simulated process restart and is
-   resolved without double-counting and without losing the physical action.
-   A test that only exercises the happy path does not satisfy this criterion.
+8. **`[IMPLEMENTED]`** Audit evidence: the architecture tests include a
+   crash-recovery proof — a `PENDING` attempt survives a simulated process
+   restart and is resolved without double-counting and without losing the
+   physical action. (Satisfied at `6e31067`, in-memory. PostgreSQL restart
+   proof is CI-only.)
 
-Criterion 1 is the only one satisfied today. Criteria 2–8 are the Phase 11B
-work and the gate for "complete."
+### 8.1 Remaining gaps (honest)
+
+- **C3 schema lifecycle (Defect 9):** `[IMPLEMENTED]` as of this correction.
+  The partial unique index is now a proper Prisma migration
+  (`prisma/migrations/20260817000000_recon_c3_partial_unique/`). The runtime
+  `ensureC3UniqueIndex()` is a safety net, not the primary path.
+- **PostgreSQL local proof:** `[GAP]`. The local sandbox has no reachable
+  Postgres (Neon connection is on Vercel; sandbox IPv6 egress to Neon is
+  blocked). All DB-backed tests are CI-only. This is the same limitation as
+  the existing Phase 9B/9C tests in this environment.
+- **Algorithm drift detection:** `[GAP]` by construction. A bug in the bridge's
+  `buildPayload` is undetectable by ID comparison (see §6.4 honest scope).
+  This is a fundamental property of the transaction-ID definition, not an
+  implementation gap. Documented honestly; no fix possible without a
+  second, independently-implemented payload definition (which would duplicate
+  the bridge's vertical contract).
 
 ---
 

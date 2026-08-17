@@ -1521,13 +1521,16 @@ model PhysicalExecutionEvidence {
 ///   be followed by a NEW attempt that legitimately re-submits.
 ///
 /// C3 (corrected): at most one PENDING attempt per evidence at a time.
-///   ENFORCED by a PostgreSQL partial unique index, created via raw SQL
-///   migration (Prisma doesn't support partial unique indexes declaratively):
-///     CREATE UNIQUE INDEX ON "ReconciliationAttempt" ("evidenceId") WHERE "status" = 'PENDING'
+///   ENFORCED by a PostgreSQL partial unique index, created by a proper Prisma
+///   migration (prisma/migrations/20260817000000_recon_c3_partial_unique/):
+///     CREATE UNIQUE INDEX recon_attempt_pending_unique
+///       ON "ReconciliationAttempt" ("evidenceId") WHERE "status" = 'PENDING'
 ///   This is race-proof under PostgreSQL default (READ COMMITTED) isolation:
 ///   two concurrent INSERTs of PENDING for the same evidenceId cannot both
 ///   succeed — one will fail with a unique violation. The application-level
 ///   check-then-insert is NOT relied upon for correctness (Defect 5 fix).
+///   The runtime ensureC3UniqueIndex() is a SAFETY NET for environments that
+///   haven't run the migration, NOT the primary creation path (Defect 9 fix).
 ///
 /// C4: an attempt never transitions backwards. PENDING → {RECONCILED, <cause>}
 ///   is the only forward edge. A new attempt is a NEW row.

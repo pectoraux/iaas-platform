@@ -109,14 +109,32 @@ export interface HybridBridge {
    * Derive the expected ProtocolTransaction.id from evidence, WITHOUT
    * building the full transaction object.
    *
-   * This is the independent-derivation contract (spec §6.4). The kernel
-   * calls this to compute intendedTransactionId before calling the bridge's
-   * full transaction builder, then verifies the bridge's output matches.
-   * Mismatch → bridge drift.
+   * This is the deterministic-identity contract (spec §6.4). The kernel
+   * calls this to compute intendedTransactionId from the STORED EVIDENCE at
+   * recordPending time. Later, the bridge's full transaction builder
+   * (infrastructureResultToTransaction) produces a transaction from the LIVE
+   * result. The kernel compares transaction.id against the stored
+   * intendedTransactionId. Mismatch → the live result differs from the stored
+   * evidence (input drift), which means the bridge is non-deterministic or the
+   * evidence was corrupted.
    *
    * The bridge OWNS the payload shape (e.g., 'record_delivery' data). The
    * kernel does NOT know the payload type — that's vertical semantics owned
    * by the bridge. This keeps the kernel vertical-neutral (spec §2 rule 4).
+   *
+   * HONEST SCOPE (Defect 10):
+   *   This is "separation of input" independence, NOT "independent algorithm"
+   *   independence. The transaction ID is defined as
+   *   SHA-256(canonical(networkVersionId, sender, nonce, payload)), and the
+   *   payload is defined by the bridge's buildPayload. There is no independent
+   *   payload to hash — the payload IS the bridge's output. So a bug in
+   *   buildPayload itself (algorithm drift) is undetectable by ANY ID
+   *   comparison, because both sides use the same payload definition.
+   *
+   *   What this DOES detect: input drift (the live result differs from the
+   *   stored evidence). This is what spec §6.4 requires. It does NOT detect
+   *   algorithm drift (buildPayload bugs), which is undetectable by
+   *   construction. The spec is honestly documented as such.
    *
    * @param resultJson The canonical RuntimeExecuteResult JSON from evidence.
    * @param networkVersionId The network version for protocol isolation.
