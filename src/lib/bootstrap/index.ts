@@ -48,7 +48,7 @@ import { adapterRegistry } from '@/lib/kernel/runtime/adapter-registry'
 import { runtimeRegistry } from '@/lib/kernel/runtime/registry'
 import { InfrastructureRuntime } from '@/lib/kernel/runtime/infrastructure-runtime'
 import { ProtocolRuntime } from '@/lib/kernel/runtime/protocol-runtime'
-import { HybridRuntime } from '@/lib/kernel/runtime/hybrid-runtime'
+import { HybridRuntime, DefaultHybridBridge } from '@/lib/kernel/runtime/hybrid-runtime'
 import { InMemoryProtocolStateStore } from '@/lib/kernel/runtime/protocol/state-store'
 import { DeterministicTransactionExecutor } from '@/lib/kernel/runtime/protocol/executor'
 import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '@/lib/kernel/runtime/protocol/validator-consensus'
@@ -102,10 +102,20 @@ export function initializeBootstrap(): void {
     consensusEngine: new SimpleConsensusEngine(),
   })
 
-  // 4. Register all three runtimes with the RuntimeRegistry.
+  // 4. Construct HybridRuntime — bridges infrastructure + protocol.
+  //    Phase 10: The hybrid runtime receives BOTH the InfrastructureRuntime
+  //    and the ProtocolRuntime + a HybridBridge. It does NOT construct them.
+  const hybridRuntime = new HybridRuntime({
+    infrastructureRuntime,
+    protocolRuntime,
+    bridge: new DefaultHybridBridge(),
+    protocolSender: 'hybrid-bridge',
+  })
+
+  // 5. Register all three runtimes with the RuntimeRegistry.
   runtimeRegistry.register(infrastructureRuntime)
   runtimeRegistry.register(protocolRuntime)
-  runtimeRegistry.register(new HybridRuntime())
+  runtimeRegistry.register(hybridRuntime)
 
   initialized = true
 }

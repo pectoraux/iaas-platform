@@ -336,14 +336,23 @@ describe('Architecture contract: runtime boundary (Phase 5)', () => {
     expect(content).toMatch(/throw new Error\([^)]*No runtime registered/)
   })
 
-  it('ProtocolRuntime and HybridRuntime are stubs that throw NotImplemented', () => {
+  it('ProtocolRuntime throws NotImplemented for infrastructure-shaped methods', () => {
     const protocolPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'protocol-runtime.ts')
     const protocolContent = readFileSync(protocolPath, 'utf-8')
     expect(protocolContent).toMatch(/ProtocolRuntimeNotImplementedError/)
+  })
 
+  it('Phase 10: HybridRuntime bridges infrastructure + protocol (not a stub)', () => {
     const hybridPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'hybrid-runtime.ts')
     const hybridContent = readFileSync(hybridPath, 'utf-8')
-    expect(hybridContent).toMatch(/HybridRuntimeNotImplementedError/)
+    // Phase 10: HybridRuntime is no longer a stub — it delegates to
+    // InfrastructureRuntime + ProtocolRuntime via a HybridBridge.
+    expect(hybridContent).toMatch(/class HybridRuntime implements NetworkRuntime/)
+    expect(hybridContent).toMatch(/HybridRuntimeDeps/)
+    expect(hybridContent).toMatch(/infrastructureRuntime/)
+    expect(hybridContent).toMatch(/protocolRuntime/)
+    expect(hybridContent).toMatch(/HybridBridge/)
+    expect(hybridContent).toMatch(/executeHybrid/)
   })
 })
 

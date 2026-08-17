@@ -164,29 +164,12 @@ describe('Phase 5: registry completeness', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Test 5: Protocol/Hybrid runtimes throw NotImplemented for execution ops
+// Test 5: Protocol runtimes throw NotImplemented for infrastructure ops
 // ---------------------------------------------------------------------------
 
-describe('Phase 5: protocol and hybrid runtimes are stubs', () => {
+describe('Phase 5: protocol runtime throws NotImplemented for infrastructure ops', () => {
   it('ProtocolRuntime.createExecution throws NotImplemented', async () => {
     const runtime = createProtocolRuntime()
-    // Pass a mock tx — the stub throws before touching it.
-    const mockTx = {} as any
-    await expect(
-      runtime.createExecution(mockTx, {
-        tenantId: 't1',
-        networkId: 'n1',
-        requestedQuantity: '10',
-        requestedUnit: 'kWh',
-        startTime: new Date(),
-        endTime: new Date(),
-        sourceType: 'test',
-      }),
-    ).rejects.toThrow(/not implemented/)
-  })
-
-  it('HybridRuntime.createExecution throws NotImplemented', async () => {
-    const runtime = new HybridRuntime()
     const mockTx = {} as any
     await expect(
       runtime.createExecution(mockTx, {
@@ -209,11 +192,11 @@ describe('Phase 5: protocol and hybrid runtimes are stubs', () => {
     ).rejects.toThrow(/not implemented/)
   })
 
-  it('HybridRuntime.failAssignment throws NotImplemented', async () => {
-    const runtime = new HybridRuntime()
+  it('ProtocolRuntime.completeAssignment throws NotImplemented', async () => {
+    const runtime = createProtocolRuntime()
     const mockTx = {} as any
     await expect(
-      runtime.failAssignment(mockTx, 't1', 'a1', 'e1'),
+      runtime.completeAssignment(mockTx, 't1', 'a1', 'e1'),
     ).rejects.toThrow(/not implemented/)
   })
 })

@@ -90,6 +90,8 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
         return this.validateTransfer(transaction, state)
       case 'mint':
         return this.validateMint(transaction, state)
+      case 'record_delivery':
+        return this.validateRecordDelivery(transaction, state)
       default:
         return `Unknown transaction type: ${transaction.payload.type}`
     }
@@ -162,6 +164,20 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
   }
 
   /**
+   * Validate a 'record_delivery' transaction (from the HybridBridge).
+   * Records infrastructure execution results as protocol state.
+   *
+   * State keys: 'delivery:<sender>' → cumulative quantity (string)
+   */
+  private validateRecordDelivery(transaction: ProtocolTransaction, _state: ProtocolStateSnapshot): string | null {
+    const { quantity, unit } = transaction.payload.data
+    if (quantity === undefined || unit === undefined) {
+      return 'record_delivery requires quantity and unit'
+    }
+    return null
+  }
+
+  /**
    * Apply a transaction to a mutable entries map (pure mutation of the
    * passed-in map — does not touch any store).
    */
@@ -193,6 +209,18 @@ export class DeterministicTransactionExecutor implements ProtocolTransactionExec
         const mintAmount = parseFloat(amount as string)
 
         entries.set(toKey, (currentTo + mintAmount).toString())
+        entries.set(nonceKey, (transaction.nonce + 1).toString())
+        break
+      }
+      case 'record_delivery': {
+        const { quantity, unit } = transaction.payload.data
+        const deliveryKey = `delivery:${transaction.sender}`
+        const currentDelivery = entries.get(deliveryKey)
+        const currentAmount = currentDelivery ? parseFloat(currentDelivery) : 0
+        const deliveryAmount = parseFloat(quantity as string)
+
+        entries.set(deliveryKey, (currentAmount + deliveryAmount).toString())
+        entries.set(`delivery_unit:${transaction.sender}`, unit as string)
         entries.set(nonceKey, (transaction.nonce + 1).toString())
         break
       }
