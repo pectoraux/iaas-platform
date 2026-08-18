@@ -46,6 +46,7 @@ export type { SchedulerInput, SchedulerResult } from './scheduler'
 export {
   submitNetworkRequest,
   computePayloadHash,
+  validateNoDuplicateCapabilityDimensions,
   IdempotencyConflictError,
   RequestAuthorizationError,
 } from './service'

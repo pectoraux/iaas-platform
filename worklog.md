@@ -3514,3 +3514,25 @@ Stage Summary:
 - The AllocationReservation unique constraint now supports multi-dimensional capabilities.
 - 130/130 tests pass. eslint clean. tsc clean. Dev server HTTP 200.
 - REMAINING: PostgreSQL concurrency tests (identical concurrent → one result; different concurrent → no oversubscribe) are CI-only.
+
+---
+Task ID: 12B-slice-2-idempotency-final
+Agent: main (Z.ai Code)
+Task: Fix the two remaining correctness issues from the audit of cb4b6d2: (1) duplicate (capabilityType, unit) ambiguity, (2) hard-coded constraint-kind hashing. Also add migration for the changed unique constraint.
+
+Work Log:
+- Fix 1 (duplicate capability dimensions): added validateNoDuplicateCapabilityDimensions() — checks that at most one requirement exists per (capabilityType, unit). Called at the start of submitNetworkRequest, before identity resolution. If duplicates are found, throws RequestAuthorizationError with a message explaining that duplicate dimensions must be aggregated before submission. This enforces the architectural rule: "one decision → at most one requirement per (capabilityType, unit)".
+
+- Fix 2 (recursive constraint canonicalization): replaced the hard-coded constraint-kind switch in computePayloadHash with canonicalizeConstraint() — a recursive function that sorts all object keys and converts all values to canonical string representations. It does NOT hard-code which fields belong to which constraint kind. Every field on the constraint object participates in the hash, regardless of which module defined it. This is the "modules don't modify the core" principle applied to idempotency: a future constraint kind (e.g., "quality" with grade/tolerance/inspectionPolicy) will have ALL its fields included without modifying this function.
+
+- Fix 3 (migration): created prisma/migrations/20260818000000_allocation_reservation_multidim/migration.sql — drops the old unique index (decisionId, capabilityType) and creates the new one (decisionId, capabilityType, unit). This follows the project's established migration discipline.
+
+- Exported validateNoDuplicateCapabilityDimensions from index.ts.
+- VERIFICATION: tsc zero errors. eslint clean. 130/130 tests pass. Dev server HTTP 200.
+
+Stage Summary:
+- Duplicate (capabilityType, unit) is now rejected at request submission time.
+- Constraint hashing is now recursive and future-proof — unknown constraint fields are included, not silently ignored.
+- Migration exists for the unique constraint change.
+- 130/130 tests pass. eslint clean. tsc clean. Dev server HTTP 200.
+- REMAINING: PostgreSQL concurrency tests are CI-only. The in-memory tests pass.

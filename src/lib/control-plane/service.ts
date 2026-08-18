@@ -143,35 +143,82 @@ export function computePayloadHash(input: SubmitNetworkRequestInput): string {
       start: input.timeWindow.start.toISOString(),
       end: input.timeWindow.end.toISOString(),
     },
-    // Canonicalize constraints — sort by constraintId for determinism.
+    // PHASE 12B FIX: recursively canonicalize each constraint object
+    // (sorted keys, all fields included) rather than hard-coding which
+    // fields matter for each constraint kind. This is future-proof:
+    // a new constraint kind with unknown fields will have ALL its fields
+    // included in the hash, preventing semantic mismatch from producing
+    // the same payloadHash.
     constraints: (input.constraints ?? [])
-      .map((c) => {
-        const entry = c as Record<string, unknown>
-        const result: Record<string, string> = {
-          constraintId: String(entry.constraintId ?? ''),
-          kind: String(entry.kind ?? ''),
-          verificationMethod: String(entry.verificationMethod ?? ''),
-          status: String(entry.status ?? ''),
-        }
-        if (entry.kind === 'service') {
-          result.serviceType = String(entry.serviceType ?? '')
-          result.operator = String(entry.operator ?? '')
-          result.threshold = String(entry.threshold ?? '')
-          result.unit = String(entry.unit ?? '')
-          result.slaPolicyRef = String(entry.slaPolicyRef ?? '')
-        } else if (entry.kind === 'capacity') {
-          result.capabilityType = String(entry.capabilityType ?? '')
-          result.operator = String(entry.operator ?? '')
-          result.threshold = String(entry.threshold ?? '')
-          result.unit = String(entry.unit ?? '')
-          result.capacitySourceId = String(entry.capacitySourceId ?? '')
-        }
-        return result
-      })
-      .sort((a, b) => compareCanonicalStrings(a.constraintId, b.constraintId)),
+      .map((c) => canonicalizeConstraint(c))
+      .sort((a: Record<string, unknown>, b: Record<string, unknown>) =>
+        compareCanonicalStrings(String(a.constraintId ?? ''), String(b.constraintId ?? ''))),
     priority: input.priority ?? null,
   })
   return createHash('sha256').update(canonical).digest('hex')
+}
+
+/**
+ * Recursively canonicalize a constraint object for hashing.
+ *
+ * This recursively sorts all object keys and converts all values to
+ * canonical string representations. It does NOT hard-code which fields
+ * belong to which constraint kind — every field on the constraint object
+ * participates in the hash, regardless of which module defined it.
+ *
+ * This is the "modules don't modify the core" principle applied to
+ * idempotency: a future constraint kind (e.g., "quality" with fields
+ * grade/tolerance/inspectionPolicy) will have ALL its fields included
+ * without modifying this function.
+ *
+ * PURE: same inputs → same output.
+ */
+function canonicalizeConstraint(c: unknown): Record<string, unknown> {
+  if (c === null || typeof c !== 'object') {
+    return { value: String(c ?? '') }
+  }
+  if (Array.isArray(c)) {
+    return { array: c.map(canonicalizeConstraint) }
+  }
+  const entry = c as Record<string, unknown>
+  const result: Record<string, unknown> = {}
+  for (const key of Object.keys(entry).sort()) {
+    const val = entry[key]
+    if (val === null || val === undefined) {
+      result[key] = null
+    } else if (typeof val === 'object') {
+      result[key] = canonicalizeConstraint(val)
+    } else {
+      result[key] = String(val)
+    }
+  }
+  return result
+}
+
+/**
+ * Validate that a NetworkRequest has at most one capability requirement
+ * per (capabilityType, unit). Duplicate dimensions must be aggregated
+ * before submission.
+ *
+ * PHASE 12B FIX: same decision + same capabilityType + same unit →
+ * INVALID_REQUEST. This prevents the AllocationReservation unique
+ * constraint from being violated, and enforces the architectural rule
+ * that duplicate dimensions should be aggregated.
+ */
+export function validateNoDuplicateCapabilityDimensions(
+  requirements: { capabilityType: string; unit: string; amount: string }[],
+): string | null {
+  const seen = new Set<string>()
+  for (const req of requirements) {
+    const key = `${req.capabilityType}:${req.unit}`
+    if (seen.has(key)) {
+      return `Duplicate capability dimension: (${req.capabilityType}, ${req.unit}). ` +
+        `Multiple requirements for the same capability type + unit must be ` +
+        `aggregated into a single requirement before submission.`
+    }
+    seen.add(key)
+  }
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +249,12 @@ export function computePayloadHash(input: SubmitNetworkRequestInput): string {
 export async function submitNetworkRequest(
   input: SubmitNetworkRequestInput,
 ): Promise<SubmitNetworkRequestResult> {
+  // 0. Validate no duplicate capability dimensions.
+  const dupError = validateNoDuplicateCapabilityDimensions(input.capabilityRequirements)
+  if (dupError) {
+    throw new RequestAuthorizationError(dupError)
+  }
+
   // 1-4: Resolve identity (outside the transaction — these are reads).
   const requestId = deriveRequestId(
     input.networkId,
