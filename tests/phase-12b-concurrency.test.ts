@@ -1,10 +1,20 @@
 /**
- * Phase 12B Slice 2: PostgreSQL Concurrency Proof (revised)
+ * Phase 12B Slice 2: PostgreSQL Concurrency Proof (isolated fixtures)
  *
- * Three real PostgreSQL concurrency tests that force the contested conditions:
+ * Each test provisions a COMPLETELY FRESH topology — its own Tenant, Network,
+ * published NetworkVersion, ParticipantMembership, and single Resource — so
+ * the deterministic scheduler has EXACTLY ONE eligible candidate.
+ *
+ * This isolates the capacity-concurrency primitive (FOR UPDATE + overlap
+ * arithmetic) from candidate selection. A shared network accidentally turns
+ * the "single-resource" test into a "multi-resource" test, where the scheduler
+ * may select a resource that was already exhausted by an earlier test.
  *
  *   Test A: 8-GPU resource + identical concurrent 8-GPU request
  *           → one durable allocation/reservation, both callers converge.
+ *           Assert: 1 NetworkRequest, 1 AllocationDecision,
+ *                   1 AllocationReservation, 1 CapacityReservation,
+ *                   8 reserved, 0 remaining.
  *
  *   Test B: 10-GPU resource + two different concurrent 8-GPU requests
  *           → exactly one succeeds, one fails; 8 reserved, 2 remaining.
@@ -12,42 +22,97 @@
  *   Test C: 16-GPU resource + 8+8 concurrent
  *           → both succeed; 16 reserved, 0 remaining.
  *
- * These tests provision the ACTUAL universal resource stack:
- *   ResourceIdentity → NetworkResourceMembership → CapacityResource
- * and assert directly against PostgreSQL reservation/capacity totals.
+ * Assertions are made against the resource SELECTED by the decision
+ * (AllocationDecision.selectedMembershipId → NetworkResourceMembership →
+ * ResourceIdentity → metadataJson.assetId → CapacityResource), not merely
+ * against the provisioned fixture. For these single-candidate tests, the
+ * selected resource and the provisioned resource are asserted to be identical.
  *
- * Run: DATABASE_URL=postgresql://... bun test tests/phase-12b-concurrency.test.ts --timeout 120000
+ * Run: DATABASE_URL=postgresql://... bun test tests/phase-12b-concurrency.test.ts --timeout 180000
  */
-import { describe, it, expect, beforeAll } from 'bun:test'
+import { describe, it, expect } from 'bun:test'
 import { db } from '../src/lib/db'
 import { createTenant } from '../src/lib/services/tenant.service'
 import { instantiateTemplate } from '../src/lib/services/network.service'
-import { submitNetworkRequest, type SubmitNetworkRequestInput } from '../src/lib/control-plane'
+import {
+  submitNetworkRequest,
+  type SubmitNetworkRequestInput,
+  type SubmitNetworkRequestResult,
+} from '../src/lib/control-plane'
 
 const databaseUrl = process.env.DATABASE_URL || ''
-const isPostgres = databaseUrl.startsWith('postgresql://') || databaseUrl.startsWith('postgres://')
+const isPostgres =
+  databaseUrl.startsWith('postgresql://') || databaseUrl.startsWith('postgres://')
 const describeOrSkip = isPostgres ? describe : describe.skip
 
-// Shared fixtures
-let tenantId: string
-let networkId: string
-let networkVersionId: string
-let requesterMembershipId: string
+// ---------------------------------------------------------------------------
+// Fixture: a completely isolated network topology for ONE concurrency test.
+// ---------------------------------------------------------------------------
 
-beforeAll(async () => {
-  if (!isPostgres) return
+interface ConcurrencyFixture {
+  tenantId: string
+  networkId: string
+  networkVersionId: string
+  requesterMembershipId: string
+  // The single provisioned resource candidate.
+  assetId: string
+  resourceIdentityId: string
+  membershipId: string
+  capacityResourceId: string
+  physicalCapacity: string
+  unit: string
+  capabilityType: string
+}
+
+/**
+ * Create a fully isolated topology for one concurrency test:
+ *
+ *   Tenant (own scope)
+ *     └─ Network + published NetworkVersion (own scope)
+ *          ├─ ParticipantIdentity + ParticipantMembership (active)
+ *          │     └─ ParticipantRole (consumer)
+ *          └─ Operator → Asset → AssetNetworkAssignment → CapacityResource
+ *                     + ResourceIdentity → NetworkResourceMembership (active)
+ *
+ * The scheduler will see EXACTLY ONE eligible candidate membership.
+ */
+async function createConcurrencyFixture(opts: {
+  label: string
+  capacityAmount: string
+  capabilityType?: string
+  unit?: string
+}): Promise<ConcurrencyFixture> {
+  const capabilityType = opts.capabilityType ?? 'compute'
+  const unit = opts.unit ?? 'GPU'
+  // Unique stamp so re-runs against the same Neon DB do not collide on
+  // @@unique([tenantId, slug]) for NetworkDefinition or tenant slug.
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  const label = opts.label
+  const labelLc = label.toLowerCase()
+
+  // --- Fresh tenant (own scope) ---
   const tenant = await createTenant({
-    name: 'Phase 12B Concurrency v2',
-    slug: `p12b-concv2-${Date.now()}`,
+    name: `Phase 12B Concurrency — ${label}`,
+    slug: `p12b-${labelLc}-${stamp}`,
     plan: 'growth',
   })
-  tenantId = tenant.id
 
-  const { network, version } = await instantiateTemplate(tenantId, 'protocol-network')
-  networkId = network.id
-  networkVersionId = version!.id
+  // --- Fresh network + published NetworkVersion (own scope) ---
+  const instantiated = await instantiateTemplate(
+    tenant.id,
+    'protocol-network',
+    {
+      name: `Concurrency Net ${label}`,
+      slug: `net-${labelLc}-${stamp}`,
+    },
+  )
+  const network = instantiated.network
+  const version = instantiated.version
+  if (!version) {
+    throw new Error(`instantiateTemplate did not return a published version for test ${label}`)
+  }
 
-  // Create a ParticipantIdentity + ParticipantMembership + ParticipantRole
+  // --- Fresh requester: ParticipantIdentity + Membership (active) + Role ---
   const participant = await db.participantIdentity.create({ data: {} })
   const membership = await db.participantMembership.create({
     data: {
@@ -56,64 +121,50 @@ beforeAll(async () => {
       status: 'active',
     },
   })
-  requesterMembershipId = membership.id
   await db.participantRole.create({
     data: { membershipId: membership.id, role: 'consumer', status: 'active' },
   })
-})
 
-/**
- * Provision a complete resource stack with a known finite capacity.
- * Creates: Asset → AssetNetworkAssignment → CapacityResource (auto from assignment)
- *          + ResourceIdentity → NetworkResourceMembership (with the capacity).
- *
- * Returns the assetId and capacityResourceId for direct DB assertions.
- */
-async function provisionResource(
-  capacityAmount: string,
-  capabilityType: string,
-  unit: string,
-): Promise<{ assetId: string; resourceIdentityId: string; membershipId: string }> {
-  // Create an Operator (required for Asset)
+  // --- Fresh resource: Operator → Asset → AssetNetworkAssignment ---
   const operator = await db.operator.create({
     data: {
-      tenantId,
+      tenantId: tenant.id,
       organizationId: null,
-      displayName: `op-${Date.now()}-${Math.random().toString(36).slice(0, 8)}`,
+      displayName: `op-${labelLc}-${stamp}`,
       status: 'active',
     },
   })
-
-  // Create an Asset
   const asset = await db.asset.create({
     data: {
-      tenantId,
+      tenantId: tenant.id,
       operatorId: operator.id,
-      name: `asset-${Date.now()}-${Math.random().toString(36).slice(0, 8)}`,
+      name: `asset-${labelLc}-${stamp}`,
       assetType: 'compute_node',
       status: 'active',
     },
   })
-
-  // Create AssetNetworkAssignment with verified capacity
   await db.assetNetworkAssignment.create({
     data: {
-      tenantId,
+      tenantId: tenant.id,
       assetId: asset.id,
-      networkId,
+      networkId: network.id,
       capabilityType,
       status: 'active',
-      verifiedQuantity: capacityAmount,
+      verifiedQuantity: opts.capacityAmount,
       verifiedUnit: unit,
     },
   })
 
-  // Trigger ensureCapacityResource by calling the capacity service once
-  // (this creates the CapacityResource from the assignment)
+  // Materialize the CapacityResource from the assignment.
   const { ensureCapacityResource } = await import('../src/lib/services/capacity.service')
-  await ensureCapacityResource(tenantId, asset.id, networkId, capabilityType)
+  const capResource = await ensureCapacityResource(
+    tenant.id,
+    asset.id,
+    network.id,
+    capabilityType,
+  )
 
-  // Create ResourceIdentity (with assetId in metadata for AssetCapacityProvider)
+  // ResourceIdentity carries the assetId in metadata for AssetCapacityProvider.
   const resourceIdentity = await db.resourceIdentity.create({
     data: {
       resourceKind: 'compute',
@@ -121,16 +172,14 @@ async function provisionResource(
       metadataJson: JSON.stringify({ assetId: asset.id }),
     },
   })
-
-  // Create NetworkResourceMembership
-  const membership = await db.networkResourceMembership.create({
+  const resourceMembership = await db.networkResourceMembership.create({
     data: {
       resourceId: resourceIdentity.id,
-      networkId,
-      participantMembershipId: requesterMembershipId,
+      networkId: network.id,
+      participantMembershipId: membership.id,
       capabilitiesJson: JSON.stringify([capabilityType]),
       verifiedCapacityJson: JSON.stringify([
-        { capabilityType, amount: capacityAmount, unit },
+        { capabilityType, amount: opts.capacityAmount, unit },
       ]),
       controlMode: 'default',
       verificationProfile: 'default',
@@ -138,51 +187,127 @@ async function provisionResource(
     },
   })
 
-  return { assetId: asset.id, resourceIdentityId: resourceIdentity.id, membershipId: membership.id }
+  return {
+    tenantId: tenant.id,
+    networkId: network.id,
+    networkVersionId: version.id,
+    requesterMembershipId: membership.id,
+    assetId: asset.id,
+    resourceIdentityId: resourceIdentity.id,
+    membershipId: resourceMembership.id,
+    capacityResourceId: capResource.id,
+    physicalCapacity: capResource.physicalCapacity,
+    unit: capResource.unit,
+    capabilityType,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: resolve the capacity source SELECTED by a decision.
+// ---------------------------------------------------------------------------
+
+interface SelectedCapacitySource {
+  selectedMembershipId: string
+  resourceId: string
+  assetId: string
+  capacityResourceId: string
+  physicalCapacity: number
+  totalReserved: number
+  remaining: number
 }
 
 /**
- * Query the total reserved amount for an asset via CapacityReservation records.
- * The capacity service tracks remaining as: physicalCapacity - sum(active reservations).
- * Note: reservedAmount is stored as String (decimal-as-string), so we sum in JS.
+ * Walk the decision → selected resource → capacity source chain:
+ *
+ *   AllocationDecision.selectedMembershipId
+ *     → NetworkResourceMembership
+ *       → ResourceIdentity
+ *         → metadataJson.assetId
+ *           → CapacityResource (physical + sum of active reservations)
+ *
+ * This makes the test resilient against future scheduler changes: we assert
+ * against whatever the scheduler actually selected, not the fixture directly.
  */
-async function getTotalReserved(assetId: string, capabilityType: string): Promise<number> {
-  const resource = await db.capacityResource.findUnique({
+async function resolveSelectedCapacitySource(
+  decisionId: string,
+  networkId: string,
+  capabilityType: string,
+): Promise<SelectedCapacitySource> {
+  const decision = await db.allocationDecision.findUnique({
+    where: { id: decisionId },
+  })
+  if (!decision) throw new Error(`Decision ${decisionId} not found`)
+
+  const selectedMembership = await db.networkResourceMembership.findUnique({
+    where: { id: decision.selectedMembershipId },
+  })
+  if (!selectedMembership) {
+    throw new Error(`Selected membership ${decision.selectedMembershipId} not found`)
+  }
+
+  const resource = await db.resourceIdentity.findUnique({
+    where: { id: selectedMembership.resourceId },
+  })
+  if (!resource) {
+    throw new Error(`ResourceIdentity ${selectedMembership.resourceId} not found`)
+  }
+
+  const metadata = JSON.parse(resource.metadataJson || '{}') as Record<string, unknown>
+  const assetId = metadata.assetId as string | undefined
+  if (!assetId) {
+    throw new Error(
+      `ResourceIdentity ${resource.id} has no assetId in metadata — not Asset-backed`,
+    )
+  }
+
+  const capResource = await db.capacityResource.findUnique({
     where: {
       assetId_networkId_capabilityType: { assetId, networkId, capabilityType },
     },
   })
-  if (!resource) return -1
+  if (!capResource) {
+    throw new Error(
+      `CapacityResource not found for asset ${assetId} / network ${networkId} / ${capabilityType}`,
+    )
+  }
 
   const reservations = await db.capacityReservation.findMany({
-    where: { resourceId: resource.id, status: 'active' },
+    where: { resourceId: capResource.id, status: 'active' },
     select: { reservedAmount: true },
   })
-  return reservations.reduce((sum, r) => sum + parseFloat(r.reservedAmount), 0)
+  const totalReserved = reservations.reduce(
+    (sum, r) => sum + parseFloat(r.reservedAmount),
+    0,
+  )
+  const physical = parseFloat(capResource.physicalCapacity)
+
+  return {
+    selectedMembershipId: decision.selectedMembershipId,
+    resourceId: resource.id,
+    assetId,
+    capacityResourceId: capResource.id,
+    physicalCapacity: physical,
+    totalReserved,
+    remaining: physical - totalReserved,
+  }
 }
 
-async function getPhysicalCapacity(assetId: string, capabilityType: string): Promise<number> {
-  const resource = await db.capacityResource.findUnique({
-    where: {
-      assetId_networkId_capabilityType: {
-        assetId,
-        networkId,
-        capabilityType,
-      },
-    },
-  })
-  return resource ? parseFloat(resource.physicalCapacity) : -1
-}
+// ===========================================================================
+// Tests
+// ===========================================================================
 
-describeOrSkip('Phase 12B Slice 2: PostgreSQL concurrency proof (revised)', () => {
+describeOrSkip('Phase 12B Slice 2: PostgreSQL concurrency proof (isolated fixtures)', () => {
+  // -------------------------------------------------------------------------
+  // Test A: identical concurrent requests on an 8-GPU resource.
+  // -------------------------------------------------------------------------
   it('Test A: 8-GPU resource + identical concurrent 8-GPU request → one durable allocation', async () => {
-    // Provision: 8 GPU capacity
-    const { assetId } = await provisionResource('8', 'compute', 'GPU')
+    // Isolated topology — exactly ONE 8-GPU candidate.
+    const f = await createConcurrencyFixture({ label: 'A', capacityAmount: '8' })
 
     const input: SubmitNetworkRequestInput = {
-      requesterMembershipId,
-      networkId,
-      networkVersionId,
+      requesterMembershipId: f.requesterMembershipId,
+      networkId: f.networkId,
+      networkVersionId: f.networkVersionId,
       capabilityRequirements: [
         { capabilityType: 'compute', amount: '8', unit: 'GPU' },
       ],
@@ -190,132 +315,211 @@ describeOrSkip('Phase 12B Slice 2: PostgreSQL concurrency proof (revised)', () =
         start: new Date('2024-07-01T00:00:00Z'),
         end: new Date('2024-07-01T04:00:00Z'),
       },
-      idempotencyKey: `conc-A-${Date.now()}`,
+      idempotencyKey: `conc-A-${f.networkId}`,
     }
 
-    // Launch two concurrent calls with the SAME idempotency key
+    // Two concurrent calls with the SAME idempotency key + same payload.
     const results = await Promise.allSettled([
       submitNetworkRequest(input),
       submitNetworkRequest(input),
     ])
 
-    const fulfilled = results.filter((r) => r.status === 'fulfilled')
-    const rejected = results.filter((r) => r.status === 'rejected')
+    const fulfilled = results.filter(
+      (r): r is PromiseFulfilledResult<SubmitNetworkRequestResult> => r.status === 'fulfilled',
+    )
+    const rejected = results.filter(
+      (r): r is PromiseRejectedResult => r.status === 'rejected',
+    )
 
-    // At least one must succeed
+    // At least one must succeed.
     expect(fulfilled.length).toBeGreaterThanOrEqual(1)
 
+    // If both fulfilled, they MUST converge on the same request + decision
+    // (idempotent — same identity + same payload → same result).
     if (fulfilled.length === 2) {
-      // Both succeeded → must be the same result (idempotent)
-      const r1 = (fulfilled[0] as PromiseFulfilledResult<any>).value
-      const r2 = (fulfilled[1] as PromiseFulfilledResult<any>).value
+      const r1 = fulfilled[0].value
+      const r2 = fulfilled[1].value
       expect(r2.decision.decisionId).toBe(r1.decision.decisionId)
       expect(r2.request.requestId).toBe(r1.request.requestId)
     }
 
-    // Assert directly against PostgreSQL: exactly ONE NetworkRequest
-    // Use the requestId from the fulfilled result (it's deterministic)
-    const winner = fulfilled.length >= 1
-      ? (fulfilled[0] as PromiseFulfilledResult<any>).value
-      : null
+    const winner = fulfilled[0].value
 
-    if (winner) {
-      const requests = await db.networkRequest.findMany({
-        where: { id: winner.request.requestId },
-      })
-      expect(requests.length).toBe(1)
+    // --- Assert directly against PostgreSQL: exactly ONE NetworkRequest ---
+    const requests = await db.networkRequest.findMany({
+      where: { networkId: f.networkId },
+    })
+    expect(requests.length).toBe(1)
+    expect(requests[0].id).toBe(winner.request.requestId)
+    expect(requests[0].status).toBe('scheduled')
 
-      // Assert: exactly ONE AllocationDecision
-      const decisions = await db.allocationDecision.findMany({
-        where: { requestId: winner.request.requestId },
-      })
-      expect(decisions.length).toBe(1)
+    // --- Assert: exactly ONE AllocationDecision ---
+    const decisions = await db.allocationDecision.findMany({
+      where: { requestId: winner.request.requestId },
+    })
+    expect(decisions.length).toBe(1)
 
-      // Assert: exactly ONE AllocationReservation
-      const reservations = await db.allocationReservation.findMany({
-        where: { decisionId: decisions[0].id },
-      })
-      expect(reservations.length).toBe(1)
-      expect(reservations[0].allocatedAmount).toBe('8')
+    // --- Assert: the decision selected the SINGLE provisioned candidate ---
+    expect(decisions[0].selectedMembershipId).toBe(f.membershipId)
+
+    // --- Assert: exactly ONE AllocationReservation ---
+    const allocReservations = await db.allocationReservation.findMany({
+      where: { decisionId: decisions[0].id },
+    })
+    expect(allocReservations.length).toBe(1)
+    expect(allocReservations[0].allocatedAmount).toBe('8')
+    expect(allocReservations[0].capabilityType).toBe('compute')
+    expect(allocReservations[0].unit).toBe('GPU')
+
+    // --- Assert via the SELECTED resource chain (not the fixture directly) ---
+    const source = await resolveSelectedCapacitySource(
+      decisions[0].id,
+      f.networkId,
+      'compute',
+    )
+    // The selected resource IS the provisioned one (single candidate).
+    expect(source.selectedMembershipId).toBe(f.membershipId)
+    expect(source.assetId).toBe(f.assetId)
+    expect(source.resourceId).toBe(f.resourceIdentityId)
+
+    // 8 reserved, 0 remaining of 8 total.
+    expect(source.totalReserved).toBe(8)
+    expect(source.remaining).toBe(0)
+    expect(source.physicalCapacity).toBe(8)
+
+    // --- Assert: exactly ONE CapacityReservation row backing the allocation ---
+    const capReservations = await db.capacityReservation.findMany({
+      where: { resourceId: source.capacityResourceId, status: 'active' },
+    })
+    expect(capReservations.length).toBe(1)
+    expect(parseFloat(capReservations[0].reservedAmount)).toBe(8)
+
+    // If one was rejected, it must be a clean Error (not a crash).
+    if (rejected.length === 1) {
+      expect(rejected[0].reason).toBeInstanceOf(Error)
     }
-
-    // Assert: the capacity shows 8 reserved (0 remaining of 8 total)
-    const reserved = await getTotalReserved(assetId, 'compute')
-    const physical = await getPhysicalCapacity(assetId, 'compute')
-    expect(reserved).toBe(8)
-    expect(physical - reserved).toBe(0)
   })
 
+  // -------------------------------------------------------------------------
+  // Test B: two DIFFERENT concurrent 8-GPU requests on a 10-GPU resource.
+  //         Exactly one must win; the other must fail cleanly.
+  // -------------------------------------------------------------------------
   it('Test B: 10-GPU resource + two different concurrent 8-GPU requests → one wins, one fails', async () => {
-    // Provision: 10 GPU capacity
-    const { assetId } = await provisionResource('10', 'compute', 'GPU')
+    // Isolated topology — exactly ONE 10-GPU candidate.
+    const f = await createConcurrencyFixture({ label: 'B', capacityAmount: '10' })
 
+    // Both requests target the SAME time window so the capacity service's
+    // overlap arithmetic applies (8 + 8 = 16 > 10 → one must fail).
     const timeWindow = {
       start: new Date('2024-07-02T00:00:00Z'),
       end: new Date('2024-07-02T04:00:00Z'),
     }
 
     const inputA: SubmitNetworkRequestInput = {
-      requesterMembershipId,
-      networkId,
-      networkVersionId,
+      requesterMembershipId: f.requesterMembershipId,
+      networkId: f.networkId,
+      networkVersionId: f.networkVersionId,
       capabilityRequirements: [
         { capabilityType: 'compute', amount: '8', unit: 'GPU' },
       ],
       timeWindow,
-      idempotencyKey: `conc-B-A-${Date.now()}`,
+      idempotencyKey: `conc-B-A-${f.networkId}`,
     }
 
     const inputB: SubmitNetworkRequestInput = {
-      requesterMembershipId,
-      networkId,
-      networkVersionId,
+      requesterMembershipId: f.requesterMembershipId,
+      networkId: f.networkId,
+      networkVersionId: f.networkVersionId,
       capabilityRequirements: [
         { capabilityType: 'compute', amount: '8', unit: 'GPU' },
       ],
       timeWindow,
-      idempotencyKey: `conc-B-B-${Date.now()}`,
+      idempotencyKey: `conc-B-B-${f.networkId}`,
     }
 
-    // Launch two concurrent calls with DIFFERENT idempotency keys
+    // Two concurrent calls with DIFFERENT idempotency keys.
     const results = await Promise.allSettled([
       submitNetworkRequest(inputA),
       submitNetworkRequest(inputB),
     ])
 
-    const fulfilled = results.filter((r) => r.status === 'fulfilled')
-    const rejected = results.filter((r) => r.status === 'rejected')
+    const fulfilled = results.filter(
+      (r): r is PromiseFulfilledResult<SubmitNetworkRequestResult> => r.status === 'fulfilled',
+    )
+    const rejected = results.filter(
+      (r): r is PromiseRejectedResult => r.status === 'rejected',
+    )
 
-    // EXACTLY ONE must succeed (capacity = 10, each asks 8; 8+8=16 > 10)
+    // EXACTLY ONE must succeed (capacity = 10, each asks 8; 8+8=16 > 10).
     expect(fulfilled.length).toBe(1)
     expect(rejected.length).toBe(1)
 
-    // The winner has a valid allocation
-    const winner = (fulfilled[0] as PromiseFulfilledResult<any>).value
+    const winner = fulfilled[0].value
+    const loserError = rejected[0].reason
+
+    // The winner has a valid allocation with exactly one reservation.
     expect(winner.decision).toBeDefined()
-    // Log for debugging
-    console.log('Test B winner decisionId:', winner.decision.decisionId)
-    console.log('Test B winner reservations:', JSON.stringify(winner.reservations))
     expect(winner.reservations.length).toBe(1)
     expect(winner.reservations[0].allocatedAmount).toBe('8')
+    expect(winner.reservations[0].capabilityType).toBe('compute')
+    expect(winner.reservations[0].unit).toBe('GPU')
 
-    // The loser gets a clean Error
-    const loserError = (rejected[0] as PromiseRejectedResult).reason
-    console.log('Test B loser error:', loserError.message)
+    // The loser gets a clean Error (InsufficientCapacityError or a Prisma
+    // unique-constraint error from the rolled-back transaction).
     expect(loserError).toBeInstanceOf(Error)
 
-    // Assert directly against PostgreSQL:
-    // Total reserved = 8, remaining = 2 (10 - 8)
-    const reserved = await getTotalReserved(assetId, 'compute')
-    const physical = await getPhysicalCapacity(assetId, 'compute')
-    console.log('Test B DB: reserved=', reserved, 'physical=', physical)
-    expect(reserved).toBe(8)
-    expect(physical - reserved).toBe(2)
+    // --- Assert directly against PostgreSQL ---
+    // Exactly ONE NetworkRequest persisted (the loser's was rolled back).
+    const requests = await db.networkRequest.findMany({
+      where: { networkId: f.networkId },
+    })
+    expect(requests.length).toBe(1)
+    expect(requests[0].id).toBe(winner.request.requestId)
+
+    // Exactly ONE AllocationDecision.
+    const decisions = await db.allocationDecision.findMany({
+      where: { networkId: f.networkId },
+    })
+    expect(decisions.length).toBe(1)
+    expect(decisions[0].selectedMembershipId).toBe(f.membershipId)
+
+    // Exactly ONE AllocationReservation.
+    const allocReservations = await db.allocationReservation.findMany({
+      where: { decisionId: decisions[0].id },
+    })
+    expect(allocReservations.length).toBe(1)
+    expect(allocReservations[0].allocatedAmount).toBe('8')
+
+    // --- Assert via the SELECTED resource chain ---
+    const source = await resolveSelectedCapacitySource(
+      decisions[0].id,
+      f.networkId,
+      'compute',
+    )
+    expect(source.selectedMembershipId).toBe(f.membershipId)
+    expect(source.assetId).toBe(f.assetId)
+
+    // Total reserved = 8, remaining = 2 (10 - 8). NEVER 16.
+    expect(source.totalReserved).toBe(8)
+    expect(source.remaining).toBe(2)
+    expect(source.physicalCapacity).toBe(10)
+    expect(source.totalReserved).not.toBe(16)
+
+    // Exactly ONE active CapacityReservation row.
+    const capReservations = await db.capacityReservation.findMany({
+      where: { resourceId: source.capacityResourceId, status: 'active' },
+    })
+    expect(capReservations.length).toBe(1)
+    expect(parseFloat(capReservations[0].reservedAmount)).toBe(8)
   })
 
+  // -------------------------------------------------------------------------
+  // Test C: two DIFFERENT concurrent 8-GPU requests on a 16-GPU resource.
+  //         Both must succeed; 16 reserved, 0 remaining.
+  // -------------------------------------------------------------------------
   it('Test C: 16-GPU resource + 8+8 concurrent → both succeed, 16 reserved, 0 remaining', async () => {
-    // Provision: 16 GPU capacity
-    const { assetId } = await provisionResource('16', 'compute', 'GPU')
+    // Isolated topology — exactly ONE 16-GPU candidate.
+    const f = await createConcurrencyFixture({ label: 'C', capacityAmount: '16' })
 
     const timeWindow = {
       start: new Date('2024-07-03T00:00:00Z'),
@@ -323,50 +527,113 @@ describeOrSkip('Phase 12B Slice 2: PostgreSQL concurrency proof (revised)', () =
     }
 
     const inputA: SubmitNetworkRequestInput = {
-      requesterMembershipId,
-      networkId,
-      networkVersionId,
+      requesterMembershipId: f.requesterMembershipId,
+      networkId: f.networkId,
+      networkVersionId: f.networkVersionId,
       capabilityRequirements: [
         { capabilityType: 'compute', amount: '8', unit: 'GPU' },
       ],
       timeWindow,
-      idempotencyKey: `conc-C-A-${Date.now()}`,
+      idempotencyKey: `conc-C-A-${f.networkId}`,
     }
 
     const inputB: SubmitNetworkRequestInput = {
-      requesterMembershipId,
-      networkId,
-      networkVersionId,
+      requesterMembershipId: f.requesterMembershipId,
+      networkId: f.networkId,
+      networkVersionId: f.networkVersionId,
       capabilityRequirements: [
         { capabilityType: 'compute', amount: '8', unit: 'GPU' },
       ],
       timeWindow,
-      idempotencyKey: `conc-C-B-${Date.now()}`,
+      idempotencyKey: `conc-C-B-${f.networkId}`,
     }
 
-    // Launch two concurrent calls with DIFFERENT idempotency keys
+    // Two concurrent calls with DIFFERENT idempotency keys.
     const results = await Promise.allSettled([
       submitNetworkRequest(inputA),
       submitNetworkRequest(inputB),
     ])
 
-    const fulfilled = results.filter((r) => r.status === 'fulfilled')
-    const rejected = results.filter((r) => r.status === 'rejected')
+    const fulfilled = results.filter(
+      (r): r is PromiseFulfilledResult<SubmitNetworkRequestResult> => r.status === 'fulfilled',
+    )
+    const rejected = results.filter(
+      (r): r is PromiseRejectedResult => r.status === 'rejected',
+    )
 
-    // BOTH must succeed (capacity = 16, each asks 8; 8+8=16 = 16)
+    // BOTH must succeed (capacity = 16, each asks 8; 8+8=16 = 16).
     expect(fulfilled.length).toBe(2)
     expect(rejected.length).toBe(0)
 
-    // Distinct decision IDs
-    const r1 = (fulfilled[0] as PromiseFulfilledResult<any>).value
-    const r2 = (fulfilled[1] as PromiseFulfilledResult<any>).value
-    expect(r2.decision.decisionId).not.toBe(r1.decision.decisionId)
+    const r1 = fulfilled[0].value
+    const r2 = fulfilled[1].value
 
-    // Assert directly against PostgreSQL:
-    // Total reserved = 16, remaining = 0
-    const reserved = await getTotalReserved(assetId, 'compute')
-    const physical = await getPhysicalCapacity(assetId, 'compute')
-    expect(reserved).toBe(16)
-    expect(physical - reserved).toBe(0)
+    // Distinct decision IDs (different idempotency keys → different requests).
+    expect(r2.decision.decisionId).not.toBe(r1.decision.decisionId)
+    expect(r2.request.requestId).not.toBe(r1.request.requestId)
+
+    // Both selected the single provisioned candidate.
+    expect(r1.decision.selectedMembershipId).toBe(f.membershipId)
+    expect(r2.decision.selectedMembershipId).toBe(f.membershipId)
+
+    // Each has exactly one 8-GPU reservation.
+    expect(r1.reservations.length).toBe(1)
+    expect(r1.reservations[0].allocatedAmount).toBe('8')
+    expect(r2.reservations.length).toBe(1)
+    expect(r2.reservations[0].allocatedAmount).toBe('8')
+
+    // --- Assert directly against PostgreSQL ---
+    // Exactly TWO NetworkRequests persisted.
+    const requests = await db.networkRequest.findMany({
+      where: { networkId: f.networkId },
+    })
+    expect(requests.length).toBe(2)
+    expect(requests.every((r) => r.status === 'scheduled')).toBe(true)
+
+    // Exactly TWO AllocationDecisions.
+    const decisions = await db.allocationDecision.findMany({
+      where: { networkId: f.networkId },
+    })
+    expect(decisions.length).toBe(2)
+
+    // Exactly TWO AllocationReservations (one per decision).
+    const allocReservations = await db.allocationReservation.findMany({
+      where: { decisionId: { in: decisions.map((d) => d.id) } },
+    })
+    expect(allocReservations.length).toBe(2)
+    expect(
+      allocReservations.every((r) => parseFloat(r.allocatedAmount) === 8),
+    ).toBe(true)
+
+    // --- Assert via the SELECTED resource chain ---
+    // Both decisions selected the same single candidate → same capacity source.
+    const source1 = await resolveSelectedCapacitySource(
+      r1.decision.decisionId,
+      f.networkId,
+      'compute',
+    )
+    const source2 = await resolveSelectedCapacitySource(
+      r2.decision.decisionId,
+      f.networkId,
+      'compute',
+    )
+    expect(source1.capacityResourceId).toBe(source2.capacityResourceId)
+    expect(source1.assetId).toBe(f.assetId)
+
+    // Total reserved = 16, remaining = 0 (16 - 16).
+    expect(source1.totalReserved).toBe(16)
+    expect(source1.remaining).toBe(0)
+    expect(source1.physicalCapacity).toBe(16)
+
+    // Exactly TWO active CapacityReservation rows (8 + 8 = 16).
+    const capReservations = await db.capacityReservation.findMany({
+      where: { resourceId: source1.capacityResourceId, status: 'active' },
+    })
+    expect(capReservations.length).toBe(2)
+    const sum = capReservations.reduce(
+      (s, r) => s + parseFloat(r.reservedAmount),
+      0,
+    )
+    expect(sum).toBe(16)
   })
 })
