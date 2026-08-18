@@ -357,6 +357,9 @@ export function computeDecisionSnapshotHash(snapshot: {
   candidateMemberships: NetworkResourceMembership[]
   capacityStateByMembership: Map<string, CapacityEntry[]>
   authorizingMemberships: Map<string, ParticipantMembership>
+  observationSnapshots?: Map<string, ConstraintObservationSnapshot>
+  schedulerVersion: string
+  evaluatorVersion: string
 }): string {
   const canonical = canonicalize({
     networkVersionId: snapshot.networkVersionId,
@@ -365,10 +368,6 @@ export function computeDecisionSnapshotHash(snapshot: {
     networkId: snapshot.request.networkId,
     capabilityRequirements: snapshot.request.capabilityRequirements,
     priority: snapshot.request.priority ?? null,
-    // PHASE 12B FIX (defect 1): include priority + FULL constraint semantics.
-    // The original omitted serviceType, operator, threshold, unit, slaPolicyRef.
-    // Two constraints differing only in threshold (latency <= 20 vs <= 200) would
-    // produce the same hash. Now ALL constraint fields are included.
     constraints: (snapshot.request.constraints ?? []).map((c) => {
       const base = {
         constraintId: c.constraintId,
@@ -387,7 +386,6 @@ export function computeDecisionSnapshotHash(snapshot: {
           slaPolicyRef: sc.slaPolicyRef,
         }
       }
-      // CapacityConstraint — include its fields too.
       const cc = c as CapacityConstraint
       return {
         ...base,
@@ -402,11 +400,22 @@ export function computeDecisionSnapshotHash(snapshot: {
       start: snapshot.request.timeWindow.start.toISOString(),
       end: snapshot.request.timeWindow.end.toISOString(),
     },
+    // PHASE 12B FIX: include schedulerVersion + evaluatorVersion in the
+    // snapshot hash (not just in decisionId). The snapshot hash must be
+    // independently auditable — it must describe all inputs that affect
+    // eligibility and selection, including which scheduler/evaluator
+    // produced the decision.
+    schedulerVersion: snapshot.schedulerVersion,
+    evaluatorVersion: snapshot.evaluatorVersion,
     // ALL candidate memberships, sorted deterministically.
     candidateMemberships: snapshot.candidateMemberships
       .map((m) => {
-        // Look up the authorizing membership for this candidate.
         const authorizing = snapshot.authorizingMemberships.get(m.participantMembershipId)
+        // PHASE 12B FIX: include observation snapshots in the canonical hash.
+        // Observations are now an authoritative scheduling input (the evaluator
+        // uses them to accept/reject candidates). If observations change, the
+        // hash must change.
+        const observations = snapshot.observationSnapshots?.get(m.membershipId)
         return {
           membershipId: m.membershipId,
           resourceId: m.resourceId,
@@ -415,7 +424,6 @@ export function computeDecisionSnapshotHash(snapshot: {
             a.capabilityType.localeCompare(b.capabilityType),
           ),
           membershipStatus: m.membershipStatus,
-          // The remaining capacity for THIS membership — the full snapshot.
           remainingCapacity: (snapshot.capacityStateByMembership.get(m.membershipId) ?? [])
             .map((c) => ({ ...c }))
             .sort((a, b) => a.capabilityType.localeCompare(b.capabilityType)),
@@ -425,10 +433,14 @@ export function computeDecisionSnapshotHash(snapshot: {
                 end: m.availability.end.toISOString(),
               }
             : null,
-          // PHASE 12B FIX (defect 3): include the authorizing membership's
-          // state. If the authorizing membership is suspended, the candidate
-          // is ineligible — and the hash must reflect that state.
           authorizingMembershipStatus: authorizing?.membershipStatus ?? 'missing',
+          // The observation snapshot for THIS membership — the full
+          // authoritative observation state used for constraint evaluation.
+          observations: observations
+            ? Array.from(observations.observations.entries())
+                .map(([serviceType, val]) => ({ serviceType, value: val.value, unit: val.unit }))
+                .sort((a, b) => a.serviceType.localeCompare(b.serviceType))
+            : [],
         }
       })
       .sort((a, b) => a.membershipId.localeCompare(b.membershipId)),
@@ -517,26 +529,45 @@ export interface ConstraintEvaluator {
  * is NOT satisfied (the candidate cannot prove it meets the SLA).
  */
 export class DefaultConstraintEvaluator implements ConstraintEvaluator {
-  readonly evaluatorVersion = 'default-evaluator-v1'
+  readonly evaluatorVersion = 'default-evaluator-v2'
 
   evaluate(constraint: CommitmentConstraint, snapshot: ConstraintObservationSnapshot): boolean {
     if (constraint.kind === 'capacity') {
-      // Capacity constraints are handled by the scalar capacity check in
-      // the scheduler. The evaluator does not re-check them.
-      return true
+      // PHASE 12B FIX (defect 3): evaluate CapacityConstraint semantically.
+      // The original returned true unconditionally, assuming scalar capacity
+      // was handled elsewhere. But CapacityConstraint has its own operator +
+      // threshold that may differ from the CapabilityRequirement. For example:
+      //   CapabilityRequirement: 4 GPU (the allocation amount)
+      //   CapacityConstraint:    >= 2 GPU (a minimum eligibility threshold)
+      // These are different semantics. The CapacityConstraint checks whether
+      // the candidate's capacity MEETS the threshold, not whether the
+      // allocation amount is available.
+      //
+      // We check against the remaining capacity (from the observation snapshot's
+      // observations map, keyed by capabilityType) — not against the request's
+      // CapabilityRequirement amount.
+      const cc = constraint as CapacityConstraint
+      const observed = snapshot.observations.get(cc.capabilityType)
+      if (!observed) {
+        // No observation for this capacity type → cannot evaluate → filter.
+        return false
+      }
+      return evaluateConstraint(
+        cc.operator,
+        cc.threshold,
+        observed.value,
+        cc.unit,
+        observed.unit,
+      )
     }
 
     const serviceConstraint = constraint as ServiceConstraint
 
-    // Look up the observed value for this service type.
     const observed = snapshot.observations.get(serviceConstraint.serviceType)
     if (!observed) {
-      // No observation for this service type → the candidate cannot prove it
-      // satisfies the constraint. Filter it out.
       return false
     }
 
-    // Evaluate the operator + threshold against the observed value.
     return evaluateConstraint(
       serviceConstraint.operator,
       serviceConstraint.threshold,

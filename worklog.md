@@ -3231,3 +3231,23 @@ Stage Summary:
   - The evaluator is versioned (evaluatorVersion in AllocationDecision + decisionId).
 - The scheduler's canonical identity is now complete: NetworkVersion + NetworkRequest (incl priority + full constraints) + ALL candidate resource/capacity/observation snapshot + ALL authorizing membership states + schedulerVersion + evaluatorVersion.
 - 30/30 tests pass. 118/118 total. eslint clean. tsc clean. Dev server HTTP 200.
+
+---
+Task ID: 12B-slice-1-fix-4
+Agent: main (Z.ai Code)
+Task: Fix the final three reproducibility/constraint defects from the audit of ec38bac: (1) observation snapshots not in decisionSnapshotHash, (2) evaluatorVersion not in snapshot hash, (3) CapacityConstraint not semantically evaluated.
+
+Work Log:
+- Defect 1 (observations in snapshot hash): computeDecisionSnapshotHash now accepts observationSnapshots and includes each candidate's observations in the canonical hash. If a candidate's observed latency changes from 15ms to 35ms, the hash changes — even though the request and other state are the same. This is because observations are now an authoritative scheduling input.
+- Defect 2 (evaluatorVersion in snapshot hash): computeDecisionSnapshotHash now accepts schedulerVersion + evaluatorVersion and includes them in the canonical hash. The snapshot hash is now independently auditable — it describes ALL inputs that affect eligibility and selection, including which scheduler/evaluator produced the decision. Previously evaluatorVersion was in decisionId but not in the snapshot hash, creating a mismatch between the two reproducibility domains.
+- Defect 3 (CapacityConstraint semantic evaluation): DefaultConstraintEvaluator now evaluates CapacityConstraint semantics (operator + threshold + unit) against the candidate's observed capacity values — not just returning true. A CapacityConstraint of `>= 100 GPU` is evaluated against the candidate's observed capacity. If no observation exists for the capabilityType, the candidate is filtered. The evaluator version is bumped to 'default-evaluator-v2' to reflect the semantic change.
+- Updated scheduler to pass observationSnapshots + schedulerVersion + evaluatorVersion to computeDecisionSnapshotHash.
+- Updated test calls to computeDecisionSnapshotHash to include the new required parameters.
+- VERIFICATION: tsc zero errors. eslint clean. 30/30 phase-12b tests pass. 118/118 total. Dev server HTTP 200.
+
+Stage Summary:
+- All three defects fixed. The scheduler's canonical snapshot is now complete:
+  NetworkVersion + NetworkRequest (incl priority + full constraints) + ALL candidate resource/capacity/observation state + ALL authorizing membership states + schedulerVersion + evaluatorVersion.
+- The snapshot hash is independently auditable — it captures every input that can affect eligibility and selection.
+- CapacityConstraint is now semantically evaluated (operator + threshold), not just type-checked.
+- 30/30 tests pass. 118/118 total. eslint clean. tsc clean. Dev server HTTP 200.

@@ -406,6 +406,8 @@ describe('Phase 12B §8.7: Scheduler reproducibility', () => {
       candidateMemberships: [candidate],
       capacityStateByMembership: new Map([['rm-1', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]]]),
       authorizingMemberships: new Map(),
+      schedulerVersion: 'test-v1',
+      evaluatorVersion: 'test-ev-v1',
     })
 
     const hash2 = computeDecisionSnapshotHash({
@@ -414,6 +416,8 @@ describe('Phase 12B §8.7: Scheduler reproducibility', () => {
       candidateMemberships: [candidate],
       capacityStateByMembership: new Map([['rm-1', [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }]]]),
       authorizingMemberships: new Map(),
+      schedulerVersion: 'test-v1',
+      evaluatorVersion: 'test-ev-v1',
     })
 
     expect(hash1).not.toBe(hash2)
@@ -985,6 +989,8 @@ describe('Phase 12B defect 3 fix: authorizing membership lifecycle integrity', (
         candidateMemberships: [candidate],
         capacityStateByMembership: remaining,
         authorizingMemberships: new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A, 'suspended')]]),
+        schedulerVersion: 'deterministic-v1',
+        evaluatorVersion: 'default-evaluator-v2',
       })
       expect(hash1).not.toBe(hash2)
     }

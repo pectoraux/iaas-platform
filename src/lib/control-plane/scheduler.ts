@@ -238,8 +238,10 @@ export function schedule(input: SchedulerInput): SchedulerResult {
     request,
     candidateMemberships: candidateMemberships,
     capacityStateByMembership: input.remainingCapacity,
-    // PHASE 12B FIX (defect 3): include authorizing membership states.
     authorizingMemberships: input.authorizingMemberships,
+    observationSnapshots: input.observationSnapshots,
+    schedulerVersion: SCHEDULER_VERSION,
+    evaluatorVersion: evaluator.evaluatorVersion,
   })
 
   // 8. Compute the deterministic decisionId (§8.7 — reproducibility).
