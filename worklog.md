@@ -3115,3 +3115,25 @@ Stage Summary:
 - The spec now correctly: supports multi-network resource sharing (ResourceIdentity + NetworkResourceMembership), separates participant roles from membership, treats scheduling as first-class (AllocationDecision), defines multi-dimensional commitments (ServiceCommitment), uses ProtocolResourceAdapter for blockchain, places control-plane objects above the frozen kernel, makes NetworkLaunch atomic, and has 19 strengthened completeness criteria.
 - The spec is grounded in the existing repository (every [EXISTS] marker verified; the multi-network model generalizes the existing AssetNetworkAssignment pattern).
 - Phase 11B remains accepted (713ee10). This revised spec is the next audit target.
+
+---
+Task ID: 12A-revised-2
+Agent: main (Z.ai Code)
+Task: Apply the three final corrections + two tightening points + two new criteria from the user's audit of ef97d28 before freezing Phase 12A.
+
+Work Log:
+- Accepted all corrections. The biggest was the NR1 internal contradiction.
+- Correction 1 (NR1 contradiction): rewrote §6.2 NR1. The old text said "a resource is scoped to exactly one networkId and one participantId" — directly contradicting the multi-network model in §4. Fixed: NR1 now states ResourceIdentity has NO network scope; NetworkResourceMembership binds resource to network; a resource MAY have many memberships.
+- Correction 2 (resource → ParticipantMembership binding): added §6.2.1. NetworkResourceMembership now binds to participantMembershipId (not a global participant). Prevents cross-network authority leakage. Updated the §4.3 NetworkResourceMembership interface to include participantMembershipId. Enforces: who controls globally ≠ which role authorizes in this network ≠ which network.
+- Correction 3 (NetworkRequest abstraction): added §6.6.1 NetworkRequest as the actor-neutral scheduler input. requesterMembershipId (not global participant), networkId, capabilityRequirements, timeWindow, constraints, priority, idempotencyKey. The scheduler flow is now: NetworkRequest → Scheduler → AllocationDecision → Reservation → Commitment → Assignment. Updated AllocationDecision to reference requestId (FK to NetworkRequest), candidateMemberships, selectedMembershipId, and added schedulerVersion for reproducibility.
+- Tightening A (ServiceCommitment constraint distinction): rewrote §6.7. Distinguished CapacityConstraint (depletes CapacityResource — bandwidth, GPU, TB, kW) from ServiceConstraint (SLA-level, does NOT deplete — latency, availability, quality). Common base CommitmentConstraint with kind discriminator. This stops Phase 12B from forcing latency/quality into CapacityResource.
+- Tightening B (NetworkLaunch atomicity scope): rewrote §6.8 atomicity invariant. The launch transaction atomically creates control-plane configuration (Network, NetworkVersion, Capability records, RewardRules, policies). It CANNOT atomically make external participants/resources/adapters operational — those are a separate lifecycle. Keeps the guarantee physically realistic.
+- New criterion 20 (Request isolation): a requester cannot cause an allocation decision outside its membership permissions. Scheduler verifies requesterMembershipId is active + authorized before producing AllocationDecision. Verified by test: suspended consumer role cannot trigger allocation.
+- New criterion 21 (Allocation reproducibility): given the same (NetworkVersion, NetworkRequest, ResourceMembership state), the scheduler's decision is deterministic OR explicitly versions its non-deterministic policy via schedulerVersion. Verified by test: replay produces same decision or records different schedulerVersion.
+- Updated §12 header and §13 summary to reflect 21 criteria, NetworkRequest in the architecture flow, the constraint distinction, and the control-plane-boundary on launch atomicity.
+- VERIFICATION: eslint clean. Dev server HTTP 200. No code changed (specification only).
+
+Stage Summary:
+- All three corrections + two tightenings + two new criteria applied to docs/phase-12a-universal-network-control-plane-specification.md.
+- The spec now has: no internal contradictions (NR1 fixed); explicit resource→ParticipantMembership binding; NetworkRequest as the actor-neutral scheduler input; CapacityConstraint vs ServiceConstraint distinction; realistic NetworkLaunch atomicity boundary; 21 completeness criteria including request isolation and allocation reproducibility.
+- Phase 12A is now ready to freeze. The next step is Phase 12B: implement the control plane with NetworkRequest → Scheduler → AllocationDecision → Capacity → Execution as the central path.

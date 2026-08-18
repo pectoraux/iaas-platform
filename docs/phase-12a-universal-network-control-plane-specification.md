@@ -314,10 +314,12 @@ memberships (one per network it participates in).
 
 ```typescript
 interface NetworkResourceMembership {
-  membershipId        // per-network membership identity
-  resourceId          // FK to ResourceIdentity
-  networkId           // the network this membership is in
-
+  membershipId              // per-network membership identity
+  resourceId                // FK to ResourceIdentity
+  networkId                 // the network this membership is in
+  participantMembershipId   // FK to ParticipantMembership (§5.2) — the
+                            // network-scoped authority that authorizes
+                            // this resource's participation in THIS network
   // Per-network bindings (these can differ across networks):
   capabilities[]      // what this resource can DO in THIS network
   verifiedCapacity[]  // how MUCH (verified per-network)
@@ -534,14 +536,59 @@ registering → active → suspended → decommissioned
 
 **Invariants:**
 
-- NR1. A resource is scoped to exactly one `networkId` and one
-  `participantId`.
+- NR1. (corrected) A `ResourceIdentity` has **no network scope** — it is a
+  globally-scoped resource identity. A `NetworkResourceMembership` binds one
+  resource to one network. A resource MAY have many memberships (one per
+  network it participates in). Each membership is governed by exactly one
+  `ParticipantMembership` (see §6.2.1).
 - NR2. A resource's capabilities and capacity are **verified** before
   `active` — self-reported numbers are not trusted (existing pattern:
-  `AssetNetworkAssignment.verifiedQuantity`).
-- NR3. A resource's `controlMode` determines the adapter selection at
-  execution time (existing: `AdapterRegistry.resolve` by assetType +
-  capabilityType; generalized to resourceKind + capability).
+  `AssetNetworkAssignment.verifiedQuantity`). Verification is per-membership
+  (a resource may have different verified capacities in different networks).
+- NR3. A resource's `controlMode` (per-membership) determines the adapter
+  selection at execution time (existing: `AdapterRegistry.resolve` by
+  assetType + capabilityType; generalized to resourceKind + capability).
+
+### 6.2.1 Resource-to-participant-membership binding (corrected)
+
+> **`NetworkResourceMembership` binds to `ParticipantMembershipId`, not to a
+> global participant identity.**
+
+**Why:** this prevents a resource in Network A from being accidentally
+governed by a participant role that only exists in Network B. It cleanly
+enforces the separation:
+
+```
+who controls the resource globally (ResourceIdentity.controllerId)
+        ≠
+which role/membership authorizes the resource in this network
+        ≠
+which network the resource participates in
+```
+
+This is critical for multi-network providers: the same physical resource may
+be controlled by the same global participant, but the **network-scoped
+authority** that authorizes its participation must be a membership in THAT
+network, not a global identity.
+
+**Revised `NetworkResourceMembership` (from §4.3):**
+
+```typescript
+interface NetworkResourceMembership {
+  membershipId              // per-network membership identity
+  resourceId                // FK to ResourceIdentity
+  networkId                 // the network this membership is in
+  participantMembershipId   // FK to ParticipantMembership (§5.2) — the
+                            // network-scoped authority that authorizes
+                            // this resource's participation
+  capabilities[]            // per-network
+  verifiedCapacity[]        // per-network, verified
+  controlMode               // per-network adapter selection
+  verificationProfile       // per-network
+  availability?             // per-network time windows
+  membershipStatus          // registering → active → suspended → withdrawn
+}
+```
 
 ### 6.3 Capability
 
@@ -612,19 +659,61 @@ For hybrid networks, this includes the Phase 11B reconciliation substrate:
 
 The spec does NOT modify this pipeline. It is frozen (Phase 11B accepted).
 
-### 6.6 Scheduler and AllocationDecision (revised — first-class control-plane concept)
+### 6.6 Scheduler, NetworkRequest, and AllocationDecision (revised — first-class control-plane concept)
 
 The original draft listed scheduling as a policy field inside the versioned
 bundle. That is insufficient. A network like AWS is valuable because the
 control plane doesn't merely store resources — it **decides placement and
 allocation**.
 
+#### 6.6.1 NetworkRequest (the actor-neutral scheduler input)
+
+**`[NEW]`** The control plane needs an explicit generic request abstraction
+that causes scheduling. Requests differ radically across verticals:
+
+```
+GPU:        8 GPU for 4 hours
+Storage:    50 TB for 30 days
+Wireless:   500 Mbps + <20ms + 99.9%
+Construction: 500 m³ earth movement before deadline with quality constraint
+Blockchain: produce N blocks with finality SLA
+```
+
+The `NetworkRequest` is the universal input to the scheduler — **actor-neutral**,
+not buyer-specific:
+
+```typescript
+interface NetworkRequest {
+  requestId                // content-addressed or UUID
+  requesterMembershipId    // FK to ParticipantMembership (§5.2) — the
+                           // network-scoped authority making the request
+  networkId                // the network this request is in
+  capabilityRequirements[] // what capabilities are needed
+  timeWindow               // when the capability is needed
+  constraints              // additional SLA/quality constraints (§6.7)
+  priority?                // from the scheduling policy
+  idempotencyKey           // for idempotent submission
+  status                   // pending → scheduled → fulfilled | rejected | expired
+  submittedAt
+}
+```
+
+**Why `requesterMembershipId` (not global participant):** a request is
+authorized by the requester's **network-scoped membership**, not by a global
+identity. This is the same invariant as `NetworkResourceMembership` binding
+to `ParticipantMembershipId` (§6.2.1) — it prevents cross-network authority
+leakage.
+
+#### 6.6.2 AllocationDecision (the scheduler's output)
+
 **`[NEW]`** The universal network OS needs a semantic distinction between:
 
 ```
 Capacity (what exists)
     ↓
-Allocation (a scheduling decision about who gets what)
+NetworkRequest (what is needed — actor-neutral)
+    ↓
+AllocationDecision (a scheduling decision about who gets what)
     ↓
 Reservation / Commitment (the booked capacity)
     ↓
@@ -637,28 +726,29 @@ Execution
 
 ```typescript
 interface AllocationDecision {
-  decisionId         // content-addressed or UUID
-  networkId          // the network this decision is in
-  requestId          // the consumer request that triggered scheduling
-  candidateResources[] // the resources the scheduler considered
-  selectedMembershipId // the chosen resource's network membership
-  allocatedCapacity  // how much of which capability
-  allocationWindow   // time window
-  priority?          // from the scheduling policy
-  fairnessScore?     // from the scheduling policy
+  decisionId            // content-addressed or UUID
+  networkId             // the network this decision is in
+  requestId             // FK to NetworkRequest (§6.6.1) that triggered scheduling
+  candidateMemberships[] // the resource memberships the scheduler considered
+  selectedMembershipId  // the chosen resource's NetworkResourceMembership
+  allocatedCapacity     // how much of which capability
+  allocationWindow      // time window
+  priority?             // from the scheduling policy
+  fairnessScore?        // from the scheduling policy
+  schedulerVersion      // for reproducibility (§12 criterion 21)
   decidedAt
-  expiresAt          // the decision must be acted on before this or it lapses
+  expiresAt             // the decision must be acted on before this or it lapses
 }
 ```
 
 **Flow:**
 
 ```
-Consumer Request
+NetworkRequest (actor-neutral — §6.6.1)
     ↓
 Scheduler (applies schedulingPolicy from NetworkVersion)
     ↓
-Candidate Resources (filtered by capability, capacity, availability)
+Candidate Resource Memberships (filtered by capability, capacity, availability)
     ↓
 AllocationDecision (the scheduler's choice)
     ↓
@@ -666,6 +756,21 @@ Reservation / Commitment (created from the decision)
     ↓
 ExecutionAssignment (the kernel's assignment)
 ```
+
+**Request isolation invariant:**
+
+> A requester cannot cause an allocation decision outside the permissions/
+> constraints of its network membership. The scheduler MUST verify the
+> `requesterMembershipId` is `active` and authorized for the requested
+> capabilities before producing an `AllocationDecision`.
+
+**Allocation reproducibility invariant:**
+
+> Given the same (`NetworkVersion`, `NetworkRequest`, `ResourceMembership`
+> state), the scheduler's decision must either be **deterministic** or
+> explicitly **version its non-deterministic policy** (recorded in
+> `AllocationDecision.schedulerVersion`). This is critical once fairness/
+> priority enters the system — decisions must be auditable and reproducible.
 
 **Why first-class:** without an explicit `AllocationDecision`, "launching a
 network" still means registering resources, not actually operating a network.
@@ -678,7 +783,7 @@ The scheduler is what makes the network a coordinator, not just a registry.
 > capacity limits atomically (using the same OCC/unique-constraint discipline
 > as the Phase 11B reconciliation substrate).
 
-### 6.7 ServiceCommitment (multi-dimensional capability constraints)
+### 6.7 ServiceCommitment (multi-dimensional — capacity vs service constraints)
 
 The original draft said the existing scalar `Capability.fieldsJson` plus
 policy are sufficient for multi-dimensional commitments (e.g., Telecom/Edge:
@@ -700,31 +805,55 @@ AND 99.9% availability
 AND 4 hours duration
 ```
 
-These are different dimensions with partly different semantics (a latency
-SLA is not a capacity quantity).
+These are different dimensions with partly different semantics. Critically,
+**not every constraint consumes capacity.** A bandwidth constraint is a
+capacity constraint; a latency or quality constraint is a service-level
+constraint that does not deplete `CapacityResource.remainingAmount`.
 
 **`[NEW]`** The spec defines:
 
 > **Scalar capacity remains the kernel primitive. Multi-dimensional service
-> commitments are composed from multiple capability constraints.**
+> commitments are composed from multiple constraints, distinguished into
+> CapacityConstraints (which deplete capacity) and ServiceConstraints
+> (which are SLA-level and do not deplete capacity).**
 
 ```typescript
 interface ServiceCommitment {
   commitmentId
   networkId
-  constraints[]     // multiple CapabilityConstraint entries
+  constraints[]     // multiple CommitmentConstraint entries
   durationWindow    // time window
   status            // active → fulfilled | violated | expired
 }
 
-interface CapabilityConstraint {
+// Common base for all constraints:
+interface CommitmentConstraint {
   constraintId
   commitmentId      // FK to ServiceCommitment
-  capabilityType    // bandwidth | latency | availability | ...
+  kind              // 'capacity' | 'service'
+  verificationMethod // how this constraint is verified
+  status            // pending → verified | violated
+}
+
+// A capacity constraint depletes CapacityResource (bandwidth, GPU, TB, kW).
+interface CapacityConstraint extends CommitmentConstraint {
+  kind: 'capacity'
+  capabilityType    // bandwidth | compute | storage | energy | ...
+  operator          // >= | <= | ==
+  threshold         // the capacity value
+  unit              // Mbps | GPU | TB | kW | ...
+  capacitySourceId  // FK to the CapacityResource this depletes
+}
+
+// A service constraint is SLA-level and does NOT deplete capacity
+// (latency, availability, quality grade, jitter, etc.).
+interface ServiceConstraint extends CommitmentConstraint {
+  kind: 'service'
+  serviceType       // latency | availability | quality | jitter | ...
   operator          // >= | <= | ==
   threshold         // the SLA value
-  unit              // Mbps | ms | % | ...
-  verificationMethod // how this constraint is verified
+  unit              // ms | % | grade | ...
+  slaPolicyRef      // reference to the SLA verification policy
 }
 ```
 
@@ -732,16 +861,16 @@ interface CapabilityConstraint {
 
 ```
 ServiceCommitment
- ├── bandwidth >= 500 Mbps    (verified via throughput measurement)
- ├── latency <= 20 ms        (verified via latency probing)
- ├── availability >= 99.9%   (verified via uptime measurement)
- └── duration = 4h           (the commitment window)
+ ├── CapacityConstraint: bandwidth >= 500 Mbps  (depletes CapacityResource)
+ ├── ServiceConstraint:  latency <= 20 ms       (SLA, no capacity depletion)
+ ├── ServiceConstraint:  availability >= 99.9%  (SLA, no capacity depletion)
+ └── duration = 4h                             (the commitment window)
 ```
 
 This preserves kernel neutrality (the scalar `CapacityResource`/`CapacityCommitment`
 models are unchanged) without pretending a scalar capacity record can represent
-an SLA. Multi-dimensional commitments are a control-plane composition over
-scalar capabilities.
+an SLA — and without forcing latency or quality into `CapacityResource`, which
+would incorrectly deplete capacity for non-capacity constraints.
 
 **Verification:** each constraint has its own `verificationMethod`. The
 overall `ServiceCommitment` is `fulfilled` only if ALL constraints are
@@ -785,15 +914,47 @@ interface NetworkLaunch {
 }
 ```
 
-**Atomicity invariant:**
+**Atomicity invariant (with control-plane boundary):**
 
 > The launch either succeeds as a valid network environment (ACTIVE) or
 > remains a draft. A network cannot become ACTIVE with incomplete
 > policy/runtime/resource configuration.
 
-If any step fails (e.g., reward policy is invalid), the entire launch fails
-and the network stays in `draft` status. No partial networks. This is central
-to the "launch a platform on AWS" objective.
+**Scope of atomicity (corrected — control-plane boundary):**
+
+The `NetworkLaunch` transaction can atomically create **control-plane
+configuration** inside one database transaction:
+
+```
+Network
+NetworkVersion
+Capability records
+RewardRules
+Participant policy
+Scheduling policy
+```
+
+It **cannot** atomically make external participants, physical resources, or
+adapters operational. Those are a **separate lifecycle**:
+
+```
+NetworkLaunch transaction
+    ↓
+control-plane configuration becomes ACTIVE atomically
+
+External resource onboarding (participants join, resources register,
+adapters connect)
+    ↓
+separate lifecycle, not part of the launch transaction
+```
+
+This keeps the network-launch guarantee physically realistic: the control
+plane is active and consistent, but external onboarding happens after, via
+the participant/resource membership lifecycles (§5, §6.2).
+
+If any control-plane step fails (e.g., reward policy is invalid), the entire
+launch fails and the network stays in `draft` status. No partial control-plane
+configurations. This is central to the "launch a platform on AWS" objective.
 
 ---
 
@@ -1216,6 +1377,18 @@ Phase 12B (implementation) is complete when:
     protocol-kind resources, separate from `InfrastructureAdapter` (§7.8).
     Verified by architecture test that protocol-kind resources resolve to
     `ProtocolResourceAdapter`, not `InfrastructureAdapter`.
+20. **`[NEW]`** **Request isolation:** a requester cannot cause an allocation
+    decision outside the permissions/constraints of its network membership.
+    The scheduler verifies `requesterMembershipId` is `active` and authorized
+    before producing an `AllocationDecision` (§6.6). Verified by test: a
+    requester with a suspended consumer role cannot trigger allocation.
+21. **`[NEW]`** **Allocation reproducibility:** given the same
+    (`NetworkVersion`, `NetworkRequest`, `ResourceMembership` state), the
+    scheduler's decision is either deterministic or explicitly versions its
+    non-deterministic policy via `AllocationDecision.schedulerVersion` (§6.6).
+    Verified by test: replaying the same request+state produces the same
+    decision, or records a different `schedulerVersion` if the policy
+    changed.
 
 ---
 
@@ -1230,20 +1403,25 @@ Phase 12A (this document, revised): universal network control plane specificatio
     - Rule: control plane may add generic objects; may NOT add vertical-specific
       kernel primitives
     - Architecture: Network → Participants → Resources → Capabilities →
-      Capacity → Allocation → Reservation → Commitment → Assignment →
-      Execution → Evidence → Verification → Contribution → Reward → Settlement
+      Capacity → NetworkRequest → AllocationDecision → Reservation →
+      Commitment → Assignment → Execution → Evidence → Verification →
+      Contribution → Reward → Settlement
     - ResourceIdentity + NetworkResourceMembership (multi-network, generalizes
-      Asset + AssetNetworkAssignment)
+      Asset + AssetNetworkAssignment; binds to ParticipantMembershipId)
     - ParticipantIdentity + ParticipantMembership + ParticipantRole (roles
       separated from membership)
-    - AllocationDecision (first-class scheduler output)
-    - ServiceCommitment (multi-dimensional capability constraints)
-    - NetworkLaunch (atomic control-plane operation)
+    - NetworkRequest (actor-neutral scheduler input, authorized by
+      requesterMembershipId)
+    - AllocationDecision (first-class scheduler output, reproducible)
+    - ServiceCommitment (CapacityConstraint vs ServiceConstraint — capacity
+      depletes; SLA does not)
+    - NetworkLaunch (atomic control-plane operation; external onboarding is
+      a separate lifecycle)
     - ProtocolResourceAdapter (separate from InfrastructureAdapter)
     - Every vertical is a network configuration, not a product
     - Marketplace-neutral, payment-rail-neutral
     ↓
-Phase 12B: implement the control plane (19 completeness criteria)
+Phase 12B: implement the control plane (21 completeness criteria)
 Phase 12C: prove physical verticals (Energy, Compute, Storage, Wireless)
 Phase 12D: prove service networks (Telecom/Edge, Construction, Industrial)
 Phase 12E: protocol/blockchain networks (ProtocolRuntime + ProtocolResourceAdapter + multi-node transport)
@@ -1259,7 +1437,7 @@ The next audit target is this document. It should be reviewed for:
 - Is the "no vertical-specific kernel services" rule (§2) precise enough
   (control plane may add generic objects; may not add vertical-specific
   kernel primitives)?
-- Are the 19 completeness criteria (§12) sufficient to gate Phase 12B,
+- Are the 21 completeness criteria (§12) sufficient to gate Phase 12B,
   including launch atomicity, multi-network sharing, scheduler correctness,
   and multi-dimensional commitments?
 - Does the `ProtocolResourceAdapter` vs `InfrastructureAdapter` split (§7.8)
