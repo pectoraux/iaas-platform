@@ -27,6 +27,7 @@
 // kernel's NetworkRuntime.
 // =============================================================================
 
+import { createHash } from 'crypto'
 import type {
   NetworkRequest,
   ParticipantMembership,
@@ -155,7 +156,7 @@ export function schedule(input: SchedulerInput): SchedulerResult {
   if (eligible.length === 0) {
     return {
       status: 'no_candidates',
-      reason: 'No eligible resource memberships满足 the request (capability, capacity, availability, or network scope)',
+      reason: 'No eligible resource memberships satisfy the request (capability, capacity, availability, or network scope)',
     }
   }
 
@@ -164,7 +165,6 @@ export function schedule(input: SchedulerInput): SchedulerResult {
 
   // 5. Select the first eligible candidate.
   const selected = eligible[0]
-  const remaining = input.remainingCapacity.get(selected.membershipId) ?? []
 
   // 6. Compute the allocated capacity (the requested amounts).
   const allocatedCapacity: CapacityEntry[] = request.capabilityRequirements.map((req) => ({
@@ -173,20 +173,43 @@ export function schedule(input: SchedulerInput): SchedulerResult {
     unit: req.unit,
   }))
 
-  // 7. Compute the decisionSnapshotHash (§8.7).
+  // 7. Compute the decisionSnapshotHash (§8.7) from the FULL AUTHORITATIVE
+  //    snapshot — ALL candidate memberships + ALL their capacity states.
+  //    PHASE 12B CORRECTION: the original passed only the selected resource's
+  //    capacity. That was insufficient — a non-selected candidate's capacity
+  //    change could alter the candidate set without changing the hash. Now
+  //    the hash covers every candidate and every capacity state.
   const decisionSnapshotHash = computeDecisionSnapshotHash({
     networkVersionId: input.networkVersionId,
     request,
-    resourceMemberships: candidateMemberships,
-    capacityState: remaining,
+    candidateMemberships: candidateMemberships,
+    capacityStateByMembership: input.remainingCapacity,
   })
 
-  // 8. Build the AllocationDecision.
+  // 8. Compute the deterministic decisionId (§8.7 — reproducibility).
+  //    PHASE 12B CORRECTION: the original used a timestamp, making the
+  //    decision non-deterministic. The decisionId is now a SHA-256 of the
+  //    decision's semantic content — same inputs → same decisionId.
+  const decisionId = computeDecisionId({
+    networkId: request.networkId,
+    requestId: request.requestId,
+    selectedMembershipId: selected.membershipId,
+    allocatedCapacity,
+    allocationWindow: request.timeWindow,
+    schedulerVersion: SCHEDULER_VERSION,
+    decisionSnapshotHash,
+  })
+
+  // 9. decidedAt/expiresAt are execution-time fields, NOT part of the
+  //    reproducibility identity. Two decisions with the same semantic content
+  //    have the same decisionId but may have different decidedAt (they were
+  //    computed at different wall-clock times). The reproducibility invariant
+  //    is about the decision IDENTITY, not the execution timestamp.
   const decidedAt = new Date()
   const expiresAt = new Date(decidedAt.getTime() + 5 * 60 * 1000) // 5-minute decision TTL
 
   const decision: AllocationDecision = {
-    decisionId: `alloc-${selected.membershipId}-${decidedAt.getTime()}`,
+    decisionId,
     networkId: request.networkId,
     requestId: request.requestId,
     candidateMemberships: eligible.map((m) => m.membershipId),
@@ -202,6 +225,44 @@ export function schedule(input: SchedulerInput): SchedulerResult {
   }
 
   return { status: 'allocated', decision }
+}
+
+/**
+ * Compute a deterministic decisionId (§8.7 — reproducibility).
+ *
+ * The decisionId is SHA-256 of the decision's semantic content:
+ *   (networkId, requestId, selectedMembershipId, allocatedCapacity,
+ *    allocationWindow, schedulerVersion, decisionSnapshotHash)
+ *
+ * This ensures two decisions with the same inputs produce the same decisionId.
+ * The decidedAt/expiresAt are execution-time fields, not part of the identity.
+ *
+ * PURE: same inputs → same decisionId.
+ */
+function computeDecisionId(input: {
+  networkId: string
+  requestId: string
+  selectedMembershipId: string
+  allocatedCapacity: CapacityEntry[]
+  allocationWindow: { start: Date; end: Date }
+  schedulerVersion: string
+  decisionSnapshotHash: string
+}): string {
+  const canonical = JSON.stringify({
+    networkId: input.networkId,
+    requestId: input.requestId,
+    selectedMembershipId: input.selectedMembershipId,
+    allocatedCapacity: input.allocatedCapacity
+      .map((c) => ({ ...c }))
+      .sort((a, b) => a.capabilityType.localeCompare(b.capabilityType)),
+    allocationWindow: {
+      start: input.allocationWindow.start.toISOString(),
+      end: input.allocationWindow.end.toISOString(),
+    },
+    schedulerVersion: input.schedulerVersion,
+    decisionSnapshotHash: input.decisionSnapshotHash,
+  })
+  return createHash('sha256').update(canonical).digest('hex')
 }
 
 // ---------------------------------------------------------------------------

@@ -330,20 +330,35 @@ export function authorizeRequest(
 /**
  * Compute the decision snapshot hash for reproducibility (§8.7).
  *
- * The hash is SHA-256 of the canonical snapshot:
- *   (NetworkVersion, NetworkRequest, ResourceMembership state, Capacity state,
- *    Availability state)
+ * The hash is SHA-256 of the FULL AUTHORITATIVE snapshot:
+ *   (NetworkVersion, NetworkRequest, ALL candidate ResourceMemberships,
+ *    ALL candidate capacity states, Availability state)
+ *
+ * PHASE 12B CORRECTION (defect from audit): the original implementation
+ * passed only the SELECTED resource's capacity state. That was insufficient
+ * — if a non-selected candidate's capacity changed, the candidate set could
+ * change, but the hash would remain the same. The hash MUST cover the
+ * complete authoritative snapshot used for the decision, including all
+ * candidates and all their capacity states.
  *
  * Given the same snapshot + schedulerVersion, the scheduler MUST produce the
  * same decision. The hash makes the decision's inputs auditable.
  *
  * PURE: same inputs → same hash.
+ *
+ * @param snapshot.networkVersionId — the NetworkVersion that defines the policy.
+ * @param snapshot.request — the NetworkRequest being scheduled.
+ * @param snapshot.candidateMemberships — ALL candidate resource memberships
+ *   considered by the scheduler (the full set, not just the selected one).
+ * @param snapshot.capacityStateByMembership — the remaining capacity for
+ *   EVERY candidate membership, keyed by membershipId. This is the full
+ *   capacity snapshot, not just the selected resource's capacity.
  */
 export function computeDecisionSnapshotHash(snapshot: {
   networkVersionId: string
   request: NetworkRequest
-  resourceMemberships: NetworkResourceMembership[]
-  capacityState: CapacityEntry[]
+  candidateMemberships: NetworkResourceMembership[]
+  capacityStateByMembership: Map<string, CapacityEntry[]>
 }): string {
   const canonical = canonicalize({
     networkVersionId: snapshot.networkVersionId,
@@ -355,7 +370,8 @@ export function computeDecisionSnapshotHash(snapshot: {
       start: snapshot.request.timeWindow.start.toISOString(),
       end: snapshot.request.timeWindow.end.toISOString(),
     },
-    resourceMemberships: snapshot.resourceMemberships
+    // ALL candidate memberships, sorted deterministically.
+    candidateMemberships: snapshot.candidateMemberships
       .map((m) => ({
         membershipId: m.membershipId,
         resourceId: m.resourceId,
@@ -364,11 +380,18 @@ export function computeDecisionSnapshotHash(snapshot: {
           a.capabilityType.localeCompare(b.capabilityType),
         ),
         membershipStatus: m.membershipStatus,
+        // The remaining capacity for THIS membership — the full snapshot.
+        remainingCapacity: (snapshot.capacityStateByMembership.get(m.membershipId) ?? [])
+          .map((c) => ({ ...c }))
+          .sort((a, b) => a.capabilityType.localeCompare(b.capabilityType)),
+        availability: m.availability
+          ? {
+              start: m.availability.start.toISOString(),
+              end: m.availability.end.toISOString(),
+            }
+          : null,
       }))
       .sort((a, b) => a.membershipId.localeCompare(b.membershipId)),
-    capacityState: snapshot.capacityState
-      .map((c) => ({ ...c }))
-      .sort((a, b) => a.capabilityType.localeCompare(b.capabilityType)),
   })
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
 }

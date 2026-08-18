@@ -277,11 +277,113 @@ describe('Phase 12B §8.7: Scheduler reproducibility', () => {
     expect(result1.status).toBe('allocated')
     expect(result2.status).toBe('allocated')
     if (result1.status === 'allocated' && result2.status === 'allocated') {
-      // Same decision (deterministic).
+      // Same decision (deterministic) — including decisionId (§8.7 fix).
       expect(result2.decision.selectedMembershipId).toBe(result1.decision.selectedMembershipId)
       expect(result2.decision.decisionSnapshotHash).toBe(result1.decision.decisionSnapshotHash)
       expect(result2.decision.schedulerVersion).toBe(result1.decision.schedulerVersion)
       expect(result2.decision.schedulerVersion).toBe(SCHEDULER_VERSION)
+      // PHASE 12B FIX: decisionId is now deterministic (SHA-256 of semantic
+      // content, not a timestamp). Same inputs → same decisionId.
+      expect(result2.decision.decisionId).toBe(result1.decision.decisionId)
+    }
+  })
+
+  it('decisionId is deterministic (SHA-256 of semantic content, not timestamp)', () => {
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+    })
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+    const candidate = makeMembership('rm-gpu-1', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }])
+    const remaining = new Map([['rm-gpu-1', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]]])
+    const authorizing = new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]])
+
+    const input = {
+      networkVersionId: VERSION_1,
+      request,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      remainingCapacity: remaining,
+      authorizingMemberships: authorizing,
+    }
+
+    const result1 = schedule(input)
+    const result2 = schedule(input)
+
+    expect(result1.status).toBe('allocated')
+    expect(result2.status).toBe('allocated')
+    if (result1.status === 'allocated' && result2.status === 'allocated') {
+      // decisionId is a 64-char SHA-256 hex, not a timestamp-based string.
+      expect(result1.decision.decisionId).toMatch(/^[a-f0-9]{64}$/)
+      // Same inputs → same decisionId (deterministic).
+      expect(result2.decision.decisionId).toBe(result1.decision.decisionId)
+      // decidedAt may differ (execution-time field), but decisionId does not.
+      // This is the §8.7 reproducibility invariant.
+    }
+  })
+
+  it('decisionSnapshotHash changes when a NON-SELECTED candidate\'s capacity changes', () => {
+    // PHASE 12B FIX (defect 2): the snapshot hash must cover ALL candidates'
+    // capacity, not just the selected one. If a non-selected candidate's
+    // capacity changes, the hash must change.
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+    })
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+
+    // Two candidates: A wins (sorted first), B is non-selected.
+    const candidateA = makeMembership('rm-gpu-a', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }])
+    const candidateB = makeMembership('rm-gpu-b', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }])
+
+    const authorizing = new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]])
+
+    // Snapshot 1: B has 8 GPU.
+    const result1 = schedule({
+      networkVersionId: VERSION_1,
+      request,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidateA, candidateB],
+      remainingCapacity: new Map([
+        ['rm-gpu-a', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]],
+        ['rm-gpu-b', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]],
+      ]),
+      authorizingMemberships: authorizing,
+    })
+
+    // Snapshot 2: B's capacity changed to 0 (non-selected candidate).
+    const result2 = schedule({
+      networkVersionId: VERSION_1,
+      request,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidateA, candidateB],
+      remainingCapacity: new Map([
+        ['rm-gpu-a', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]],
+        ['rm-gpu-b', [{ capabilityType: 'compute', amount: '0', unit: 'GPU' }]], // changed!
+      ]),
+      authorizingMemberships: authorizing,
+    })
+
+    expect(result1.status).toBe('allocated')
+    expect(result2.status).toBe('allocated')
+    if (result1.status === 'allocated' && result2.status === 'allocated') {
+      // The selected resource is the same (A wins in both), but the snapshot
+      // hash MUST differ because B's capacity changed. This is the full
+      // authoritative snapshot invariant (§8.7).
+      expect(result2.decision.decisionSnapshotHash).not.toBe(result1.decision.decisionSnapshotHash)
+      // And the decisionId differs too (it includes the snapshot hash).
+      expect(result2.decision.decisionId).not.toBe(result1.decision.decisionId)
     }
   })
 
@@ -294,18 +396,20 @@ describe('Phase 12B §8.7: Scheduler reproducibility', () => {
       idempotencyKey: 'key-1',
     })
 
+    const candidate = makeMembership('rm-1', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }])
+
     const hash1 = computeDecisionSnapshotHash({
       networkVersionId: VERSION_1,
       request,
-      resourceMemberships: [makeMembership('rm-1', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }])],
-      capacityState: [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }],
+      candidateMemberships: [candidate],
+      capacityStateByMembership: new Map([['rm-1', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]]]),
     })
 
     const hash2 = computeDecisionSnapshotHash({
       networkVersionId: VERSION_1,
       request,
-      resourceMemberships: [makeMembership('rm-1', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }])],
-      capacityState: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      candidateMemberships: [candidate],
+      capacityStateByMembership: new Map([['rm-1', [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }]]]),
     })
 
     expect(hash1).not.toBe(hash2)

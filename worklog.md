@@ -3176,3 +3176,20 @@ Stage Summary:
 - The scheduler is deterministic, vertical-neutral, and enforces: Network Scope Integrity (§8.6), request isolation (§6.6), reproducibility via decisionSnapshotHash (§8.7), capacity correctness, and the capacity-vs-service constraint distinction (§6.7).
 - 20/20 tests pass. 108/108 total (with phase-11b + phase-10 + architecture). eslint clean. tsc clean. Dev server HTTP 200.
 - Next slices: persistence (DB models), control-plane API endpoints, NetworkLaunch, kernel integration (the scheduler produces AllocationDecisions that the API translates into NetworkRuntime.createExecution + createExecutionAssignment).
+
+---
+Task ID: 12B-slice-1-fix
+Agent: main (Z.ai Code)
+Task: Fix the two load-bearing reproducibility defects in 902348b (the scheduler's decisionId was timestamp-based, and the decisionSnapshotHash only covered the selected resource's capacity). Also fix the stray non-English character.
+
+Work Log:
+- Defect 1 (non-deterministic decisionId): the original used `alloc-${selected.membershipId}-${decidedAt.getTime()}` — a timestamp. Two runs with the same inputs produced different decisionId/decidedAt/expiresAt. FIX: decisionId is now SHA-256 of the decision's semantic content (networkId, requestId, selectedMembershipId, allocatedCapacity, allocationWindow, schedulerVersion, decisionSnapshotHash). decidedAt/expiresAt are execution-time fields, explicitly NOT part of the reproducibility identity. Added computeDecisionId helper. Added test: "decisionId is deterministic (SHA-256 of semantic content, not timestamp)" — asserts decisionId is a 64-char hex and same inputs → same decisionId.
+- Defect 2 (incomplete snapshot hash): the original computeDecisionSnapshotHash received `capacityState: CapacityEntry[]` (a flat array) and the scheduler passed only the SELECTED resource's remaining capacity. If a non-selected candidate's capacity changed, the candidate set could change but the hash would not. FIX: computeDecisionSnapshotHash now takes `candidateMemberships: NetworkResourceMembership[]` + `capacityStateByMembership: Map<string, CapacityEntry[]>` — the FULL authoritative snapshot covering ALL candidates and ALL their capacity states. Each candidate's remaining capacity is included in the canonical hash. Added test: "decisionSnapshotHash changes when a NON-SELECTED candidate's capacity changes" — two candidates (A wins, B non-selected), B's capacity changes from 8→0, the hash changes even though the selection is the same.
+- Defect 3 (stray character): fixed the rejection string from "memberships满足" to "memberships satisfy".
+- VERIFICATION: tsc zero errors. eslint clean. 22/22 phase-12b tests pass (was 20; added 2 new reproducibility tests). 110/110 total. Dev server HTTP 200.
+
+Stage Summary:
+- Both reproducibility defects fixed. The scheduler is now genuinely deterministic: same (NetworkVersion, NetworkRequest, full candidate snapshot, schedulerVersion) → same decisionId + same decisionSnapshotHash.
+- The decisionSnapshotHash covers the FULL authoritative snapshot (all candidates + all capacity states), not just the selected resource.
+- 22/22 tests pass. 110/110 total. eslint clean. tsc clean. Dev server HTTP 200.
+- Phase 12B slice 1 is now complete. Next: persistence (DB models) + control-plane API + kernel integration.
