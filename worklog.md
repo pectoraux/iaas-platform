@@ -3212,3 +3212,22 @@ Stage Summary:
 - The scheduler evaluates ServiceConstraints (not just scalar capacity) — a candidate that satisfies bandwidth but not latency is filtered out.
 - The scheduler checks authorizing membership status === 'active' — a suspended authority makes the candidate ineligible.
 - 28/28 tests pass. 116/116 total. eslint clean. tsc clean. Dev server HTTP 200.
+
+---
+Task ID: 12B-slice-1-fix-3
+Agent: main (Z.ai Code)
+Task: Fix the three deeper constraint defects from the audit of e15f667: (1) ServiceConstraint semantics not actually evaluated (only type-checked), (2) full constraint semantics missing from snapshot hash, (3) evaluator not versioned.
+
+Work Log:
+- Defect 1 (real ServiceConstraint evaluation): added ConstraintObservationSnapshot (declared/policy-backed observed values: latency:14ms, availability:99.95%, etc.). The evaluator now receives actual observed values and evaluates operator + threshold correctly — not just whether the verificationProfile contains the service type string. Added evaluateConstraint helper: numeric comparison (latency <= 20 → 35ms fails) + string comparison (quality == grade-A). If no observation for a serviceType, the candidate is filtered (cannot prove SLA). Added observationSnapshots to SchedulerInput. Added 4 tests: filters by observed latency exceeding threshold, accepts by observed latency satisfying threshold, distinguishes <= 20ms from <= 200ms (same resource, different thresholds → different eligibility), filters candidate with no observation snapshot.
+- Defect 2 (full constraint semantics in hash): computeDecisionSnapshotHash now includes ALL constraint fields: serviceType, operator, threshold, unit, slaPolicyRef (for ServiceConstraint) and capabilityType, operator, threshold, unit, capacitySourceId (for CapacityConstraint). Previously only constraintId, kind, verificationMethod, status were hashed. Two constraints differing only in threshold now produce different hashes.
+- Defect 3 (evaluator versioning): ConstraintEvaluator now has evaluatorVersion. AllocationDecision has evaluatorVersion. computeDecisionId includes evaluatorVersion. Two callers using different evaluator implementations (same scheduler version but different evaluator versions) produce different decisionIds. DefaultConstraintEvaluator.evaluatorVersion = 'default-evaluator-v1'.
+- VERIFICATION: tsc zero errors. eslint clean. 30/30 phase-12b tests pass (was 28; added 2 new semantic evaluation tests + replaced 2 old type-checking tests). 118/118 total. Dev server HTTP 200.
+
+Stage Summary:
+- All three deeper constraint defects fixed. The constraint model is now semantically real:
+  - The evaluator evaluates operator + threshold against observed values (not just type-checking).
+  - The snapshot hash includes full constraint semantics (serviceType, operator, threshold, unit, slaPolicyRef).
+  - The evaluator is versioned (evaluatorVersion in AllocationDecision + decisionId).
+- The scheduler's canonical identity is now complete: NetworkVersion + NetworkRequest (incl priority + full constraints) + ALL candidate resource/capacity/observation snapshot + ALL authorizing membership states + schedulerVersion + evaluatorVersion.
+- 30/30 tests pass. 118/118 total. eslint clean. tsc clean. Dev server HTTP 200.

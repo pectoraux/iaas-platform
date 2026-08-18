@@ -31,6 +31,7 @@ import type {
   NetworkRequest,
   CapacityEntry,
   ServiceConstraint,
+  ConstraintObservationSnapshot,
 } from '../src/lib/control-plane'
 
 // ---------------------------------------------------------------------------
@@ -677,8 +678,9 @@ describe('Phase 12B defect 1 fix: priority in reproducibility identity', () => {
 // Defect 2 fix: constraint-aware scheduling
 // ---------------------------------------------------------------------------
 
-describe('Phase 12B defect 2 fix: constraint-aware scheduling', () => {
-  it('the scheduler filters out a candidate that does not satisfy a ServiceConstraint', () => {
+describe('Phase 12B defect 2 fix: constraint-aware scheduling (semantic evaluation)', () => {
+  it('the scheduler filters out a candidate whose observed latency exceeds the threshold', () => {
+    // latencypolicy: <= 20ms. Observed: 35ms. → VIOLATED.
     const latencyConstraint: ServiceConstraint = {
       constraintId: 'c-latency',
       kind: 'service',
@@ -702,8 +704,173 @@ describe('Phase 12B defect 2 fix: constraint-aware scheduling', () => {
     const roles = [makeRole('pm-consumer-a', 'consumer')]
 
     const candidate = makeMembership('rm-1', NETWORK_A, ['bandwidth'], [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }])
-    candidate.verificationProfile = 'throughput-only'
 
+    // Observation: latency = 35ms (exceeds the 20ms threshold).
+    const observations = new Map<string, ConstraintObservationSnapshot>([
+      ['rm-1', {
+        membershipId: 'rm-1',
+        observations: new Map([['latency', { value: '35', unit: 'ms' }]]),
+      }],
+    ])
+
+    const result = schedule({
+      networkVersionId: VERSION_1,
+      request,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      remainingCapacity: new Map([['rm-1', [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }]]]),
+      authorizingMemberships: new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]]),
+      observationSnapshots: observations,
+    })
+
+    expect(result.status).toBe('no_candidates')
+  })
+
+  it('the scheduler accepts a candidate whose observed latency satisfies the threshold', () => {
+    // latencypolicy: <= 20ms. Observed: 14ms. → SATISFIED.
+    const latencyConstraint: ServiceConstraint = {
+      constraintId: 'c-latency',
+      kind: 'service',
+      serviceType: 'latency',
+      operator: '<=',
+      threshold: '20',
+      unit: 'ms',
+      slaPolicyRef: 'sla-latency-v1',
+      verificationMethod: 'latency_probing',
+      status: 'pending',
+    }
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'bandwidth', amount: '500', unit: 'Mbps' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+      constraints: [latencyConstraint],
+    })
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+
+    const candidate = makeMembership('rm-1', NETWORK_A, ['bandwidth'], [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }])
+
+    // Observation: latency = 14ms (satisfies the 20ms threshold).
+    const observations = new Map<string, ConstraintObservationSnapshot>([
+      ['rm-1', {
+        membershipId: 'rm-1',
+        observations: new Map([['latency', { value: '14', unit: 'ms' }]]),
+      }],
+    ])
+
+    const result = schedule({
+      networkVersionId: VERSION_1,
+      request,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      remainingCapacity: new Map([['rm-1', [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }]]]),
+      authorizingMemberships: new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]]),
+      observationSnapshots: observations,
+    })
+
+    expect(result.status).toBe('allocated')
+  })
+
+  it('the scheduler distinguishes latency <= 20ms from latency <= 200ms (semantic evaluation)', () => {
+    // The same resource (latency: 35ms) satisfies <= 200ms but NOT <= 20ms.
+    // This proves the evaluator evaluates the THRESHOLD, not just the service type.
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+    const candidate = makeMembership('rm-1', NETWORK_A, ['bandwidth'], [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }])
+    const observations = new Map<string, ConstraintObservationSnapshot>([
+      ['rm-1', {
+        membershipId: 'rm-1',
+        observations: new Map([['latency', { value: '35', unit: 'ms' }]]),
+      }],
+    ])
+    const baseInput = {
+      networkVersionId: VERSION_1,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      remainingCapacity: new Map([['rm-1', [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }]]]),
+      authorizingMemberships: new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]]),
+      observationSnapshots: observations,
+    }
+
+    // Request A: latency <= 20ms → 35ms does NOT satisfy → no_candidates.
+    const constraint20: ServiceConstraint = {
+      constraintId: 'c-latency-20',
+      kind: 'service',
+      serviceType: 'latency',
+      operator: '<=',
+      threshold: '20',
+      unit: 'ms',
+      slaPolicyRef: 'sla-latency-v1',
+      verificationMethod: 'latency_probing',
+      status: 'pending',
+    }
+    const requestA = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'bandwidth', amount: '500', unit: 'Mbps' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-a',
+      constraints: [constraint20],
+    })
+    const resultA = schedule({ ...baseInput, request: requestA })
+    expect(resultA.status).toBe('no_candidates')
+
+    // Request B: latency <= 200ms → 35ms DOES satisfy → allocated.
+    const constraint200: ServiceConstraint = {
+      constraintId: 'c-latency-200',
+      kind: 'service',
+      serviceType: 'latency',
+      operator: '<=',
+      threshold: '200',
+      unit: 'ms',
+      slaPolicyRef: 'sla-latency-v1',
+      verificationMethod: 'latency_probing',
+      status: 'pending',
+    }
+    const requestB = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'bandwidth', amount: '500', unit: 'Mbps' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-b',
+      constraints: [constraint200],
+    })
+    const resultB = schedule({ ...baseInput, request: requestB })
+    expect(resultB.status).toBe('allocated')
+  })
+
+  it('the scheduler filters out a candidate with no observation snapshot', () => {
+    // If observationSnapshots is missing for a candidate, the scheduler cannot
+    // evaluate constraints → filters it out.
+    const latencyConstraint: ServiceConstraint = {
+      constraintId: 'c-latency',
+      kind: 'service',
+      serviceType: 'latency',
+      operator: '<=',
+      threshold: '20',
+      unit: 'ms',
+      slaPolicyRef: 'sla-latency-v1',
+      verificationMethod: 'latency_probing',
+      status: 'pending',
+    }
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'bandwidth', amount: '500', unit: 'Mbps' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+      constraints: [latencyConstraint],
+    })
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+    const candidate = makeMembership('rm-1', NETWORK_A, ['bandwidth'], [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }])
+
+    // No observationSnapshots provided → the scheduler cannot evaluate.
     const result = schedule({
       networkVersionId: VERSION_1,
       request,
@@ -715,45 +882,6 @@ describe('Phase 12B defect 2 fix: constraint-aware scheduling', () => {
     })
 
     expect(result.status).toBe('no_candidates')
-  })
-
-  it('the scheduler accepts a candidate that satisfies all ServiceConstraints', () => {
-    const latencyConstraint: ServiceConstraint = {
-      constraintId: 'c-latency',
-      kind: 'service',
-      serviceType: 'latency',
-      operator: '<=',
-      threshold: '20',
-      unit: 'ms',
-      slaPolicyRef: 'sla-latency-v1',
-      verificationMethod: 'latency_probing',
-      status: 'pending',
-    }
-    const request = createNetworkRequest({
-      requesterMembershipId: 'pm-consumer-a',
-      networkId: NETWORK_A,
-      capabilityRequirements: [{ capabilityType: 'bandwidth', amount: '500', unit: 'Mbps' }],
-      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
-      idempotencyKey: 'key-1',
-      constraints: [latencyConstraint],
-    })
-    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
-    const roles = [makeRole('pm-consumer-a', 'consumer')]
-
-    const candidate = makeMembership('rm-1', NETWORK_A, ['bandwidth'], [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }])
-    candidate.verificationProfile = 'latency+throughput'
-
-    const result = schedule({
-      networkVersionId: VERSION_1,
-      request,
-      requesterMembership: membership,
-      requesterRoles: roles,
-      candidateMemberships: [candidate],
-      remainingCapacity: new Map([['rm-1', [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }]]]),
-      authorizingMemberships: new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]]),
-    })
-
-    expect(result.status).toBe('allocated')
   })
 })
 

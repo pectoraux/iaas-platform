@@ -24,6 +24,7 @@ export type {
   ServiceConstraint,
   AllocationDecision,
   ConstraintEvaluator,
+  ConstraintObservationSnapshot,
 } from './types'
 
 export {

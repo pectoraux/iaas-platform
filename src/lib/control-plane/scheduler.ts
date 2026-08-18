@@ -37,6 +37,7 @@ import type {
   CapacityEntry,
   CapabilityRequirement,
   ConstraintEvaluator,
+  ConstraintObservationSnapshot,
 } from './types'
 import {
   authorizeRequest,
@@ -82,6 +83,18 @@ export interface SchedulerInput {
    * in the evidence/verification pipeline.
    */
   readonly constraintEvaluator?: ConstraintEvaluator
+  /**
+   * Constraint observation snapshots for each candidate membership, keyed
+   * by membershipId. These provide the declared/policy-backed values
+   * (latency: 14ms, availability: 99.95%, etc.) that the evaluator uses
+   * to determine whether a candidate satisfies the request's constraints.
+   *
+   * PHASE 12B FIX (defect from audit): the original evaluator only checked
+   * whether the candidate's verificationProfile contained the service type
+   * string — it ignored the threshold. Now the evaluator receives actual
+   * observed values and evaluates operator + threshold correctly.
+   */
+  readonly observationSnapshots?: Map<string, ConstraintObservationSnapshot>
 }
 
 /**
@@ -164,11 +177,19 @@ export function schedule(input: SchedulerInput): SchedulerResult {
     }
 
     // 3g. PHASE 12B FIX (defect 2): evaluate ServiceConstraints (latency,
-    // availability, quality, etc.). A candidate that satisfies bandwidth
-    // but not a latency constraint must be filtered out.
+    // availability, quality, etc.) using the observation snapshot. A candidate
+    // that satisfies bandwidth but not a latency constraint must be filtered.
+    // The evaluator now receives actual observed values and evaluates
+    // operator + threshold — not just type-checking.
     if (request.constraints) {
+      const observations = input.observationSnapshots?.get(membership.membershipId)
+      if (!observations) {
+        // No observation snapshot for this candidate → cannot evaluate
+        // constraints → filter out.
+        continue
+      }
       const allConstraintsSatisfied = request.constraints.every(
-        (constraint) => evaluator.evaluate(constraint, membership),
+        (constraint) => evaluator.evaluate(constraint, observations),
       )
       if (!allConstraintsSatisfied) {
         continue
@@ -233,6 +254,7 @@ export function schedule(input: SchedulerInput): SchedulerResult {
     allocationWindow: request.timeWindow,
     priority: request.priority,
     schedulerVersion: SCHEDULER_VERSION,
+    evaluatorVersion: evaluator.evaluatorVersion,
     decisionSnapshotHash,
   })
 
@@ -255,6 +277,7 @@ export function schedule(input: SchedulerInput): SchedulerResult {
     priority: request.priority,
     fairnessScore: 1.0 / (eligible.indexOf(selected) + 1), // simple fairness: 1/n
     schedulerVersion: SCHEDULER_VERSION,
+    evaluatorVersion: evaluator.evaluatorVersion,
     decisionSnapshotHash,
     decidedAt,
     expiresAt,
@@ -286,6 +309,7 @@ function computeDecisionId(input: {
   allocationWindow: { start: Date; end: Date }
   priority?: number
   schedulerVersion: string
+  evaluatorVersion: string
   decisionSnapshotHash: string
 }): string {
   const canonical = JSON.stringify({
@@ -299,9 +323,9 @@ function computeDecisionId(input: {
       start: input.allocationWindow.start.toISOString(),
       end: input.allocationWindow.end.toISOString(),
     },
-    // PHASE 12B FIX (defect 1): include priority in the decision identity.
     priority: input.priority ?? null,
     schedulerVersion: input.schedulerVersion,
+    evaluatorVersion: input.evaluatorVersion,
     decisionSnapshotHash: input.decisionSnapshotHash,
   })
   return createHash('sha256').update(canonical).digest('hex')

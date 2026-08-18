@@ -208,6 +208,7 @@ export interface AllocationDecision {
   readonly priority?: number
   readonly fairnessScore?: number
   readonly schedulerVersion: string
+  readonly evaluatorVersion: string // PHASE 12B FIX (defect 3): for reproducibility
   readonly decisionSnapshotHash: string // §8.7 — SHA-256 of the canonical snapshot
   readonly decidedAt: Date
   readonly expiresAt: Date
@@ -363,16 +364,40 @@ export function computeDecisionSnapshotHash(snapshot: {
     requesterMembershipId: snapshot.request.requesterMembershipId,
     networkId: snapshot.request.networkId,
     capabilityRequirements: snapshot.request.capabilityRequirements,
-    // PHASE 12B FIX (defect 1): include priority + constraints in the
-    // reproducibility identity. Two requests differing only in priority or
-    // constraints must produce different hashes.
     priority: snapshot.request.priority ?? null,
-    constraints: (snapshot.request.constraints ?? []).map((c) => ({
-      constraintId: c.constraintId,
-      kind: c.kind,
-      verificationMethod: c.verificationMethod,
-      status: c.status,
-    })).sort((a, b) => a.constraintId.localeCompare(b.constraintId)),
+    // PHASE 12B FIX (defect 1): include priority + FULL constraint semantics.
+    // The original omitted serviceType, operator, threshold, unit, slaPolicyRef.
+    // Two constraints differing only in threshold (latency <= 20 vs <= 200) would
+    // produce the same hash. Now ALL constraint fields are included.
+    constraints: (snapshot.request.constraints ?? []).map((c) => {
+      const base = {
+        constraintId: c.constraintId,
+        kind: c.kind,
+        verificationMethod: c.verificationMethod,
+        status: c.status,
+      }
+      if (c.kind === 'service') {
+        const sc = c as ServiceConstraint
+        return {
+          ...base,
+          serviceType: sc.serviceType,
+          operator: sc.operator,
+          threshold: sc.threshold,
+          unit: sc.unit,
+          slaPolicyRef: sc.slaPolicyRef,
+        }
+      }
+      // CapacityConstraint — include its fields too.
+      const cc = c as CapacityConstraint
+      return {
+        ...base,
+        capabilityType: cc.capabilityType,
+        operator: cc.operator,
+        threshold: cc.threshold,
+        unit: cc.unit,
+        capacitySourceId: cc.capacitySourceId,
+      }
+    }).sort((a, b) => a.constraintId.localeCompare(b.constraintId)),
     timeWindow: {
       start: snapshot.request.timeWindow.start.toISOString(),
       end: snapshot.request.timeWindow.end.toISOString(),
@@ -412,67 +437,159 @@ export function computeDecisionSnapshotHash(snapshot: {
 }
 
 // ---------------------------------------------------------------------------
-// Constraint evaluation contract (§6.7 — constraint-aware scheduling)
+// Constraint observation + evaluation (§6.7 — semantically real constraints)
 // ---------------------------------------------------------------------------
 
 /**
- * A constraint evaluator determines whether a candidate resource membership
- * satisfies a request's ServiceConstraints (latency, availability, quality,
- * etc.).
+ * A constraint observation snapshot — the declared/policy-backed values
+ * for a resource membership's service-level attributes (latency, availability,
+ * quality, jitter, etc.).
  *
- * This is a GENERIC contract — it does NOT contain vertical-specific
- * semantics. The evaluator is a policy predicate: given a constraint and a
- * candidate, it returns whether the candidate satisfies the constraint.
+ * PHASE 12B FIX (defect from audit): the original DefaultConstraintEvaluator
+ * only checked whether the candidate's verificationProfile CONTAINED the
+ * service type string — it ignored the operator/threshold/unit/slaPolicyRef.
+ * That was type-checking, not constraint evaluation. A request for
+ * `latency <= 20ms` and `latency <= 200ms` were treated identically.
  *
- * Vertical-specific measurement (throughput probing, latency measurement,
- * quality grading) happens LATER, in the verification/evidence pipeline.
- * The scheduler uses the evaluator only to FILTER candidates — it does not
- * verify SLAs; it checks whether the candidate's declared profile satisfies
- * the constraint thresholds.
+ * This snapshot provides the actual declared values so the evaluator can
+ * evaluate operator + threshold correctly:
+ *   `latency <= 20ms` requires an observed latency value ≤ 20.
  *
- * PHASE 12B: the default evaluator is a simple declared-profile check. A
- * real evaluator would consult measured evidence, but that's a later slice.
+ * The observations come from the resource's declared profile (not from
+ * real-time measurement — that happens in the evidence/verification pipeline).
+ * For scheduling, the declared/policy-backed values are sufficient to filter
+ * candidates.
  */
-export interface ConstraintEvaluator {
+export interface ConstraintObservationSnapshot {
+  /** The resource membership this snapshot is for. */
+  readonly membershipId: string
   /**
-   * Evaluate whether a candidate satisfies a constraint.
-   *
-   * @param constraint The constraint to evaluate.
-   * @param membership The candidate resource membership.
-   * @returns true if the candidate satisfies the constraint.
+   * Observed values keyed by serviceType (latency, availability, quality, etc.).
+   * Each value has a numeric/string value + unit.
    */
-  evaluate(constraint: CommitmentConstraint, membership: NetworkResourceMembership): boolean
+  readonly observations: Map<string, { value: string; unit: string }>
 }
 
 /**
- * The default constraint evaluator: checks the candidate's declared
- * verificationProfile and capabilities against the constraint.
+ * A constraint evaluator determines whether a candidate resource membership
+ * satisfies a request's constraints, given the candidate's observation snapshot.
  *
- * This is a MINIMAL evaluator — it does not measure SLAs. It filters
- * candidates whose declared profile does not match the constraint type.
- * Real SLA verification happens in the evidence/verification pipeline.
+ * This is a GENERIC contract — it does NOT contain vertical-specific semantics.
+ * The evaluator receives the constraint (with operator + threshold + unit) and
+ * the candidate's observed value for that service type, and evaluates whether
+ * the threshold is met.
  *
- * For CapacityConstraints: the scheduler already checks scalar capacity;
- * the evaluator is a no-op (returns true) — capacity is handled separately.
+ * PHASE 12B FIX: the evaluator now receives ConstraintObservationSnapshot
+ * (actual values), not just the membership. It evaluates operator + threshold
+ * against the observed value. And it has a version (evaluatorVersion) for
+ * reproducibility.
+ */
+export interface ConstraintEvaluator {
+  /** The evaluator version — recorded in the AllocationDecision for reproducibility. */
+  readonly evaluatorVersion: string
+
+  /**
+   * Evaluate whether a candidate satisfies a constraint, given its
+   * observation snapshot.
+   *
+   * @param constraint The constraint to evaluate (with operator, threshold, unit).
+   * @param snapshot The candidate's observed values (latency: 14ms, availability: 99.95%, etc.).
+   * @returns true if the observed value satisfies the constraint.
+   */
+  evaluate(constraint: CommitmentConstraint, snapshot: ConstraintObservationSnapshot): boolean
+}
+
+/**
+ * The default constraint evaluator — evaluates operator + threshold against
+ * the candidate's observed values.
  *
- * For ServiceConstraints: the evaluator checks that the candidate's
- * verificationProfile references the constraint's serviceType. If the
- * candidate has no evidence of supporting the service type, it is filtered.
+ * For CapacityConstraints: returns true (capacity is handled by the scalar
+ * capacity check in the scheduler).
+ *
+ * For ServiceConstraints: looks up the observed value for the constraint's
+ * serviceType in the snapshot, and evaluates whether it satisfies the
+ * operator + threshold:
+ *   `latency <= 20ms` → observed.latency.value <= 20
+ *   `availability >= 99.9%` → observed.availability.value >= 99.9
+ *   `quality == grade-A` → observed.quality.value == "grade-A"
+ *
+ * If the candidate has no observation for the serviceType, the constraint
+ * is NOT satisfied (the candidate cannot prove it meets the SLA).
  */
 export class DefaultConstraintEvaluator implements ConstraintEvaluator {
-  evaluate(constraint: CommitmentConstraint, membership: NetworkResourceMembership): boolean {
+  readonly evaluatorVersion = 'default-evaluator-v1'
+
+  evaluate(constraint: CommitmentConstraint, snapshot: ConstraintObservationSnapshot): boolean {
     if (constraint.kind === 'capacity') {
       // Capacity constraints are handled by the scalar capacity check in
       // the scheduler. The evaluator does not re-check them.
       return true
     }
 
-    // ServiceConstraint: check the candidate's verificationProfile references
-    // the constraint's serviceType. This is a declared-profile check, not a
-    // measured-evidence check.
     const serviceConstraint = constraint as ServiceConstraint
-    return membership.verificationProfile.includes(serviceConstraint.serviceType)
+
+    // Look up the observed value for this service type.
+    const observed = snapshot.observations.get(serviceConstraint.serviceType)
+    if (!observed) {
+      // No observation for this service type → the candidate cannot prove it
+      // satisfies the constraint. Filter it out.
+      return false
+    }
+
+    // Evaluate the operator + threshold against the observed value.
+    return evaluateConstraint(
+      serviceConstraint.operator,
+      serviceConstraint.threshold,
+      observed.value,
+      serviceConstraint.unit,
+      observed.unit,
+    )
   }
+}
+
+/**
+ * Evaluate a constraint operator against an observed value.
+ *
+ * Handles both numeric (latency, availability) and string (quality grade)
+ * thresholds.
+ *
+ * PURE: same inputs → same result.
+ */
+function evaluateConstraint(
+  operator: '>=' | '<=' | '==',
+  threshold: string,
+  observedValue: string,
+  thresholdUnit: string,
+  observedUnit: string,
+): boolean {
+  // Units must match (or be comparable). For now, require exact match.
+  // A real implementation would handle unit conversion (ms vs s, etc.).
+  if (thresholdUnit !== observedUnit) {
+    return false
+  }
+
+  // Try numeric comparison first.
+  const thresholdNum = parseFloat(threshold)
+  const observedNum = parseFloat(observedValue)
+
+  if (!isNaN(thresholdNum) && !isNaN(observedNum)) {
+    // Numeric comparison.
+    switch (operator) {
+      case '>=': return observedNum >= thresholdNum
+      case '<=': return observedNum <= thresholdNum
+      case '==': return observedNum === thresholdNum
+    }
+  }
+
+  // Fall back to string comparison (e.g., quality == "grade-A").
+  if (operator === '==') {
+    return observedValue === threshold
+  }
+
+  // For >= and <= on strings, use lexical comparison.
+  if (operator === '>=') return observedValue >= threshold
+  if (operator === '<=') return observedValue <= threshold
+  return false // unreachable for valid operators
 }
 
 // ---------------------------------------------------------------------------
