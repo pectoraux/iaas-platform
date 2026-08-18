@@ -103,6 +103,28 @@ export interface CapacityProvider {
     resourceId: string
     tx: ExtendedTransactionClient
   }): Promise<{ assetId: string; operatorId: string }>
+
+  /**
+   * Resolve the kernel-level execution INPUT for a resource.
+   *
+   * Phase 12B Slice 4: the control-plane orchestrator needs `assetId` +
+   * `assetType` + `operatorId` to call `runtime.executeAssignment(...)`
+   * (assetType drives adapter resolution via the AdapterRegistry) and to
+   * create the ExecutionAssignment. The provider, which already owns the
+   * resourceId → assetId translation, also owns assetType.
+   *
+   * This is the Slice 4 extension of resolveExecutionBinding: it adds
+   * assetType so the orchestrator can build the full RuntimeExecuteInput
+   * without reading the Asset table directly.
+   *
+   * @param resourceId — the ResourceIdentity ID
+   * @param tx — the transaction client
+   * @returns assetId + assetType + operatorId for execution
+   */
+  resolveExecutionInput(input: {
+    resourceId: string
+    tx: ExtendedTransactionClient
+  }): Promise<{ assetId: string; assetType: string; operatorId: string }>
 }
 
 /**
@@ -231,6 +253,50 @@ export class AssetCapacityProvider implements CapacityProvider {
     }
 
     return { assetId: asset.id, operatorId: asset.operatorId }
+  }
+
+  /**
+   * Phase 12B Slice 4: resolve the full execution input for a resource.
+   *
+   * Same as resolveExecutionBinding but ALSO returns assetType (needed by
+   * runtime.executeAssignment for adapter resolution via the AdapterRegistry).
+   */
+  async resolveExecutionInput(input: {
+    resourceId: string
+    tx: ExtendedTransactionClient
+  }): Promise<{ assetId: string; assetType: string; operatorId: string }> {
+    const resource = await input.tx.resourceIdentity.findUnique({
+      where: { id: input.resourceId },
+    })
+
+    if (!resource) {
+      throw new Error(
+        `AssetCapacityProvider.resolveExecutionInput: ResourceIdentity '${input.resourceId}' not found`,
+      )
+    }
+
+    const metadata = JSON.parse(resource.metadataJson || '{}') as Record<string, unknown>
+    const assetId = metadata.assetId as string | undefined
+
+    if (!assetId) {
+      throw new Error(
+        `AssetCapacityProvider.resolveExecutionInput: ResourceIdentity '${input.resourceId}' has no assetId in metadata. ` +
+          `This resource is not Asset-backed — a different CapacityProvider is required.`,
+      )
+    }
+
+    const asset = await input.tx.asset.findUnique({
+      where: { id: assetId },
+      select: { id: true, assetType: true, operatorId: true },
+    })
+
+    if (!asset) {
+      throw new Error(
+        `AssetCapacityProvider.resolveExecutionInput: Asset '${assetId}' (referenced by ResourceIdentity '${input.resourceId}') not found`,
+      )
+    }
+
+    return { assetId: asset.id, assetType: asset.assetType, operatorId: asset.operatorId }
   }
 }
 

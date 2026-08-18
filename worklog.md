@@ -3792,3 +3792,79 @@ Stage Summary:
     Physical adapter execution                   ⏳ next slice
     Protocol execution path                      ⏳ later module
 - Slice 3 is now ready for re-audit as a durable orchestration/record boundary with crash-safe failure handling.
+
+---
+Task ID: 12B-slice-3-ACCEPTED
+Agent: main (Z.ai Code)
+Task: Record the freeze of Phase 12B Slice 3 — RUNTIME-READY after user audit of 622e868.
+
+Work Log:
+- User audited 622e868 on GitHub and ACCEPTED the RUNTIME-READY boundary.
+- The atomic failure release fix is substantively correct: releaseCommitment now accepts the caller's tx, and the orchestrator performs failAssignment + releaseCommitment in one transaction.
+- The resulting invariant: (assigned + active) OR (failed + released + capacity restored) — never (failed + active + capacity still unavailable).
+- The integration test directly checks the persisted state and queries for the forbidden split-brain condition.
+- Wording correction acknowledged: 622e868 is NOT physical execution — it is the durable orchestration/record boundary immediately before execution. The repository acknowledges physical adapter dispatch is the next slice.
+
+Stage Summary:
+- Phase 12B Slice 3 — RUNTIME-READY: FROZEN.
+    Allocation → CapacityReservation         ✅
+    CapacityReservation → Commitment         ✅
+    Commitment → Execution                   ✅
+    Execution → ExecutionAssignment          ✅
+    Resource → execution binding              ✅
+    NetworkVersion binding                    ✅
+    DB-level idempotency                      ✅
+    Atomic creation                           ✅
+    Retry semantics                           ✅
+    Atomic failure release                    ✅
+    PostgreSQL proof                          ✅
+- NEXT: Phase 12B Slice 4 — Actual execution. Cross the next boundary:
+    ExecutionAssignment → RuntimeRegistry.resolve(runtimeKind) → NetworkRuntime.executeAssignment()
+    → Adapter → ExecutionResult → Verification → recordAssignmentResults() → completeAssignment()
+    → Contribution / Reward / Settlement
+  Must support InfrastructureRuntime → InfrastructureAdapter while keeping ProtocolRuntime → separate path later.
+  The control plane must NOT know about VPP, GPUs, batteries, telecom, or any vertical.
+
+---
+Task ID: 12B-slice-4-actual-execution
+Agent: main (Z.ai Code)
+Task: Phase 12B Slice 4 — Actual execution. Cross the RUNTIME-READY → EXECUTING boundary. Call runtime.executeAssignment() via the adapter, record verified results, complete the assignment. Keep failure atomic against capacity release (reuse Slice 3 path). Stay vertical-neutral (no VPP/GPU/battery/telecom knowledge).
+
+Work Log:
+- Explored the Compute reference path (compute.service.ts lines 220-359): the full chain is executeAssignment → sign telemetry → ingestEvent → processEventOutbox → recordAssignmentResults → completeAssignment → createContribution → linkContribution → recordUsage → calculateReward → postRewardToLedger → createSettlement → processSettlementForReward.
+- Key architectural finding: the telemetry→event→verify→contribution→reward→settlement path requires a DEVICE-SIDE SIGNATURE using a provisioning secret that is NEVER stored (only its hash is). The control plane cannot sign on behalf of a device — that would require storing the secret, violating the security model. Therefore the honest generic boundary is OPERATIONAL COMPLETION (execute → record actuals → complete). The economics path is deferred to a vertical-specific boundary that holds the device credential.
+- Confirmed recordAssignmentResults accepts optional eventId — so actuals CAN be recorded without a telemetry event. This validates the operational-completion boundary.
+- Extended CapacityProvider with resolveExecutionInput(resourceId, tx) → {assetId, assetType, operatorId}. assetType is needed by runtime.executeAssignment for adapter resolution via AdapterRegistry. AssetCapacityProvider implements it. The orchestrator never reads the Asset table directly (boundary stays authoritative).
+- Implemented executeDecision(decisionId) in execution-orchestrator.ts:
+    1. Load Execution + assignments + decision + NetworkVersion → runtimeKind.
+    2. Reject protocol runtimeKind (Slice 3 boundary).
+    3. Resolve CapacityProvider via membership.resource.resourceKind.
+    4. For each assignment (skip already-terminal — idempotent):
+       a. resolveExecutionInput via provider (assetId + assetType + operatorId).
+       b. beginAssignmentExecution (parent → 'executing').
+       c. runtime.executeAssignment({assetId, assetType, capabilityType, assignedQuantity, assignedUnit, durationSeconds}) — the runtime resolves the adapter via AdapterRegistry and calls adapter.execute(). Returns {actualQuantity, actualUnit, telemetryPayload, success, error}.
+       d. On success: recordAssignmentResults(actuals, verified=actuals) + completeAssignment (in one tx). Operational completion.
+       e. On failure (throws or success=false): collect the failure, continue to next assignment.
+    5. If any failures: releaseDecisionExecution (Slice 3 atomic path — failAssignment + releaseCommitment in one tx per assignment) → throw ExecutionFailedError.
+    6. If all succeed: parent Execution finalized by last completeAssignment (finalizeExecutionIfTerminal).
+- VERTICAL-NEUTRALITY: the orchestrator imports NO vertical service (no vpp.service, compute.service, compute-adapter.service, storage.service, wireless.service). It calls runtime.executeAssignment() which generically resolves the adapter via (assetType, capabilityType). A static source check in the test verifies this.
+- No new schema/model needed — executeDecision uses the existing Execution + ExecutionAssignment + CapacityCommitment + CapacityReservation records created by Slice 3's commitDecisionToExecution.
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-4-execution.test.ts: 4/4 pass, 36 expect() calls.
+    + Happy path: executeDecision → assignment completed + parent Execution finalized. Actuals recorded.
+    + Failure path: adapter failure (unregistered assetType) → ExecutionFailedError + atomic capacity release (commitment=released, reservation.remainingAmount restored, split-brain count = 0).
+    + Idempotency: re-executing a completed decision returns the same results (no duplicate execution).
+    + Vertical-neutrality: orchestrator source imports no vertical service, no direct runtime import; uses resolveRuntime + runtime.executeAssignment.
+- Regression:
+    + Slice 3 integration: 4/4 pass (including the hardening atomicity test).
+    + phase-12b unit: 49/49 pass.
+    + phase-8-compute: 16/16 pass.
+    + ESLint clean. tsc zero errors in Slice 4 files.
+
+Stage Summary:
+- The control plane now reliably CAUSES the kernel to physically execute: executeDecision calls runtime.executeAssignment(), which resolves the adapter via AdapterRegistry and calls adapter.execute(). The result (actuals + telemetry) is recorded on the assignment, and the assignment is operationally completed.
+- The full path is now: REQUEST → ALLOCATION → RESERVATION → COMMITMENT → EXECUTION → ASSIGNMENT → ADAPTER EXECUTION → OPERATIONAL COMPLETION.
+- Failure remains atomic: adapter failure → releaseDecisionExecution (Slice 3 path) → assignment=failed, commitment=released, capacity restored. No split-brain.
+- DEFERRED (vertical-specific boundary): telemetry → event → verify → contribution → reward → ledger → settlement. This requires a device-side signature using a provisioning secret that is never stored. The control plane cannot sign on behalf of a device. Operational completion is the honest generic boundary.
+- Protocol runtimeKind remains rejected (deferred to a later protocol execution module).

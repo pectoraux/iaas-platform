@@ -52,9 +52,43 @@
 // for a decision and releases their commitments (restoring the reservations'
 // remainingAmount). This is called when physical execution later fails — it
 // is NOT a rollback of the original creation transaction (which already
-// committed). It follows the existing VPP/Compute pattern: failAssignment
-// inside a tx, then releaseCommitment OUTSIDE the tx (because
-// releaseCommitment manages its own transaction).
+// committed). As of Slice 3 hardening, failAssignment + releaseCommitment
+// happen in ONE transaction per assignment (no split-brain window).
+//
+// =============================================================================
+// PHASE 12B SLICE 4: ACTUAL EXECUTION
+// =============================================================================
+// executeDecision(decisionId) crosses the RUNTIME-READY → EXECUTING boundary.
+//
+//   ExecutionAssignment (status=assigned)
+//       ↓
+//   beginAssignmentExecution      ← parent Execution → 'executing'
+//       ↓
+//   runtime.executeAssignment()  ← resolves adapter via AdapterRegistry,
+//       ↓                          calls adapter.execute(), returns telemetry
+//   Adapter
+//       ↓
+//   ExecutionResult (actuals + telemetry)
+//       ↓
+//   recordAssignmentResults      ← operational actuals (NO telemetry event yet)
+//       ↓
+//   completeAssignment            ← assignment → 'completed', parent finalized
+//       ↓                          if all assignments terminal
+//   (assignment is now operationally complete)
+//
+// ON ADAPTER FAILURE: runtime.executeAssignment throws, or returns
+// success=false. The orchestrator calls releaseDecisionExecution (the Slice 3
+// atomic failure path): failAssignment + releaseCommitment in one transaction
+// → assignment=failed, commitment=released, reservation.remainingAmount restored.
+//
+// VERTICAL-NEUTRALITY: the orchestrator does NOT know about VPP, GPUs,
+// batteries, telecom, or any vertical. It calls runtime.executeAssignment()
+// with assetType (resolved via the CapacityProvider boundary) and the adapter
+// is selected generically via the AdapterRegistry. The telemetry→event→verify→
+// contribution→reward→settlement path is DEFERRED to a vertical-specific
+// boundary (it requires a device-side signature using a provisioning secret
+// that is never stored; the control plane cannot sign on behalf of a device).
+// Operational completion is the honest, generic boundary.
 // =============================================================================
 
 import { db } from '@/lib/db'
@@ -583,4 +617,280 @@ async function resolveTenantIdForDecision(decisionId: string): Promise<string> {
     throw new OrchestratorError(`AllocationDecision '${decisionId}' not found.`)
   }
   return resolveTenantIdForNetwork(decision.networkId)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 12B Slice 4: Actual execution — executeDecision
+// ---------------------------------------------------------------------------
+
+export interface ExecutedAssignment {
+  assignmentId: string
+  capabilityType: string
+  unit: string
+  assignedAmount: string
+  actualQuantity?: string
+  actualUnit?: string
+  verifiedQuantity?: string
+  verifiedUnit?: string
+  status: 'completed' | 'failed'
+}
+
+export interface ExecuteDecisionResult {
+  decisionId: string
+  executionId: string
+  runtimeKind: RuntimeKind
+  assignments: ExecutedAssignment[]
+  /** 'completed' if all assignments completed; 'completed' if any failed (parent finalizes on all-terminal). */
+  executionStatus: string
+}
+
+export class ExecutionFailedError extends OrchestratorError {
+  constructor(
+    public readonly decisionId: string,
+    public readonly failedAssignments: { assignmentId: string; capabilityType: string; error: string }[],
+  ) {
+    super(
+      `Execution of decision '${decisionId}' failed for ${failedAssignments.length} ` +
+        `assignment(s). Capacity has been released atomically (commitment=released, ` +
+        `reservation.remainingAmount restored). Errors: ` +
+        failedAssignments.map((f) => `[${f.capabilityType}: ${f.error}]`).join(', '),
+    )
+    this.name = 'ExecutionFailedError'
+  }
+}
+
+/**
+ * Execute a decision's assignments through the actual adapter pipeline.
+ *
+ * Phase 12B Slice 4: crosses the RUNTIME-READY → EXECUTING boundary.
+ *
+ * For each ExecutionAssignment created by commitDecisionToExecution:
+ *   1. Resolve the execution input (assetId, assetType, operatorId) via the
+ *      CapacityProvider — vertical-neutral.
+ *   2. beginAssignmentExecution (parent Execution → 'executing').
+ *   3. runtime.executeAssignment() — the runtime resolves the adapter via
+ *      AdapterRegistry and calls adapter.execute(). Returns actuals + telemetry.
+ *   4. If success: recordAssignmentResults(actuals) + completeAssignment.
+ *      Operational completion — the assignment is 'completed'.
+ *   5. If failure (throws or success=false): collect the failure. After all
+ *      assignments attempted, releaseDecisionExecution is called for the FAILED
+ *      ones — failAssignment + releaseCommitment in ONE transaction (Slice 3
+ *      atomic path). The reservation's remainingAmount is restored.
+ *
+ * VERTICAL-NEUTRAL: the orchestrator does not import any vertical. The adapter
+ * is resolved generically via (assetType, capabilityType). The telemetry→event→
+ * verify→contribution→reward→settlement path is deferred to a vertical-specific
+ * boundary (requires a device-side signature using a provisioning secret that
+ * is never stored; the control plane cannot sign on behalf of a device).
+ *
+ * ATOMIC FAILURE: if any assignment fails, its commitment is released in the
+ * same transaction as its failAssignment (no split-brain). Successfully
+ * completed assignments stay completed (operational completion is irreversible
+ * per the Phase 5.2 CAS).
+ */
+export async function executeDecision(
+  decisionId: string,
+  opts?: { providerRegistry?: CapacityProviderRegistry },
+): Promise<ExecuteDecisionResult> {
+  const providerRegistry = opts?.providerRegistry ?? createDefaultCapacityProviderRegistry()
+
+  // --- Load the execution + assignments for this decision ---
+  const execution = await db.execution.findUnique({
+    where: {
+      sourceType_sourceId: {
+        sourceType: EXECUTION_SOURCE_TYPE,
+        sourceId: decisionId,
+      },
+    },
+    include: {
+      assignments: true,
+      network: { select: { tenantId: true } },
+    },
+  })
+
+  if (!execution) {
+    throw new OrchestratorError(
+      `No Execution found for decision '${decisionId}'. commitDecisionToExecution must be called first.`,
+    )
+  }
+
+  // Load the decision to resolve the NetworkVersion → runtimeKind.
+  const decision = await db.allocationDecision.findUnique({
+    where: { id: decisionId },
+    include: { request: true },
+  })
+  if (!decision) {
+    throw new OrchestratorError(`AllocationDecision '${decisionId}' not found.`)
+  }
+
+  const networkVersion = await db.networkVersion.findUnique({
+    where: { id: decision.request.networkVersionId },
+  })
+  if (!networkVersion) {
+    throw new OrchestratorError(
+      `NetworkVersion '${decision.request.networkVersionId}' not found.`,
+    )
+  }
+
+  const runtimeKindRaw = networkVersion.runtimeKind ?? 'infrastructure'
+  validateRuntimeKind(runtimeKindRaw)
+  const runtimeKind = runtimeKindRaw as RuntimeKind
+
+  if (runtimeKind === 'protocol') {
+    throw new ProtocolRuntimeNotSupportedError(networkVersion.id)
+  }
+
+  const runtime = resolveRuntime(runtimeKind)
+  const tenantId = execution.network.tenantId
+
+  // --- Load the resource membership (for resourceId + resourceKind) ---
+  const membership = await db.networkResourceMembership.findUnique({
+    where: { id: decision.selectedMembershipId },
+    include: { resource: true },
+  })
+  if (!membership) {
+    throw new OrchestratorError(
+      `Selected NetworkResourceMembership '${decision.selectedMembershipId}' not found.`,
+    )
+  }
+
+  const provider = providerRegistry.resolve(membership.resource.resourceKind)
+
+  // --- Execute each assignment ---
+  const results: ExecutedAssignment[] = []
+  const failures: { assignmentId: string; capabilityType: string; error: string }[] = []
+
+  for (const assignment of execution.assignments) {
+    // Skip already-terminal assignments (idempotent re-execution).
+    if (assignment.status === 'completed' || assignment.status === 'failed') {
+      results.push({
+        assignmentId: assignment.id,
+        capabilityType: assignment.capabilityType,
+        unit: assignment.assignedUnit,
+        assignedAmount: assignment.assignedQuantity,
+        actualQuantity: assignment.actualQuantity ?? undefined,
+        actualUnit: assignment.actualUnit ?? undefined,
+        verifiedQuantity: assignment.verifiedQuantity ?? undefined,
+        verifiedUnit: assignment.verifiedUnit ?? undefined,
+        status: assignment.status as 'completed' | 'failed',
+      })
+      continue
+    }
+
+    // Resolve the full execution input (assetId + assetType + operatorId).
+    const execInput = await provider.resolveExecutionInput({
+      resourceId: membership.resourceId,
+      tx: db as unknown as ExtendedTransactionClient,
+    })
+
+    // 1. beginAssignmentExecution (parent → 'executing').
+    await db.$transaction(async (tx) => {
+      await runtime.beginAssignmentExecution(tx, execution.id, assignment.id)
+    }, { timeout: 30000 })
+
+    // 2. Execute via the adapter (runtime resolves adapter via AdapterRegistry).
+    let executeResult
+    try {
+      executeResult = await runtime.executeAssignment({
+        assetId: execInput.assetId,
+        assetType: execInput.assetType,
+        capabilityType: assignment.capabilityType,
+        assignedQuantity: assignment.assignedQuantity,
+        assignedUnit: assignment.assignedUnit,
+        durationSeconds: Math.max(
+          1,
+          Math.round(
+            (decision.allocationWindowEnd.getTime() -
+              decision.allocationWindowStart.getTime()) /
+              1000,
+          ),
+        ),
+      })
+    } catch (err) {
+      failures.push({
+        assignmentId: assignment.id,
+        capabilityType: assignment.capabilityType,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      results.push({
+        assignmentId: assignment.id,
+        capabilityType: assignment.capabilityType,
+        unit: assignment.assignedUnit,
+        assignedAmount: assignment.assignedQuantity,
+        status: 'failed',
+      })
+      continue
+    }
+
+    if (!executeResult.success) {
+      failures.push({
+        assignmentId: assignment.id,
+        capabilityType: assignment.capabilityType,
+        error: executeResult.error ?? 'adapter returned success=false',
+      })
+      results.push({
+        assignmentId: assignment.id,
+        capabilityType: assignment.capabilityType,
+        unit: assignment.assignedUnit,
+        assignedAmount: assignment.assignedQuantity,
+        status: 'failed',
+      })
+      continue
+    }
+
+    // 3. Success: record results + complete the assignment (operational completion).
+    await db.$transaction(async (tx) => {
+      await runtime.recordAssignmentResults(tx, assignment.id, {
+        actualQuantity: executeResult.actualQuantity,
+        actualUnit: executeResult.actualUnit,
+        verifiedQuantity: executeResult.actualQuantity,
+        verifiedUnit: executeResult.actualUnit,
+        // eventId is intentionally NOT set here — the telemetry→event→verify
+        // path is deferred to a vertical-specific boundary (requires a
+        // device-side signature). Operational completion records actuals only.
+      })
+      await runtime.completeAssignment(tx, tenantId, assignment.id, execution.id)
+    }, { timeout: 30000 })
+
+    results.push({
+      assignmentId: assignment.id,
+      capabilityType: assignment.capabilityType,
+      unit: assignment.assignedUnit,
+      assignedAmount: assignment.assignedQuantity,
+      actualQuantity: executeResult.actualQuantity,
+      actualUnit: executeResult.actualUnit,
+      verifiedQuantity: executeResult.actualQuantity,
+      verifiedUnit: executeResult.actualUnit,
+      status: 'completed',
+    })
+  }
+
+  // --- If any assignments failed, release their capacity atomically ---
+  if (failures.length > 0) {
+    // Release ALL assignments' capacity (releaseDecisionExecution is
+    // idempotent — already-completed assignments' commitments are 'consumed'
+    // so releaseCommitment no-ops them; failed ones get released). This
+    // restores the reservations' remainingAmount for the failed assignments.
+    await releaseDecisionExecution(
+      decisionId,
+      `${failures.length} assignment(s) failed during execution`,
+    )
+
+    throw new ExecutionFailedError(decisionId, failures)
+  }
+
+  // --- All assignments completed: the parent Execution is finalized by the
+  // last completeAssignment call (finalizeExecutionIfTerminal). ---
+  const finalized = await db.execution.findUnique({
+    where: { id: execution.id },
+    select: { status: true },
+  })
+
+  return {
+    decisionId,
+    executionId: execution.id,
+    runtimeKind,
+    assignments: results,
+    executionStatus: finalized?.status ?? 'completed',
+  }
 }
