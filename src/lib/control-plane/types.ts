@@ -22,7 +22,7 @@
 // import. No database access. No kernel imports.
 // =============================================================================
 
-import { createHash, randomUUID } from 'crypto'
+import { createHash } from 'crypto'
 
 // ---------------------------------------------------------------------------
 // Participant model (§5 of the frozen spec)
@@ -765,6 +765,39 @@ function canonicalize(value: unknown): unknown {
 // Factory helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Derive a deterministic requestId from the idempotency key, requester
+ * membership, and network. This ensures that a retried request with the
+ * same idempotency key produces the same requestId — the persistence layer
+ * does not need to collapse it later.
+ *
+ * PHASE 12B Slice 2 FIX: the original used randomUUID(), which meant a
+ * retried request would get a different requestId even with the same
+ * idempotency key. For the frozen reproducibility invariant:
+ *
+ *   same Network + same requester membership + same idempotency key
+ *       → same NetworkRequest identity
+ *
+ * The requestId is SHA-256 of (networkId, requesterMembershipId, idempotencyKey).
+ * The persistence layer may still use IdempotencyRecord for dedup, but the
+ * pure scheduler identity is now stable across retries.
+ *
+ * PURE: same inputs → same requestId.
+ */
+export function deriveRequestId(
+  networkId: string,
+  requesterMembershipId: string,
+  idempotencyKey: string,
+): string {
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalize({
+      networkId,
+      requesterMembershipId,
+      idempotencyKey,
+    })))
+    .digest('hex')
+}
+
 export function createNetworkRequest(input: {
   requesterMembershipId: string
   networkId: string
@@ -774,8 +807,13 @@ export function createNetworkRequest(input: {
   priority?: number
   idempotencyKey: string
 }): NetworkRequest {
+  const requestId = deriveRequestId(
+    input.networkId,
+    input.requesterMembershipId,
+    input.idempotencyKey,
+  )
   return {
-    requestId: randomUUID(),
+    requestId,
     requesterMembershipId: input.requesterMembershipId,
     networkId: input.networkId,
     capabilityRequirements: input.capabilityRequirements,

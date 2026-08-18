@@ -35,6 +35,7 @@ export {
   authorizeRequest,
   computeDecisionSnapshotHash,
   createNetworkRequest,
+  deriveRequestId,
   DefaultConstraintEvaluator,
   compareCanonicalStrings,
 } from './types'

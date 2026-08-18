@@ -3383,3 +3383,25 @@ Stage Summary:
   - candidateMemberships: (membershipId) — in snapshot hash (unique IDs)
 - fairnessScore removed — will return when a real fairness policy exists.
 - 39/39 tests pass. 127/127 total. eslint clean. tsc clean. Dev server HTTP 200.
+
+---
+Task ID: 12B-slice-2-start
+Agent: main (Z.ai Code)
+Task: Start Phase 12B Slice 2 — fix the requestId determinism defect and prepare for persistence. The user's audit accepted Slice 1 canonicalization and defined the Slice 2 scope: persisted NetworkRequest + AllocationDecision + atomic capacity reservation handoff.
+
+Work Log:
+- Accepted the user's audit: Slice 1 canonicalization passes. The user identified one defect to fix before persistence: createNetworkRequest uses randomUUID() for requestId, which means retried requests get different identities even with the same idempotency key.
+- Added deriveRequestId(networkId, requesterMembershipId, idempotencyKey) — a pure function that computes a deterministic SHA-256 hash from the three identity fields. Same inputs → same requestId, regardless of when or how many times createNetworkRequest is called.
+- Changed createNetworkRequest to use deriveRequestId instead of randomUUID(). Removed the randomUUID import.
+- Exported deriveRequestId from index.ts.
+- Added 3 tests:
+  1. Same idempotency key + same network + same requester → same requestId (deterministic, SHA-256 hex).
+  2. Different idempotency key → different requestId.
+  3. Same idempotency key but different network → different requestId.
+- VERIFICATION: tsc zero errors. eslint clean. 42/42 phase-12b tests pass (was 39; added 3). 130/130 total. Dev server HTTP 200.
+- HONEST STATUS: This fixes the requestId determinism defect identified by the user before persistence. The remaining Slice 2 work (Prisma models for ParticipantMembership, ResourceIdentity, NetworkResourceMembership, NetworkRequest, AllocationDecision + the control-plane service that orchestrates authorize → schedule → persist → atomic reservation) is the next step. The user explicitly said not to duplicate CapacityResource/CapacityReservation/CapacityCommitment — the existing capacity service is the authoritative concurrency boundary.
+
+Stage Summary:
+- requestId is now deterministic: same (network, requester, idempotencyKey) → same requestId.
+- 42/42 tests pass. 130/130 total. eslint clean. tsc clean. Dev server HTTP 200.
+- Next: Prisma models for the 6 control-plane objects + the atomic control-plane service that bridges the scheduler to the existing capacity service.

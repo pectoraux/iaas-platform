@@ -1460,3 +1460,68 @@ describe('Phase 12B: capabilityRequirements + allocatedCapacity total ordering',
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// Slice 2: deterministic requestId from idempotency key
+// ---------------------------------------------------------------------------
+
+describe('Phase 12B Slice 2: deterministic requestId', () => {
+  it('same idempotency key + same network + same requester → same requestId', () => {
+    const req1 = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-123',
+    })
+    const req2 = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-123',
+    })
+
+    // Same inputs → same requestId (deterministic, not randomUUID).
+    expect(req1.requestId).toBe(req2.requestId)
+    expect(req1.requestId).toMatch(/^[a-f0-9]{64}$/) // SHA-256 hex
+  })
+
+  it('different idempotency key → different requestId', () => {
+    const req1 = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-A',
+    })
+    const req2 = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-B',
+    })
+
+    expect(req1.requestId).not.toBe(req2.requestId)
+  })
+
+  it('same idempotency key but different network → different requestId', () => {
+    const req1 = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-123',
+    })
+    const req2 = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_B,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-123',
+    })
+
+    expect(req1.requestId).not.toBe(req2.requestId)
+  })
+})
