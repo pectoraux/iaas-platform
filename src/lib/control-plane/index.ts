@@ -42,3 +42,11 @@ export {
 
 export { schedule, SCHEDULER_VERSION } from './scheduler'
 export type { SchedulerInput, SchedulerResult } from './scheduler'
+
+export {
+  submitNetworkRequest,
+  computePayloadHash,
+  IdempotencyConflictError,
+  RequestAuthorizationError,
+} from './service'
+export type { SubmitNetworkRequestInput, SubmitNetworkRequestResult } from './service'

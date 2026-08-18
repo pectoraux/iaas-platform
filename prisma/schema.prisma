@@ -1584,3 +1584,179 @@ model ProtocolOutcome {
   @@index([attemptId])
   @@index([transactionId])
 }
+
+// =============================================================================
+// Phase 12B Slice 2: Control-Plane Persistence Objects
+// =============================================================================
+// These models persist the generic control-plane objects defined in
+// src/lib/control-plane/types.ts. They sit ABOVE the frozen kernel and are
+// vertical-neutral.
+//
+// CRITICAL: these do NOT duplicate CapacityResource / CapacityReservation /
+// CapacityCommitment. The existing capacity service remains authoritative
+// for reservation/locking. The control plane calls it.
+//
+// Network Scope Integrity (§8.6): composite FKs enforce same-network where
+// PostgreSQL permits. Service-layer checks also exist (in types.ts).
+// =============================================================================
+
+/// Phase 12B: ParticipantIdentity — global participant identity (one per org).
+/// Has NO networkId — joins networks via ParticipantMembership.
+model ParticipantIdentity {
+  id              String   @id @default(cuid())
+  organizationId  String?
+  createdAt       DateTime @default(now())
+
+  memberships     ParticipantMembership[]
+
+  @@index([organizationId])
+}
+
+/// Phase 12B: ParticipantMembership — a participant's membership in a network.
+/// Network-scoped. Has lifecycle (pending → active → suspended → revoked).
+model ParticipantMembership {
+  id              String   @id @default(cuid())
+  participantId   String   // FK to ParticipantIdentity
+  networkId       String   // the network this membership is in
+  status          String   @default("pending") // pending | active | suspended | revoked
+  joinedAt        DateTime @default(now())
+  createdAt       DateTime @default(now())
+
+  participant     ParticipantIdentity @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  roles           ParticipantRole[]
+  resourceMemberships NetworkResourceMembership[]
+
+  @@unique([participantId, networkId]) // one membership per participant per network
+  @@index([networkId])
+  @@index([status])
+}
+
+/// Phase 12B: ParticipantRole — a role held by a participant within a
+/// specific network membership. Separate from the membership so roles
+/// can change independently.
+model ParticipantRole {
+  id              String   @id @default(cuid())
+  membershipId    String   // FK to ParticipantMembership
+  role            String   // provider | consumer | verifier | validator | orchestrator | observer
+  status          String   @default("active") // active | suspended
+  assignedAt      DateTime @default(now())
+  revokedAt       DateTime?
+
+  membership      ParticipantMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@unique([membershipId, role]) // one role per type per membership
+  @@index([membershipId])
+  @@index([role])
+}
+
+/// Phase 12B: ResourceIdentity — global resource identity (one per physical/
+/// logical resource). Has NO networkId — joins networks via
+/// NetworkResourceMembership. Generalizes Asset.
+model ResourceIdentity {
+  id              String   @id @default(cuid())
+  controllerId    String?   // FK to ParticipantIdentity (who controls it globally)
+  resourceKind    String   // physical | compute | storage | connectivity | industrial | human | protocol
+  status          String   @default("registering") // registering | active | suspended | decommissioned
+  locationJson    String?  // geographic/topological (JSON)
+  metadataJson    String   @default("{}")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  networkMemberships NetworkResourceMembership[]
+
+  @@index([controllerId])
+  @@index([resourceKind])
+  @@index([status])
+}
+
+/// Phase 12B: NetworkResourceMembership — a resource's membership in a
+/// specific network. Per-network bindings. Binds to ParticipantMembershipId
+/// (the network-scoped authority). Generalizes AssetNetworkAssignment.
+///
+/// Network Scope Integrity: the (participantMembershipId, networkId)
+/// composite implicitly enforces same-network — the ParticipantMembership's
+/// networkId must match this membership's networkId (service-layer check +
+/// the unique constraint on ParticipantMembership(participantId, networkId)
+/// makes cross-network binding structurally detectable).
+model NetworkResourceMembership {
+  id                      String   @id @default(cuid())
+  resourceId              String   // FK to ResourceIdentity
+  networkId               String   // the network
+  participantMembershipId String   // FK to ParticipantMembership — network-scoped authority
+  capabilitiesJson        String   @default("[]") // ["compute", "storage", ...]
+  verifiedCapacityJson    String   @default("[]") // [{capabilityType, amount, unit}]
+  controlMode             String   @default("default") // adapter selection
+  verificationProfile      String   @default("default")
+  availabilityStart       DateTime?
+  availabilityEnd         DateTime?
+  status                  String   @default("registering") // registering | active | suspended | withdrawn
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  resource                ResourceIdentity @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  participantMembership   ParticipantMembership @relation(fields: [participantMembershipId], references: [id], onDelete: Cascade)
+
+  @@unique([resourceId, networkId]) // one membership per resource per network
+  @@index([networkId])
+  @@index([participantMembershipId])
+  @@index([status])
+}
+
+/// Phase 12B: NetworkRequest — a durable, network-scoped request for
+/// capability execution. Actor-neutral. The requestId is deterministic
+/// (derived from networkId + requesterMembershipId + idempotencyKey).
+///
+/// IDEMPOTENCY: same (network, requester, idempotencyKey) → same requestId.
+/// If the same key is used with a DIFFERENT payload, the persistence layer
+/// detects the mismatch via payloadHash and returns IDEMPOTENCY_CONFLICT.
+model NetworkRequest {
+  id                      String   @id // deterministic: SHA-256(networkId, requesterMembershipId, idempotencyKey)
+  requesterMembershipId   String   // FK to ParticipantMembership
+  networkId               String
+  networkVersionId        String?  // the policy bundle version
+  capabilityRequirementsJson String // canonical, sorted
+  constraintsJson         String?  // canonical, sorted (optional)
+  priority                Int?
+  timeWindowStart         DateTime
+  timeWindowEnd           DateTime
+  idempotencyKey          String
+  payloadHash             String   // SHA-256 of canonical request payload (for idempotency conflict detection)
+  status                  String   @default("pending") // pending | scheduled | fulfilled | rejected | expired
+  createdAt               DateTime @default(now())
+  scheduledAt             DateTime?
+
+  @@unique([networkId, requesterMembershipId, idempotencyKey]) // C3: one request per identity
+  @@index([networkId])
+  @@index([requesterMembershipId])
+  @@index([status])
+}
+
+/// Phase 12B: AllocationDecision — the durable output of the scheduler.
+/// Stores the EXACT values produced by the pure scheduler, including
+/// decisionSnapshotHash. The database never recomputes a different hash.
+///
+/// The decision record preserves the full audit trail (§8.7):
+/// candidate memberships, selected membership, allocated capacity,
+/// schedulerVersion, evaluatorVersion, decisionSnapshotHash.
+model AllocationDecision {
+  id                      String   @id // deterministic: SHA-256 of semantic content
+  requestId               String   // FK to NetworkRequest
+  networkId               String
+  candidateMembershipsJson String  // sorted array of membership IDs
+  selectedMembershipId    String
+  allocatedCapacityJson   String   // sorted array of {capabilityType, amount, unit}
+  allocationWindowStart   DateTime
+  allocationWindowEnd     DateTime
+  priority                Int?
+  schedulerVersion        String
+  evaluatorVersion        String
+  decisionSnapshotHash    String   // §8.7 — exact hash from the pure scheduler
+  decidedAt               DateTime @default(now())
+  expiresAt               DateTime
+  status                  String   @default("active") // active | consumed | expired
+
+  @@unique([requestId]) // one decision per request
+  @@index([networkId])
+  @@index([selectedMembershipId])
+  @@index([decisionSnapshotHash])
+}
