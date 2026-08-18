@@ -3497,3 +3497,20 @@ Stage Summary:
 - NetworkVersion is validated: exists + same network + published.
 - 130/130 tests pass. eslint clean. tsc clean. Dev server HTTP 200.
 - REMAINING: PostgreSQL concurrency tests (CI-only). The service uses the correct primitives (db.$transaction + FOR UPDATE via CapacityProvider).
+
+---
+Task ID: 12B-slice-2-idempotency-fixes
+Agent: main (Z.ai Code)
+Task: Fix the three remaining correctness issues from the audit of e161d8f: (1) networkVersionId missing from idempotency payload, (2) constraints not canonicalized in computePayloadHash, (3) duplicate capability key ambiguity in AllocationReservation.
+
+Work Log:
+- Fix 1 (networkVersionId in payload hash): computePayloadHash now includes networkVersionId in the canonical JSON. Two requests with the same idempotency key but different networkVersionIds now produce different payload hashes → IDEMPOTENCY_CONFLICT. This is correct because NetworkVersion is an immutable policy bundle that defines the network semantics.
+- Fix 2 (constraints canonicalization in payload hash): computePayloadHash now canonicalizes constraints using the same deterministic ordering as the scheduler — sorted by constraintId, with all fields (serviceType/operator/threshold/unit/slaPolicyRef for ServiceConstraints; capabilityType/operator/threshold/unit/capacitySourceId for CapacityConstraints) included. All values are explicitly String()-coerced to avoid type ambiguity. The constraints are no longer left in input order.
+- Fix 3 (AllocationReservation unique key): changed from @@unique([decisionId, capabilityType]) to @@unique([decisionId, capabilityType, unit]). This supports multi-dimensional capabilities where a resource offers the same capability type in different units (e.g., compute/GPU and compute/cores). The user's Option B was chosen because "multi-dimensional capability requirements are explicitly part of the architecture."
+- VERIFICATION: tsc zero errors. eslint clean. 130/130 tests pass. Dev server HTTP 200.
+
+Stage Summary:
+- All three defects fixed. The idempotency model now captures every semantic input that can affect the operation: networkVersionId, capabilityRequirements (canonical), constraints (canonical), timeWindow, priority.
+- The AllocationReservation unique constraint now supports multi-dimensional capabilities.
+- 130/130 tests pass. eslint clean. tsc clean. Dev server HTTP 200.
+- REMAINING: PostgreSQL concurrency tests (identical concurrent → one result; different concurrent → no oversubscribe) are CI-only.

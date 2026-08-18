@@ -1790,7 +1790,7 @@ model AllocationReservation {
 
   decision                AllocationDecision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
 
-  @@unique([decisionId, capabilityType]) // one reservation per capability per decision
+  @@unique([decisionId, capabilityType, unit]) // one reservation per capability+unit per decision (multi-dimensional)
   @@index([decisionId])
   @@index([reservationId])
 }

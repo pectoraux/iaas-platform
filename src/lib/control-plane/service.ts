@@ -116,13 +116,22 @@ export interface SubmitNetworkRequestResult {
  * Compute the canonical payload hash of a NetworkRequest.
  * This covers the SEMANTIC content — not the requestId (which is derived
  * from the identity inputs). Two requests with the same idempotency key
- * but different capability requirements, time windows, constraints, or
- * priorities will have different payload hashes.
+ * but different capability requirements, time windows, constraints,
+ * priorities, or networkVersionIds will have different payload hashes.
+ *
+ * PHASE 12B FIX: networkVersionId is now included — it is an immutable
+ * policy bundle that defines the network semantics. Two different versions
+ * can produce different scheduling/execution behavior.
+ *
+ * PHASE 12B FIX: constraints are now canonicalized using the same
+ * deterministic ordering as the scheduler (sorted by constraintId), not
+ * left in input order.
  *
  * PURE: same inputs → same hash.
  */
 export function computePayloadHash(input: SubmitNetworkRequestInput): string {
   const canonical = JSON.stringify({
+    networkVersionId: input.networkVersionId,
     capabilityRequirements: input.capabilityRequirements
       .map((r) => ({ ...r }))
       .sort((a, b) => {
@@ -134,7 +143,32 @@ export function computePayloadHash(input: SubmitNetworkRequestInput): string {
       start: input.timeWindow.start.toISOString(),
       end: input.timeWindow.end.toISOString(),
     },
-    constraints: input.constraints ?? [],
+    // Canonicalize constraints — sort by constraintId for determinism.
+    constraints: (input.constraints ?? [])
+      .map((c) => {
+        const entry = c as Record<string, unknown>
+        const result: Record<string, string> = {
+          constraintId: String(entry.constraintId ?? ''),
+          kind: String(entry.kind ?? ''),
+          verificationMethod: String(entry.verificationMethod ?? ''),
+          status: String(entry.status ?? ''),
+        }
+        if (entry.kind === 'service') {
+          result.serviceType = String(entry.serviceType ?? '')
+          result.operator = String(entry.operator ?? '')
+          result.threshold = String(entry.threshold ?? '')
+          result.unit = String(entry.unit ?? '')
+          result.slaPolicyRef = String(entry.slaPolicyRef ?? '')
+        } else if (entry.kind === 'capacity') {
+          result.capabilityType = String(entry.capabilityType ?? '')
+          result.operator = String(entry.operator ?? '')
+          result.threshold = String(entry.threshold ?? '')
+          result.unit = String(entry.unit ?? '')
+          result.capacitySourceId = String(entry.capacitySourceId ?? '')
+        }
+        return result
+      })
+      .sort((a, b) => compareCanonicalStrings(a.constraintId, b.constraintId)),
     priority: input.priority ?? null,
   })
   return createHash('sha256').update(canonical).digest('hex')
