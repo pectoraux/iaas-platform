@@ -1525,3 +1525,113 @@ describe('Phase 12B Slice 2: deterministic requestId', () => {
     expect(req1.requestId).not.toBe(req2.requestId)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Constraint ID validation + array order preservation
+// ---------------------------------------------------------------------------
+
+import { validateNoDuplicateConstraintIds, computePayloadHash } from '../src/lib/control-plane'
+
+describe('Phase 12B: constraint ID validation', () => {
+  it('rejects a constraint with a missing constraintId', () => {
+    const result = validateNoDuplicateConstraintIds([
+      { kind: 'service', serviceType: 'latency' }, // no constraintId
+    ])
+    expect(result).toMatch(/missing a constraintId/)
+  })
+
+  it('rejects a constraint with an empty constraintId', () => {
+    const result = validateNoDuplicateConstraintIds([
+      { constraintId: '', kind: 'service', serviceType: 'latency' },
+    ])
+    expect(result).toMatch(/missing a constraintId/)
+  })
+
+  it('rejects duplicate constraintIds', () => {
+    const result = validateNoDuplicateConstraintIds([
+      { constraintId: 'c-1', kind: 'service', serviceType: 'latency' },
+      { constraintId: 'c-1', kind: 'service', serviceType: 'availability' },
+    ])
+    expect(result).toMatch(/Duplicate constraintId.*c-1/)
+  })
+
+  it('accepts unique, non-empty constraintIds', () => {
+    const result = validateNoDuplicateConstraintIds([
+      { constraintId: 'c-1', kind: 'service', serviceType: 'latency' },
+      { constraintId: 'c-2', kind: 'capacity', capabilityType: 'bandwidth' },
+    ])
+    expect(result).toBeNull()
+  })
+
+  it('accepts an empty constraints array', () => {
+    const result = validateNoDuplicateConstraintIds([])
+    expect(result).toBeNull()
+  })
+})
+
+describe('Phase 12B: array order preservation in constraint canonicalization', () => {
+  it('constraints with ordered arrays in different orders produce different payload hashes', () => {
+    // Since arrays are now order-preserved (not sorted), two constraints
+    // with the same elements in different array orders should produce
+    // DIFFERENT payload hashes.
+    const input1 = {
+      requesterMembershipId: 'pm-a',
+      networkId: NETWORK_A,
+      networkVersionId: 'nv-1',
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+      constraints: [
+        { constraintId: 'c-1', kind: 'quality', steps: ['prepare', 'execute', 'verify'] },
+      ],
+    }
+    const input2 = {
+      requesterMembershipId: 'pm-a',
+      networkId: NETWORK_A,
+      networkVersionId: 'nv-1',
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+      constraints: [
+        { constraintId: 'c-1', kind: 'quality', steps: ['verify', 'execute', 'prepare'] },
+      ],
+    }
+
+    const hash1 = computePayloadHash(input1)
+    const hash2 = computePayloadHash(input2)
+
+    // Different array order → different hash (order is semantically meaningful).
+    expect(hash1).not.toBe(hash2)
+  })
+
+  it('constraints with same ordered arrays produce the same payload hash', () => {
+    const input1 = {
+      requesterMembershipId: 'pm-a',
+      networkId: NETWORK_A,
+      networkVersionId: 'nv-1',
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+      constraints: [
+        { constraintId: 'c-1', kind: 'quality', steps: ['prepare', 'execute'] },
+      ],
+    }
+    const input2 = {
+      requesterMembershipId: 'pm-a',
+      networkId: NETWORK_A,
+      networkVersionId: 'nv-1',
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+      constraints: [
+        { constraintId: 'c-1', kind: 'quality', steps: ['prepare', 'execute'] },
+      ],
+    }
+
+    const hash1 = computePayloadHash(input1)
+    const hash2 = computePayloadHash(input2)
+
+    // Same array order → same hash.
+    expect(hash1).toBe(hash2)
+  })
+})

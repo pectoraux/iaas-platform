@@ -3556,3 +3556,29 @@ Stage Summary:
 - The canonicalizer is now: recursive (all fields), type-preserving ({type, value}), array-sorting (unordered sets), and duplicate-ID-rejecting.
 - The user's directive: "After that, stop refining the idempotency layer." — this is the final canonicalizer fix. The next step is PostgreSQL concurrency tests, then close Slice 2.
 - 130/130 tests pass. eslint clean. tsc clean. Dev server HTTP 200.
+
+---
+Task ID: 12B-slice-2-final-idempotency
+Agent: main (Z.ai Code)
+Task: Fix the three remaining issues from the audit of 1d360e4: (1) missing/empty constraintId loophole, (2) array order semantics, (3) tests. PostgreSQL concurrency tests deferred to CI.
+
+Work Log:
+- Fix 1 (missing/empty constraintId): validateNoDuplicateConstraintIds now requires every constraint to have a non-empty constraintId. Missing or empty → INVALID_REQUEST. This closes the loophole where multiple constraints without IDs could pass validation but have input-dependent canonical ordering.
+
+- Fix 2 (array order preservation): reverted the array-sorting behavior. Arrays are now ORDER-PRESERVED by default — they are semantically ordered. A future constraint that needs unordered semantics MUST pre-sort its array before submission. This is the safer default because sorting an ordered array would destroy semantic information. Documented in the canonicalizer's rules.
+
+- Added 7 tests:
+  1. Missing constraintId → rejected.
+  2. Empty constraintId → rejected.
+  3. Duplicate constraintIds → rejected.
+  4. Unique non-empty constraintIds → accepted.
+  5. Empty constraints array → accepted.
+  6. Different array orders → different payload hashes (order matters).
+  7. Same array orders → same payload hash (order preserved correctly).
+
+- VERIFICATION: tsc zero errors. eslint clean. 49/49 phase-12b tests pass (was 42; added 7). 137/137 total. Dev server HTTP 200.
+
+Stage Summary:
+- The idempotency layer is now final per the user's directive. Missing/empty constraintIds are rejected, arrays preserve order, and the canonicalizer is future-proof (recursive, type-preserving, all fields included).
+- 49/49 phase-12b tests pass. 137/137 total. eslint clean. tsc clean. Dev server HTTP 200.
+- REMAINING: PostgreSQL concurrency tests (identical concurrent → one result; different concurrent → no oversubscribe) are CI-only — the final gate for Slice 2 closure.

@@ -163,8 +163,11 @@ export function computePayloadHash(input: SubmitNetworkRequestInput): string {
  *
  * RULES:
  *   1. Object keys → sorted (deterministic key order).
- *   2. Arrays → sorted recursively (treated as unordered sets —
- *      same elements in different order produce the same canonical form).
+ *   2. Arrays → ORDER PRESERVED (arrays are semantically ordered by default;
+ *      a future constraint may define "steps": ["prepare","execute","verify"]
+ *      where order matters). If a future constraint kind needs unordered
+ *      collection semantics, it MUST declare that in its contract and
+ *      pre-sort the array before submission.
  *   3. Primitive values → wrapped as { type, value } to preserve
  *      semantic type (number 1 ≠ string "1"; boolean true ≠ string "true").
  *
@@ -187,16 +190,11 @@ function canonicalizeConstraint(c: unknown): Record<string, unknown> {
     return { type: typeof c, value: String(c) }
   }
   if (Array.isArray(c)) {
-    // Sort array elements recursively, then serialize.
-    // Arrays are treated as unordered sets: same elements in different
-    // order produce the same canonical form.
-    const sorted = c
-      .map(canonicalizeConstraint)
-      .sort((a, b) => compareCanonicalStrings(
-        JSON.stringify(canonicalizeForSort(a)),
-        JSON.stringify(canonicalizeForSort(b)),
-      ))
-    return { array: sorted }
+    // Arrays preserve element order — they are semantically ordered by default.
+    // A future constraint that needs unordered semantics MUST pre-sort its
+    // array before submission. This is the safer default because sorting
+    // an ordered array would destroy semantic information.
+    return { array: c.map(canonicalizeConstraint) }
   }
   const entry = c as Record<string, unknown>
   const result: Record<string, unknown> = {}
@@ -204,19 +202,6 @@ function canonicalizeConstraint(c: unknown): Record<string, unknown> {
     result[key] = canonicalizeConstraint(entry[key])
   }
   return result
-}
-
-/**
- * Helper to produce a stable string for sorting canonicalized elements.
- * The canonicalized form is already deterministic per-element; we just
- * need a string to sort by.
- */
-function canonicalizeForSort(val: unknown): string {
-  if (val === null) return 'null'
-  if (typeof val === 'object') {
-    return JSON.stringify(val)
-  }
-  return String(val)
 }
 
 /**
@@ -246,11 +231,13 @@ export function validateNoDuplicateCapabilityDimensions(
 }
 
 /**
- * Validate that constraint IDs are unique within a request.
+ * Validate that constraint IDs are unique and non-empty within a request.
  *
- * PHASE 12B FIX: duplicate constraintId → INVALID_REQUEST. Two constraints
- * with the same ID would leave their relative order in the canonical
- * serialization input-dependent, breaking the determinism guarantee.
+ * PHASE 12B FIX: every constraint MUST have a non-empty constraintId.
+ * Missing/empty constraintId → INVALID_REQUEST. Duplicate constraintId →
+ * INVALID_REQUEST. Two constraints with the same ID (or no ID) would leave
+ * their relative order in the canonical serialization input-dependent,
+ * breaking the determinism guarantee.
  */
 export function validateNoDuplicateConstraintIds(
   constraints: unknown[],
@@ -258,8 +245,12 @@ export function validateNoDuplicateConstraintIds(
   const seen = new Set<string>()
   for (const c of constraints) {
     const entry = c as Record<string, unknown>
-    const constraintId = String(entry?.constraintId ?? '')
-    if (constraintId && seen.has(constraintId)) {
+    const constraintId = String(entry?.constraintId ?? '').trim()
+    if (!constraintId) {
+      return `Constraint is missing a constraintId. Every constraint must have ` +
+        `a non-empty, unique ID within the request.`
+    }
+    if (seen.has(constraintId)) {
       return `Duplicate constraintId: '${constraintId}'. ` +
         `Each constraint must have a unique ID within the request.`
     }
