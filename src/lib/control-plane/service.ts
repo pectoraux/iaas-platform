@@ -352,6 +352,9 @@ export async function submitNetworkRequest(
 
   // 5-11: Atomic transaction.
   const result = await db.$transaction(async (tx) => {
+    // Steps 5-13 run inside this transaction.
+    // The timeout is increased from the default 5s to 30s because
+    // concurrent requests may block on FOR UPDATE locks.
     // 5. Resolve the requester membership.
     const requesterMembership = await tx.participantMembership.findUnique({
       where: { id: input.requesterMembershipId },
@@ -670,7 +673,7 @@ export async function submitNetworkRequest(
       decision,
       reservations: reservationResults,
     }
-  })
+  }, { timeout: 30000 })
 
   return result
 }

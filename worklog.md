@@ -3604,3 +3604,20 @@ Stage Summary:
 - Test B proves distinct requests don't corrupt: distinct decisions, no shared reservations, clean errors.
 - Slice 2 is now ready for closure.
 - 137 pass + 2 skip locally. 2/2 against Neon. eslint clean. tsc clean. Dev server HTTP 200.
+
+---
+Task ID: 12B-slice-2-concurrency-v2
+Agent: main (Z.ai Code)
+Task: Revised concurrency tests with real resource provisioning and direct DB assertions. Test A passes. Tests B and C fail — debugging in progress.
+
+Work Log:
+- Rewrote tests to provision actual resource stack: Asset → AssetNetworkAssignment → CapacityResource → ResourceIdentity → NetworkResourceMembership.
+- Test A (identical concurrent, 8 GPU capacity): PASS. One durable allocation, both callers converge. Direct DB assertions: 1 NetworkRequest, 1 AllocationDecision, 1 AllocationReservation, 8 reserved, 0 remaining.
+- Test B (different concurrent, 10 GPU capacity, 2x8 GPU requests): FAIL. Debug output shows:
+  - Winner returns reservationId with allocatedAmount=8
+  - Loser error: "Insufficient capacity: requested 8, available 0 GPU" (should be "available 2")
+  - DB query: reserved=0 (should be 8)
+  - The winner's transaction appears to have committed (call returned fulfilled), but the reservation is not in the DB.
+- Test C (different concurrent, 16 GPU capacity, 2x8 GPU requests): FAIL. Only 1 of 2 succeeds (should be 2).
+- The issue appears to be related to how the capacity service's FOR UPDATE lock interacts with the db.$transaction in the control-plane service. The capacity reservation is created inside the transaction, but the getTotalReserved function doesn't find it after the transaction commits.
+- HONEST STATUS: Test A proves idempotency under concurrent load. Tests B and C need further investigation — the capacity handoff appears to have a transaction visibility issue.
