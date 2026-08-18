@@ -1319,3 +1319,144 @@ describe('Phase 12B: total canonical ordering (input-order independence)', () =>
     expect(hash1).toBe(hash2)
   })
 })
+
+// ---------------------------------------------------------------------------
+// capabilityRequirements + allocatedCapacity input-order independence
+// ---------------------------------------------------------------------------
+
+describe('Phase 12B: capabilityRequirements + allocatedCapacity total ordering', () => {
+  it('same capabilityRequirements in different array orders produce the same decisionSnapshotHash', () => {
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+    const candidate = makeMembership('rm-gpu-1', NETWORK_A, ['compute', 'storage'], [
+      { capabilityType: 'compute', amount: '8', unit: 'GPU' },
+      { capabilityType: 'storage', amount: '100', unit: 'TB' },
+    ])
+    const remaining = new Map([['rm-gpu-1', [
+      { capabilityType: 'compute', amount: '8', unit: 'GPU' },
+      { capabilityType: 'storage', amount: '100', unit: 'TB' },
+    ]]])
+    const authorizing = new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]])
+
+    // Same requirements, different array orders.
+    const reqOrder1 = [
+      { capabilityType: 'compute', amount: '4', unit: 'GPU' },
+      { capabilityType: 'storage', amount: '50', unit: 'TB' },
+    ]
+    const reqOrder2 = [
+      { capabilityType: 'storage', amount: '50', unit: 'TB' },
+      { capabilityType: 'compute', amount: '4', unit: 'GPU' },
+    ]
+
+    const request1 = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: reqOrder1,
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+    })
+    const request2 = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: reqOrder2,
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+    })
+
+    // Override the requestId to be the same so the only difference is the array order.
+    const baseSnapshot = {
+      networkVersionId: VERSION_1,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      capacityStateByMembership: remaining,
+      authorizingMemberships: authorizing,
+      schedulerVersion: 'test-v1',
+      evaluatorVersion: 'test-ev-v1',
+    }
+
+    // Use the same requestId for both so only the array order differs.
+    const canonicalRequest1 = { ...request1, requestId: 'same-request-id' }
+    const canonicalRequest2 = { ...request2, requestId: 'same-request-id' }
+
+    const hash1 = computeDecisionSnapshotHash({ ...baseSnapshot, request: canonicalRequest1 })
+    const hash2 = computeDecisionSnapshotHash({ ...baseSnapshot, request: canonicalRequest2 })
+
+    // Same requirements, different array order → same hash.
+    expect(hash1).toBe(hash2)
+  })
+
+  it('same allocatedCapacity in different array orders produce the same decisionId', async () => {
+    // Test via the scheduler: two requests with same requirements in different
+    // orders should produce the same decisionId (since allocatedCapacity is
+    // derived from the requirements and sorted canonically).
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+    const candidate = makeMembership('rm-1', NETWORK_A, ['compute', 'storage'], [
+      { capabilityType: 'compute', amount: '8', unit: 'GPU' },
+      { capabilityType: 'storage', amount: '100', unit: 'TB' },
+    ])
+    const remaining = new Map([['rm-1', [
+      { capabilityType: 'compute', amount: '8', unit: 'GPU' },
+      { capabilityType: 'storage', amount: '100', unit: 'TB' },
+    ]]])
+    const authorizing = new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]])
+
+    const reqOrder1 = [
+      { capabilityType: 'compute', amount: '4', unit: 'GPU' },
+      { capabilityType: 'storage', amount: '50', unit: 'TB' },
+    ]
+    const reqOrder2 = [
+      { capabilityType: 'storage', amount: '50', unit: 'TB' },
+      { capabilityType: 'compute', amount: '4', unit: 'GPU' },
+    ]
+
+    // Use the same requestId so only the array order differs.
+    const request1 = {
+      requestId: 'same-req',
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: reqOrder1,
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+      status: 'pending' as const,
+      submittedAt: new Date('2024-06-01T00:00:00Z'),
+    }
+    const request2 = {
+      requestId: 'same-req',
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: reqOrder2,
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+      status: 'pending' as const,
+      submittedAt: new Date('2024-06-01T00:00:00Z'),
+    }
+
+    const result1 = await schedule({
+      networkVersionId: VERSION_1,
+      request: request1,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      remainingCapacity: remaining,
+      authorizingMemberships: authorizing,
+    })
+    const result2 = await schedule({
+      networkVersionId: VERSION_1,
+      request: request2,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      remainingCapacity: remaining,
+      authorizingMemberships: authorizing,
+    })
+
+    expect(result1.status).toBe('allocated')
+    expect(result2.status).toBe('allocated')
+    if (result1.status === 'allocated' && result2.status === 'allocated') {
+      // Same requirements in different orders → same decisionId.
+      expect(result2.decision.decisionId).toBe(result1.decision.decisionId)
+    }
+  })
+})

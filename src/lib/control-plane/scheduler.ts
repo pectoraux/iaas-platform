@@ -305,7 +305,8 @@ export function schedule(input: SchedulerInput): SchedulerResult {
     allocatedCapacity,
     allocationWindow: request.timeWindow,
     priority: request.priority,
-    fairnessScore: 1.0 / (eligible.indexOf(selected) + 1), // simple fairness: 1/n
+    // PHASE 12B FIX: fairnessScore removed — it was always 1.0 (a placeholder).
+    // A real fairness policy will be added when schedulingPolicy is implemented.
     schedulerVersion: SCHEDULER_VERSION,
     evaluatorVersion: evaluator.evaluatorVersion,
     decisionSnapshotHash,
@@ -348,7 +349,11 @@ function computeDecisionId(input: {
     selectedMembershipId: input.selectedMembershipId,
     allocatedCapacity: input.allocatedCapacity
       .map((c) => ({ ...c }))
-      .sort((a, b) => compareCanonicalStrings(a.capabilityType, b.capabilityType)),
+      .sort((a, b) => {
+        if (a.capabilityType !== b.capabilityType) return compareCanonicalStrings(a.capabilityType, b.capabilityType)
+        if (a.unit !== b.unit) return compareCanonicalStrings(a.unit, b.unit)
+        return compareCanonicalStrings(a.amount, b.amount)
+      }),
     allocationWindow: {
       start: input.allocationWindow.start.toISOString(),
       end: input.allocationWindow.end.toISOString(),

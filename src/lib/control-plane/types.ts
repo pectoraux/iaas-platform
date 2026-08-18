@@ -206,7 +206,9 @@ export interface AllocationDecision {
   readonly allocatedCapacity: CapacityEntry[]
   readonly allocationWindow: { start: Date; end: Date }
   readonly priority?: number
-  readonly fairnessScore?: number
+  // PHASE 12B FIX: fairnessScore removed — it was always 1.0 (a placeholder).
+  // A real fairness policy will be added in a later slice when the
+  // schedulingPolicy from the NetworkVersion is implemented.
   readonly schedulerVersion: string
   readonly evaluatorVersion: string // PHASE 12B FIX (defect 3): for reproducibility
   readonly decisionSnapshotHash: string // §8.7 — SHA-256 of the canonical snapshot
@@ -369,7 +371,15 @@ export function computeDecisionSnapshotHash(snapshot: {
     requestId: snapshot.request.requestId,
     requesterMembershipId: snapshot.request.requesterMembershipId,
     networkId: snapshot.request.networkId,
-    capabilityRequirements: snapshot.request.capabilityRequirements,
+    // PHASE 12B FIX: sort capabilityRequirements with total ordering.
+    // Same requirements in different array orders must produce the same hash.
+    capabilityRequirements: snapshot.request.capabilityRequirements
+      .map((r) => ({ ...r }))
+      .sort((a, b) => {
+        if (a.capabilityType !== b.capabilityType) return compareCanonicalStrings(a.capabilityType, b.capabilityType)
+        if (a.unit !== b.unit) return compareCanonicalStrings(a.unit, b.unit)
+        return compareCanonicalStrings(a.amount, b.amount)
+      }),
     priority: snapshot.request.priority ?? null,
     constraints: (snapshot.request.constraints ?? []).map((c) => {
       const base = {

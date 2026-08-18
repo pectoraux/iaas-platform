@@ -3357,3 +3357,29 @@ Stage Summary:
 - The snapshot hash is now genuinely input-order-independent.
 - 37/37 tests pass. 125/125 total. eslint clean. tsc clean. Dev server HTTP 200.
 - Slice 1 is now ready for final acceptance.
+
+---
+Task ID: 12B-slice-1-fix-10
+Agent: main (Z.ai Code)
+Task: Fix the final three defects from the audit of 9ef8ab7: (1) capabilityRequirements not canonicalized in snapshot hash, (2) allocatedCapacity in decisionId sorted by primary key only, (3) fairnessScore is always 1.0 (misleading placeholder).
+
+Work Log:
+- Defect 1 (capabilityRequirements ordering): computeDecisionSnapshotHash now sorts capabilityRequirements with total ordering (capabilityType → unit → amount) before hashing. Same requirements in different array orders now produce the same hash.
+- Defect 2 (allocatedCapacity ordering in decisionId): computeDecisionId now sorts allocatedCapacity with total ordering (capabilityType → unit → amount), matching the snapshot hash's canonicalization. Same allocated capacity in different array orders now produces the same decisionId.
+- Defect 3 (fairnessScore removed): removed fairnessScore from AllocationDecision and from the scheduler. It was always 1.0 (a placeholder artifact of always selecting eligible[0]). A real fairness policy will be added when schedulingPolicy from the NetworkVersion is implemented in a later slice.
+- Added 2 tests: capabilityRequirements input-order independence (same requirements different orders → same hash), allocatedCapacity input-order independence (same requirements different orders → same decisionId via the scheduler).
+- VERIFICATION: tsc zero errors. eslint clean. 39/39 phase-12b tests pass. 127/127 total. Dev server HTTP 200.
+
+Stage Summary:
+- All three defects fixed. Every semantically unordered collection that participates in either decisionSnapshotHash or decisionId is now canonicalized with total ordering:
+  - capabilityRequirements: (capabilityType, unit, amount) — in snapshot hash
+  - allocatedCapacity: (capabilityType, unit, amount) — in decisionId
+  - requesterRoles: (role, roleStatus, revokedAt) — in snapshot hash
+  - verifiedCapacity: (capabilityType, unit, amount) — in snapshot hash
+  - remainingCapacity: (capabilityType, unit, amount) — in snapshot hash
+  - observations: (serviceType, unit, value) — in snapshot hash
+  - capacitySources: (sourceId, capabilityType, unit, remainingAmount) — in snapshot hash (already correct)
+  - constraints: (constraintId) — in snapshot hash (unique IDs, single key is sufficient)
+  - candidateMemberships: (membershipId) — in snapshot hash (unique IDs)
+- fairnessScore removed — will return when a real fairness policy exists.
+- 39/39 tests pass. 127/127 total. eslint clean. tsc clean. Dev server HTTP 200.
