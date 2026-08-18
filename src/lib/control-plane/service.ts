@@ -36,6 +36,8 @@ import {
   DefaultConstraintEvaluator,
   compareCanonicalStrings,
 } from './types'
+import { createCapacityReservation } from '@/lib/services/capacity.service'
+import type { ExtendedTransactionClient } from '@/lib/db'
 import type {
   NetworkRequest,
   AllocationDecision,
@@ -88,7 +90,7 @@ export class NetworkScopeIntegrityError extends Error {
 export interface SubmitNetworkRequestInput {
   requesterMembershipId: string
   networkId: string
-  networkVersionId?: string
+  networkVersionId: string // REQUIRED — must reference a published NetworkVersion
   capabilityRequirements: { capabilityType: string; amount: string; unit: string }[]
   timeWindow: { start: Date; end: Date }
   constraints?: unknown[]
@@ -195,7 +197,7 @@ export async function submitNetworkRequest(
       return {
         request: dbRequestToNetworkRequest(existing),
         decision: dbDecisionToAllocationDecision(existingDecision),
-        reservationId: existingDecision.selectedMembershipId,
+        reservationId: existingDecision.reservationId ?? '',
       }
     }
 
@@ -280,7 +282,7 @@ export async function submitNetworkRequest(
       return {
         request: dbRequestToNetworkRequest(request),
         decision: dbDecisionToAllocationDecision(existingDecision),
-        reservationId: existingDecision.selectedMembershipId,
+        reservationId: existingDecision.reservationId ?? '',
       }
     }
 
@@ -353,7 +355,7 @@ export async function submitNetworkRequest(
     }
 
     const schedulerResult = schedule({
-      networkVersionId: input.networkVersionId ?? 'default',
+      networkVersionId: input.networkVersionId, // REQUIRED — no 'default' fallback
       request: networkRequest,
       requesterMembership: {
         membershipId: requesterMembership.id,
@@ -391,7 +393,48 @@ export async function submitNetworkRequest(
 
     const decision = schedulerResult.decision
 
-    // 11. Persist the AllocationDecision (exact scheduler output).
+    // 11. Call the existing CapacityService to create a reservation for
+    //     each capability requirement. This uses FOR UPDATE locking on
+    //     CapacityResource — the authoritative concurrency boundary.
+    //     The reservation is created INSIDE the same transaction.
+    const reservationIds: string[] = []
+    for (const cap of decision.allocatedCapacity) {
+      // Look up the resource membership to find the assetId + tenantId.
+      const selectedMembership = resourceMemberships.find(
+        (rm) => rm.id === decision.selectedMembershipId,
+      )
+      if (!selectedMembership) {
+        throw new RequestAuthorizationError(
+          `Selected membership ${decision.selectedMembershipId} not found in loaded snapshot`,
+        )
+      }
+
+      // Resolve tenantId from the network.
+      const network = await tx.networkDefinition.findUnique({
+        where: { id: input.networkId },
+      })
+      if (!network) {
+        throw new RequestAuthorizationError(
+          `Network ${input.networkId} not found`,
+        )
+      }
+
+      const reservationResult = await createCapacityReservation({
+        tenantId: network.tenantId,
+        assetId: selectedMembership.resourceId,
+        networkId: input.networkId,
+        capabilityType: cap.capabilityType,
+        requestedAmount: cap.amount,
+        startTime: decision.allocationWindow.start,
+        endTime: decision.allocationWindow.end,
+        sourceType: 'network_request',
+        sourceId: decision.requestId,
+      }, tx as unknown as ExtendedTransactionClient)
+
+      reservationIds.push(reservationResult.reservationId)
+    }
+
+    // 12. Persist the AllocationDecision (exact scheduler output + reservation binding).
     await tx.allocationDecision.create({
       data: {
         id: decision.decisionId,
@@ -406,13 +449,14 @@ export async function submitNetworkRequest(
         schedulerVersion: decision.schedulerVersion,
         evaluatorVersion: decision.evaluatorVersion,
         decisionSnapshotHash: decision.decisionSnapshotHash,
+        reservationId: reservationIds[0] ?? null, // durable allocation-to-capacity binding
         decidedAt: decision.decidedAt,
         expiresAt: decision.expiresAt,
         status: 'active',
       },
     })
 
-    // 12. Mark the request as scheduled.
+    // 13. Mark the request as scheduled.
     await tx.networkRequest.update({
       where: { id: requestId },
       data: {
@@ -424,7 +468,7 @@ export async function submitNetworkRequest(
     return {
       request: networkRequest,
       decision,
-      reservationId: decision.selectedMembershipId, // TODO: integrate with capacity service
+      reservationId: reservationIds[0] ?? '',
     }
   })
 

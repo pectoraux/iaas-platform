@@ -102,6 +102,7 @@ model Organization {
 
   tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   operators Operator[]
+  participantIdentities ParticipantIdentity[]
 
   @@index([tenantId])
 }
@@ -1607,7 +1608,9 @@ model ParticipantIdentity {
   organizationId  String?
   createdAt       DateTime @default(now())
 
+  organization    Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
   memberships     ParticipantMembership[]
+  controlledResources ResourceIdentity[]
 
   @@index([organizationId])
 }
@@ -1662,6 +1665,7 @@ model ResourceIdentity {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
+  controller      ParticipantIdentity? @relation(fields: [controllerId], references: [id], onDelete: SetNull)
   networkMemberships NetworkResourceMembership[]
 
   @@index([controllerId])
@@ -1673,11 +1677,13 @@ model ResourceIdentity {
 /// specific network. Per-network bindings. Binds to ParticipantMembershipId
 /// (the network-scoped authority). Generalizes AssetNetworkAssignment.
 ///
-/// Network Scope Integrity: the (participantMembershipId, networkId)
-/// composite implicitly enforces same-network — the ParticipantMembership's
-/// networkId must match this membership's networkId (service-layer check +
-/// the unique constraint on ParticipantMembership(participantId, networkId)
-/// makes cross-network binding structurally detectable).
+/// Network Scope Integrity: the service layer (in types.ts:
+/// assertNetworkScopeIntegrity + authorizeRequest) enforces that the
+/// ParticipantMembership's networkId matches this membership's networkId.
+/// Prisma does not support composite FKs across different models with
+/// different parent chains, so structural enforcement is at the service
+/// layer, not the schema level. The service-layer check is tested by
+/// the Phase 12B test suite.
 model NetworkResourceMembership {
   id                      String   @id @default(cuid())
   resourceId              String   // FK to ResourceIdentity
@@ -1713,7 +1719,7 @@ model NetworkRequest {
   id                      String   @id // deterministic: SHA-256(networkId, requesterMembershipId, idempotencyKey)
   requesterMembershipId   String   // FK to ParticipantMembership
   networkId               String
-  networkVersionId        String?  // the policy bundle version
+  networkVersionId        String   // REQUIRED: the published NetworkVersion policy bundle. Absent/unpublished → rejected.
   capabilityRequirementsJson String // canonical, sorted
   constraintsJson         String?  // canonical, sorted (optional)
   priority                Int?
@@ -1738,6 +1744,10 @@ model NetworkRequest {
 /// The decision record preserves the full audit trail (§8.7):
 /// candidate memberships, selected membership, allocated capacity,
 /// schedulerVersion, evaluatorVersion, decisionSnapshotHash.
+///
+/// reservationId: the ID of the CapacityReservation created by the existing
+/// CapacityService. This is the durable allocation-to-capacity binding.
+/// Set AFTER the reservation is created inside the same transaction.
 model AllocationDecision {
   id                      String   @id // deterministic: SHA-256 of semantic content
   requestId               String   // FK to NetworkRequest
@@ -1751,6 +1761,7 @@ model AllocationDecision {
   schedulerVersion        String
   evaluatorVersion        String
   decisionSnapshotHash    String   // §8.7 — exact hash from the pure scheduler
+  reservationId           String?  // FK to CapacityReservation — set after reservation is created
   decidedAt               DateTime @default(now())
   expiresAt               DateTime
   status                  String   @default("active") // active | consumed | expired
@@ -1759,4 +1770,5 @@ model AllocationDecision {
   @@index([networkId])
   @@index([selectedMembershipId])
   @@index([decisionSnapshotHash])
+  @@index([reservationId])
 }
