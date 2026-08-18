@@ -3251,3 +3251,25 @@ Stage Summary:
 - The snapshot hash is independently auditable — it captures every input that can affect eligibility and selection.
 - CapacityConstraint is now semantically evaluated (operator + threshold), not just type-checked.
 - 30/30 tests pass. 118/118 total. eslint clean. tsc clean. Dev server HTTP 200.
+
+---
+Task ID: 12B-slice-1-fix-5
+Agent: main (Z.ai Code)
+Task: Fix the final two architectural defects from the audit of cc27bfd: (1) capacitySourceId ignored in CapacityConstraint evaluation, (2) two competing capacity truth channels (remainingCapacity vs observationSnapshots).
+
+Work Log:
+- Defect 1 (capacitySourceId enforcement): added CapacitySourceSnapshot interface (sourceId, capabilityType, remainingAmount, unit). The DefaultConstraintEvaluator.evaluateCapacity now finds the SPECIFIC source by (sourceId + capabilityType) and evaluates the threshold against ITS remaining amount. If no source with the specified ID exists, the candidate is filtered. This handles the multi-pool case (GPU pool A = 8, GPU pool B = 2; a constraint targeting source B checks B's 2, not A's 8).
+- Defect 2 (single authoritative capacity truth): split the evaluator contract into two methods: evaluateService (uses observationSnapshots for SLA values like latency/availability) and evaluateCapacity (uses authoritative capacity state via CapacitySourceSnapshot with source identity). The scheduler's constraint evaluation loop now routes CapacityConstraints to evaluateCapacity (with capacitySources) and ServiceConstraints to evaluateService (with observationSnapshots). This ensures capacity has ONE truth channel — the authoritative remaining-capacity state — while service SLAs have their own channel (observations). The two cannot diverge.
+- Added capacitySources to SchedulerInput (Map<membershipId, CapacitySourceSnapshot[]>).
+- Evaluator version bumped to 'default-evaluator-v3' to reflect the architectural split.
+- Updated index.ts to export CapacitySourceSnapshot.
+- VERIFICATION: tsc zero errors. eslint clean. 30/30 phase-12b tests pass. 118/118 total. Dev server HTTP 200.
+
+Stage Summary:
+- Both defects fixed. The scheduler now has a clean boundary:
+  CapabilityRequirements → remainingCapacity (allocation check)
+  CapacityConstraints → capacitySources with sourceId (capacity eligibility)
+  ServiceConstraints → observationSnapshots (SLA evaluation)
+- capacitySourceId is enforced: a constraint targeting source B evaluates B's capacity, not A's.
+- Single truth channel for capacity: remainingCapacity (for allocation) and capacitySources (for constraint eligibility) are both authoritative capacity state — no competing observation-based capacity.
+- 30/30 tests pass. 118/118 total. eslint clean. tsc clean. Dev server HTTP 200.

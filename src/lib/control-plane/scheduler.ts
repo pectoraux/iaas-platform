@@ -38,6 +38,9 @@ import type {
   CapabilityRequirement,
   ConstraintEvaluator,
   ConstraintObservationSnapshot,
+  CapacitySourceSnapshot,
+  CapacityConstraint,
+  ServiceConstraint,
 } from './types'
 import {
   authorizeRequest,
@@ -95,6 +98,17 @@ export interface SchedulerInput {
    * observed values and evaluates operator + threshold correctly.
    */
   readonly observationSnapshots?: Map<string, ConstraintObservationSnapshot>
+  /**
+   * Authoritative capacity source snapshots for each candidate membership,
+   * keyed by membershipId. Each membership may have multiple capacity sources
+   * (e.g., GPU pool A, GPU pool B). Used for CapacityConstraint evaluation.
+   *
+   * PHASE 12B FIX (defect from audit): CapacityConstraint evaluation now uses
+   * the authoritative capacity state (with source identity), NOT the observation
+   * snapshot. This ensures a single truth channel for capacity — the same
+   * state the scheduler uses for CapabilityRequirement checking.
+   */
+  readonly capacitySources?: Map<string, CapacitySourceSnapshot[]>
 }
 
 /**
@@ -176,21 +190,31 @@ export function schedule(input: SchedulerInput): SchedulerResult {
       continue
     }
 
-    // 3g. PHASE 12B FIX (defect 2): evaluate ServiceConstraints (latency,
-    // availability, quality, etc.) using the observation snapshot. A candidate
-    // that satisfies bandwidth but not a latency constraint must be filtered.
-    // The evaluator now receives actual observed values and evaluates
-    // operator + threshold — not just type-checking.
+    // 3g. PHASE 12B FIX: evaluate constraints using SEPARATE authority channels.
+    //   - CapacityConstraints → authoritative capacity state (with source identity)
+    //   - ServiceConstraints → observation snapshots (SLA values)
+    // This prevents two competing truth channels for capacity.
     if (request.constraints) {
       const observations = input.observationSnapshots?.get(membership.membershipId)
-      if (!observations) {
-        // No observation snapshot for this candidate → cannot evaluate
-        // constraints → filter out.
-        continue
-      }
-      const allConstraintsSatisfied = request.constraints.every(
-        (constraint) => evaluator.evaluate(constraint, observations),
-      )
+      const sources = input.capacitySources?.get(membership.membershipId) ?? []
+
+      const allConstraintsSatisfied = request.constraints.every((constraint) => {
+        if (constraint.kind === 'capacity') {
+          // CapacityConstraint: use the authoritative capacity state with
+          // source identity enforcement. NOT the observation snapshot.
+          return evaluator.evaluateCapacity(
+            constraint as CapacityConstraint,
+            sources,
+          )
+        } else {
+          // ServiceConstraint: use the observation snapshot (SLA values).
+          if (!observations) return false
+          return evaluator.evaluateService(
+            constraint as ServiceConstraint,
+            observations,
+          )
+        }
+      })
       if (!allConstraintsSatisfied) {
         continue
       }

@@ -453,127 +453,145 @@ export function computeDecisionSnapshotHash(snapshot: {
 // ---------------------------------------------------------------------------
 
 /**
- * A constraint observation snapshot — the declared/policy-backed values
- * for a resource membership's service-level attributes (latency, availability,
+ * A SERVICE observation snapshot — the declared/policy-backed values
+ * for a resource membership's SERVICE-level attributes (latency, availability,
  * quality, jitter, etc.).
  *
- * PHASE 12B FIX (defect from audit): the original DefaultConstraintEvaluator
- * only checked whether the candidate's verificationProfile CONTAINED the
- * service type string — it ignored the operator/threshold/unit/slaPolicyRef.
- * That was type-checking, not constraint evaluation. A request for
- * `latency <= 20ms` and `latency <= 200ms` were treated identically.
- *
- * This snapshot provides the actual declared values so the evaluator can
- * evaluate operator + threshold correctly:
- *   `latency <= 20ms` requires an observed latency value ≤ 20.
- *
- * The observations come from the resource's declared profile (not from
- * real-time measurement — that happens in the evidence/verification pipeline).
- * For scheduling, the declared/policy-backed values are sufficient to filter
- * candidates.
+ * This is for ServiceConstraint evaluation ONLY. CapacityConstraint evaluation
+ * uses the authoritative remaining-capacity state (via CapacitySourceSnapshot),
+ * NOT this observation snapshot. This separation prevents the two truth channels
+ * from diverging — capacity comes from the capacity layer, service SLAs come
+ * from observations.
  */
 export interface ConstraintObservationSnapshot {
   /** The resource membership this snapshot is for. */
   readonly membershipId: string
   /**
-   * Observed values keyed by serviceType (latency, availability, quality, etc.).
+   * Observed SERVICE values keyed by serviceType (latency, availability, quality, etc.).
    * Each value has a numeric/string value + unit.
    */
   readonly observations: Map<string, { value: string; unit: string }>
 }
 
 /**
- * A constraint evaluator determines whether a candidate resource membership
- * satisfies a request's constraints, given the candidate's observation snapshot.
+ * A CAPACITY source snapshot — the authoritative remaining capacity for a
+ * specific capacity source. Used for CapacityConstraint evaluation.
  *
- * This is a GENERIC contract — it does NOT contain vertical-specific semantics.
- * The evaluator receives the constraint (with operator + threshold + unit) and
- * the candidate's observed value for that service type, and evaluates whether
- * the threshold is met.
+ * PHASE 12B FIX (defect from audit): CapacityConstraint has a `capacitySourceId`
+ * that identifies which specific capacity pool the constraint targets. A resource
+ * may have multiple capacity pools (e.g., GPU pool A = 8 GPU, GPU pool B = 2 GPU).
+ * The evaluation must check the SPECIFIC source, not a generic capability-type
+ * observation.
  *
- * PHASE 12B FIX: the evaluator now receives ConstraintObservationSnapshot
- * (actual values), not just the membership. It evaluates operator + threshold
- * against the observed value. And it has a version (evaluatorVersion) for
- * reproducibility.
+ * This is the authoritative capacity state — the same state the scheduler uses
+ * for CapabilityRequirement checking. Using it for CapacityConstraint evaluation
+ * ensures a single truth channel for capacity (not two competing representations).
+ */
+export interface CapacitySourceSnapshot {
+  /** The capacity source identity (maps to CapacityConstraint.capacitySourceId). */
+  readonly sourceId: string
+  /** The capability type this source provides (e.g., 'compute', 'bandwidth'). */
+  readonly capabilityType: string
+  /** The remaining amount in this source. */
+  readonly remainingAmount: string
+  /** The unit (e.g., 'GPU', 'Mbps', 'TB'). */
+  readonly unit: string
+}
+
+/**
+ * A constraint evaluator with SEPARATE authority channels:
+ *   - ServiceConstraints → observation snapshots (SLA values)
+ *   - CapacityConstraints → authoritative capacity state (with source identity)
+ *
+ * PHASE 12B FIX (defect from audit): the original evaluator used observation
+ * snapshots for BOTH constraint types, creating two competing truth channels
+ * for capacity. Now CapacityConstraint evaluation uses the authoritative
+ * capacity state (remainingCapacity) with source identity enforcement, while
+ * ServiceConstraint evaluation uses observation snapshots.
  */
 export interface ConstraintEvaluator {
   /** The evaluator version — recorded in the AllocationDecision for reproducibility. */
   readonly evaluatorVersion: string
 
   /**
-   * Evaluate whether a candidate satisfies a constraint, given its
-   * observation snapshot.
-   *
-   * @param constraint The constraint to evaluate (with operator, threshold, unit).
-   * @param snapshot The candidate's observed values (latency: 14ms, availability: 99.95%, etc.).
-   * @returns true if the observed value satisfies the constraint.
+   * Evaluate a ServiceConstraint against the candidate's service observations.
    */
-  evaluate(constraint: CommitmentConstraint, snapshot: ConstraintObservationSnapshot): boolean
+  evaluateService(
+    constraint: ServiceConstraint,
+    observations: ConstraintObservationSnapshot,
+  ): boolean
+
+  /**
+   * Evaluate a CapacityConstraint against the authoritative capacity state.
+   *
+   * PHASE 12B FIX: this uses the authoritative remaining-capacity state
+   * (with source identity), NOT a generic observation snapshot. This ensures
+   * a single truth channel for capacity.
+   *
+   * The `capacitySourceId` MUST match a source in the snapshot — if the
+   * candidate has no source with the specified ID, the constraint is NOT
+   * satisfied.
+   */
+  evaluateCapacity(
+    constraint: CapacityConstraint,
+    capacitySources: CapacitySourceSnapshot[],
+  ): boolean
 }
 
 /**
- * The default constraint evaluator — evaluates operator + threshold against
- * the candidate's observed values.
+ * The default constraint evaluator.
  *
- * For CapacityConstraints: returns true (capacity is handled by the scalar
- * capacity check in the scheduler).
+ * For ServiceConstraints: evaluates operator + threshold against the
+ * candidate's observed service values (latency, availability, quality).
  *
- * For ServiceConstraints: looks up the observed value for the constraint's
- * serviceType in the snapshot, and evaluates whether it satisfies the
- * operator + threshold:
- *   `latency <= 20ms` → observed.latency.value <= 20
- *   `availability >= 99.9%` → observed.availability.value >= 99.9
- *   `quality == grade-A` → observed.quality.value == "grade-A"
- *
- * If the candidate has no observation for the serviceType, the constraint
- * is NOT satisfied (the candidate cannot prove it meets the SLA).
+ * For CapacityConstraints: evaluates operator + threshold against the
+ * AUTHORITATIVE remaining capacity of the SPECIFIC source identified by
+ * `capacitySourceId`. This enforces source identity — a constraint targeting
+ * source B will not be satisfied by source A's capacity.
  */
 export class DefaultConstraintEvaluator implements ConstraintEvaluator {
-  readonly evaluatorVersion = 'default-evaluator-v2'
+  readonly evaluatorVersion = 'default-evaluator-v3'
 
-  evaluate(constraint: CommitmentConstraint, snapshot: ConstraintObservationSnapshot): boolean {
-    if (constraint.kind === 'capacity') {
-      // PHASE 12B FIX (defect 3): evaluate CapacityConstraint semantically.
-      // The original returned true unconditionally, assuming scalar capacity
-      // was handled elsewhere. But CapacityConstraint has its own operator +
-      // threshold that may differ from the CapabilityRequirement. For example:
-      //   CapabilityRequirement: 4 GPU (the allocation amount)
-      //   CapacityConstraint:    >= 2 GPU (a minimum eligibility threshold)
-      // These are different semantics. The CapacityConstraint checks whether
-      // the candidate's capacity MEETS the threshold, not whether the
-      // allocation amount is available.
-      //
-      // We check against the remaining capacity (from the observation snapshot's
-      // observations map, keyed by capabilityType) — not against the request's
-      // CapabilityRequirement amount.
-      const cc = constraint as CapacityConstraint
-      const observed = snapshot.observations.get(cc.capabilityType)
-      if (!observed) {
-        // No observation for this capacity type → cannot evaluate → filter.
-        return false
-      }
-      return evaluateConstraint(
-        cc.operator,
-        cc.threshold,
-        observed.value,
-        cc.unit,
-        observed.unit,
-      )
-    }
-
-    const serviceConstraint = constraint as ServiceConstraint
-
-    const observed = snapshot.observations.get(serviceConstraint.serviceType)
+  evaluateService(
+    constraint: ServiceConstraint,
+    observations: ConstraintObservationSnapshot,
+  ): boolean {
+    const observed = observations.observations.get(constraint.serviceType)
     if (!observed) {
       return false
     }
-
     return evaluateConstraint(
-      serviceConstraint.operator,
-      serviceConstraint.threshold,
+      constraint.operator,
+      constraint.threshold,
       observed.value,
-      serviceConstraint.unit,
+      constraint.unit,
       observed.unit,
+    )
+  }
+
+  evaluateCapacity(
+    constraint: CapacityConstraint,
+    capacitySources: CapacitySourceSnapshot[],
+  ): boolean {
+    // PHASE 12B FIX (defect 1): enforce capacitySourceId. The constraint
+    // targets a SPECIFIC capacity source. Find that source in the snapshot.
+    const source = capacitySources.find(
+      (s) => s.sourceId === constraint.capacitySourceId &&
+             s.capabilityType === constraint.capabilityType,
+    )
+    if (!source) {
+      // No capacity source with the specified ID + capabilityType → the
+      // constraint cannot be evaluated → the candidate is ineligible.
+      return false
+    }
+
+    // Evaluate the threshold against the authoritative remaining amount.
+    return evaluateConstraint(
+      constraint.operator,
+      constraint.threshold,
+      source.remainingAmount,
+      constraint.unit,
+      source.unit,
     )
   }
 }

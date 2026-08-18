@@ -25,6 +25,7 @@ export type {
   AllocationDecision,
   ConstraintEvaluator,
   ConstraintObservationSnapshot,
+  CapacitySourceSnapshot,
 } from './types'
 
 export {
