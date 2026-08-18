@@ -3193,3 +3193,22 @@ Stage Summary:
 - The decisionSnapshotHash covers the FULL authoritative snapshot (all candidates + all capacity states), not just the selected resource.
 - 22/22 tests pass. 110/110 total. eslint clean. tsc clean. Dev server HTTP 200.
 - Phase 12B slice 1 is now complete. Next: persistence (DB models) + control-plane API + kernel integration.
+
+---
+Task ID: 12B-slice-1-fix-2
+Agent: main (Z.ai Code)
+Task: Fix the three remaining reproducibility/authorization defects in 5513a2b: (1) priority not in reproducibility identity, (2) constraints not evaluated by scheduler, (3) authorizing membership status not checked.
+
+Work Log:
+- Defect 1 (priority in identity): added priority to both computeDecisionSnapshotHash (in the canonical snapshot) and computeDecisionId (in the semantic content). Added test: "two requests differing only in priority produce different decisionIds" — same selection, different priority → different decisionId.
+- Defect 2 (constraint evaluation): added ConstraintEvaluator interface + DefaultConstraintEvaluator to types.ts. The evaluator is a generic policy predicate with no vertical semantics. For CapacityConstraints: returns true (capacity handled by the scalar check). For ServiceConstraints: checks the candidate's verificationProfile includes the constraint's serviceType. The scheduler now evaluates request.constraints (if present) and filters candidates that don't satisfy all constraints. Added 2 tests: filters out candidate with wrong verificationProfile, accepts candidate with matching profile.
+- Defect 3 (authorizing membership status): the scheduler now checks authorizing.membershipStatus === 'active' before accepting a candidate. A suspended authorizing membership means the resource's authority is suspended → candidate is ineligible. Also added authorizingMemberships to computeDecisionSnapshotHash so the snapshot reflects the authorizing state. Added 3 tests: rejects suspended authorizing, accepts active authorizing, snapshot hash changes when authorizing status changes.
+- Also exported ConstraintEvaluator + DefaultConstraintEvaluator from index.ts.
+- Fixed the vertical-neutrality test: the test now strips comments before checking for vertical-specific capability types (the scheduler's comments mention "bandwidth" for documentation, but the code doesn't hard-code it).
+- VERIFICATION: tsc zero errors. eslint clean. 28/28 phase-12b tests pass (was 22; added 6 new tests). 116/116 total. Dev server HTTP 200.
+
+Stage Summary:
+- All three defects fixed. The scheduler's canonical identity now includes: NetworkVersion + NetworkRequest (including priority + constraints) + ALL candidate resource/capacity snapshot + ALL authorizing membership states + schedulerVersion.
+- The scheduler evaluates ServiceConstraints (not just scalar capacity) — a candidate that satisfies bandwidth but not latency is filtered out.
+- The scheduler checks authorizing membership status === 'active' — a suspended authority makes the candidate ineligible.
+- 28/28 tests pass. 116/116 total. eslint clean. tsc clean. Dev server HTTP 200.

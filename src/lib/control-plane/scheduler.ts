@@ -36,11 +36,13 @@ import type {
   AllocationDecision,
   CapacityEntry,
   CapabilityRequirement,
+  ConstraintEvaluator,
 } from './types'
 import {
   authorizeRequest,
   assertNetworkScopeIntegrity,
   computeDecisionSnapshotHash,
+  DefaultConstraintEvaluator,
 } from './types'
 
 /**
@@ -67,9 +69,19 @@ export interface SchedulerInput {
   readonly remainingCapacity: Map<string, CapacityEntry[]>
   /**
    * The membership that authorizes each candidate resource (for Network
-   * Scope Integrity verification). Keyed by membershipId.
+   * Scope Integrity verification). Keyed by participantMembershipId.
    */
   readonly authorizingMemberships: Map<string, ParticipantMembership>
+  /**
+   * The constraint evaluator for ServiceConstraints (latency, availability,
+   * quality). Optional — defaults to DefaultConstraintEvaluator.
+   *
+   * PHASE 12B FIX (defect 2): the scheduler must evaluate ServiceConstraints,
+   * not just scalar capacity. The evaluator is a generic policy predicate
+   * with no vertical semantics. Vertical-specific measurement happens later
+   * in the evidence/verification pipeline.
+   */
+  readonly constraintEvaluator?: ConstraintEvaluator
 }
 
 /**
@@ -98,6 +110,7 @@ export type SchedulerResult =
  */
 export function schedule(input: SchedulerInput): SchedulerResult {
   const { request, requesterMembership, requesterRoles, candidateMemberships } = input
+  const evaluator = input.constraintEvaluator ?? new DefaultConstraintEvaluator()
 
   // 1. Request isolation (§6.6): authorize the requester.
   const authError = authorizeRequest(request, requesterMembership, requesterRoles)
@@ -126,23 +139,43 @@ export function schedule(input: SchedulerInput): SchedulerResult {
       continue // §8.6 violation — skip
     }
 
-    // 3c. The resource membership must be active.
+    // 3c. PHASE 12B FIX (defect 3): the authorizing membership MUST be active.
+    // The original only checked networkId; it did not check membershipStatus.
+    // A suspended authorizing membership means the resource's authority is
+    // suspended — the candidate is ineligible.
+    if (authorizing.membershipStatus !== 'active') {
+      continue
+    }
+
+    // 3d. The resource membership must be active.
     if (membership.membershipStatus !== 'active') {
       continue
     }
 
-    // 3d. The membership must offer ALL requested capability types.
+    // 3e. The membership must offer ALL requested capability types.
     if (!request.capabilityRequirements.every((req) => membership.capabilities.includes(req.capabilityType))) {
       continue
     }
 
-    // 3e. The membership must have enough remaining capacity for each request.
+    // 3f. The membership must have enough remaining capacity for each request.
     const remaining = input.remainingCapacity.get(membership.membershipId) ?? []
     if (!hasEnoughCapacity(request.capabilityRequirements, remaining)) {
       continue
     }
 
-    // 3f. The membership must be available within the requested time window.
+    // 3g. PHASE 12B FIX (defect 2): evaluate ServiceConstraints (latency,
+    // availability, quality, etc.). A candidate that satisfies bandwidth
+    // but not a latency constraint must be filtered out.
+    if (request.constraints) {
+      const allConstraintsSatisfied = request.constraints.every(
+        (constraint) => evaluator.evaluate(constraint, membership),
+      )
+      if (!allConstraintsSatisfied) {
+        continue
+      }
+    }
+
+    // 3h. The membership must be available within the requested time window.
     if (membership.availability) {
       if (request.timeWindow.start < membership.availability.start ||
           request.timeWindow.end > membership.availability.end) {
@@ -184,6 +217,8 @@ export function schedule(input: SchedulerInput): SchedulerResult {
     request,
     candidateMemberships: candidateMemberships,
     capacityStateByMembership: input.remainingCapacity,
+    // PHASE 12B FIX (defect 3): include authorizing membership states.
+    authorizingMemberships: input.authorizingMemberships,
   })
 
   // 8. Compute the deterministic decisionId (§8.7 — reproducibility).
@@ -196,6 +231,7 @@ export function schedule(input: SchedulerInput): SchedulerResult {
     selectedMembershipId: selected.membershipId,
     allocatedCapacity,
     allocationWindow: request.timeWindow,
+    priority: request.priority,
     schedulerVersion: SCHEDULER_VERSION,
     decisionSnapshotHash,
   })
@@ -232,7 +268,10 @@ export function schedule(input: SchedulerInput): SchedulerResult {
  *
  * The decisionId is SHA-256 of the decision's semantic content:
  *   (networkId, requestId, selectedMembershipId, allocatedCapacity,
- *    allocationWindow, schedulerVersion, decisionSnapshotHash)
+ *    allocationWindow, priority, schedulerVersion, decisionSnapshotHash)
+ *
+ * PHASE 12B FIX (defect 1): priority is now included. Two decisions that
+ * differ only in priority must have different decisionIds.
  *
  * This ensures two decisions with the same inputs produce the same decisionId.
  * The decidedAt/expiresAt are execution-time fields, not part of the identity.
@@ -245,6 +284,7 @@ function computeDecisionId(input: {
   selectedMembershipId: string
   allocatedCapacity: CapacityEntry[]
   allocationWindow: { start: Date; end: Date }
+  priority?: number
   schedulerVersion: string
   decisionSnapshotHash: string
 }): string {
@@ -259,6 +299,8 @@ function computeDecisionId(input: {
       start: input.allocationWindow.start.toISOString(),
       end: input.allocationWindow.end.toISOString(),
     },
+    // PHASE 12B FIX (defect 1): include priority in the decision identity.
+    priority: input.priority ?? null,
     schedulerVersion: input.schedulerVersion,
     decisionSnapshotHash: input.decisionSnapshotHash,
   })

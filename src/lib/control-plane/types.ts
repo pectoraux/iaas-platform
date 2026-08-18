@@ -331,34 +331,31 @@ export function authorizeRequest(
  * Compute the decision snapshot hash for reproducibility (§8.7).
  *
  * The hash is SHA-256 of the FULL AUTHORITATIVE snapshot:
- *   (NetworkVersion, NetworkRequest, ALL candidate ResourceMemberships,
- *    ALL candidate capacity states, Availability state)
+ *   (NetworkVersion, NetworkRequest [including priority + constraints],
+ *    ALL candidate ResourceMemberships, ALL candidate capacity states,
+ *    ALL authorizing membership states, Availability state)
  *
- * PHASE 12B CORRECTION (defect from audit): the original implementation
- * passed only the SELECTED resource's capacity state. That was insufficient
- * — if a non-selected candidate's capacity changed, the candidate set could
- * change, but the hash would remain the same. The hash MUST cover the
- * complete authoritative snapshot used for the decision, including all
- * candidates and all their capacity states.
+ * PHASE 12B CORRECTION 1: the original passed only the SELECTED resource's
+ * capacity. Fixed to cover all candidates.
  *
- * Given the same snapshot + schedulerVersion, the scheduler MUST produce the
- * same decision. The hash makes the decision's inputs auditable.
+ * PHASE 12B CORRECTION 2 (this fix): the original omitted request.priority
+ * and request.constraints from the hash. Two requests differing only in
+ * priority or constraints would produce the same hash — violating the
+ * semantic-identity rule. Now included.
+ *
+ * PHASE 12B CORRECTION 3 (this fix): the original omitted the authorizing
+ * ParticipantMembership state. If an authorizing membership's status changed
+ * (e.g., active → suspended), candidate eligibility could change without the
+ * hash changing. Now the authorizing membership states are included.
  *
  * PURE: same inputs → same hash.
- *
- * @param snapshot.networkVersionId — the NetworkVersion that defines the policy.
- * @param snapshot.request — the NetworkRequest being scheduled.
- * @param snapshot.candidateMemberships — ALL candidate resource memberships
- *   considered by the scheduler (the full set, not just the selected one).
- * @param snapshot.capacityStateByMembership — the remaining capacity for
- *   EVERY candidate membership, keyed by membershipId. This is the full
- *   capacity snapshot, not just the selected resource's capacity.
  */
 export function computeDecisionSnapshotHash(snapshot: {
   networkVersionId: string
   request: NetworkRequest
   candidateMemberships: NetworkResourceMembership[]
   capacityStateByMembership: Map<string, CapacityEntry[]>
+  authorizingMemberships: Map<string, ParticipantMembership>
 }): string {
   const canonical = canonicalize({
     networkVersionId: snapshot.networkVersionId,
@@ -366,34 +363,116 @@ export function computeDecisionSnapshotHash(snapshot: {
     requesterMembershipId: snapshot.request.requesterMembershipId,
     networkId: snapshot.request.networkId,
     capabilityRequirements: snapshot.request.capabilityRequirements,
+    // PHASE 12B FIX (defect 1): include priority + constraints in the
+    // reproducibility identity. Two requests differing only in priority or
+    // constraints must produce different hashes.
+    priority: snapshot.request.priority ?? null,
+    constraints: (snapshot.request.constraints ?? []).map((c) => ({
+      constraintId: c.constraintId,
+      kind: c.kind,
+      verificationMethod: c.verificationMethod,
+      status: c.status,
+    })).sort((a, b) => a.constraintId.localeCompare(b.constraintId)),
     timeWindow: {
       start: snapshot.request.timeWindow.start.toISOString(),
       end: snapshot.request.timeWindow.end.toISOString(),
     },
     // ALL candidate memberships, sorted deterministically.
     candidateMemberships: snapshot.candidateMemberships
-      .map((m) => ({
-        membershipId: m.membershipId,
-        resourceId: m.resourceId,
-        capabilities: [...m.capabilities].sort(),
-        verifiedCapacity: m.verifiedCapacity.map((c) => ({ ...c })).sort((a, b) =>
-          a.capabilityType.localeCompare(b.capabilityType),
-        ),
-        membershipStatus: m.membershipStatus,
-        // The remaining capacity for THIS membership — the full snapshot.
-        remainingCapacity: (snapshot.capacityStateByMembership.get(m.membershipId) ?? [])
-          .map((c) => ({ ...c }))
-          .sort((a, b) => a.capabilityType.localeCompare(b.capabilityType)),
-        availability: m.availability
-          ? {
-              start: m.availability.start.toISOString(),
-              end: m.availability.end.toISOString(),
-            }
-          : null,
-      }))
+      .map((m) => {
+        // Look up the authorizing membership for this candidate.
+        const authorizing = snapshot.authorizingMemberships.get(m.participantMembershipId)
+        return {
+          membershipId: m.membershipId,
+          resourceId: m.resourceId,
+          capabilities: [...m.capabilities].sort(),
+          verifiedCapacity: m.verifiedCapacity.map((c) => ({ ...c })).sort((a, b) =>
+            a.capabilityType.localeCompare(b.capabilityType),
+          ),
+          membershipStatus: m.membershipStatus,
+          // The remaining capacity for THIS membership — the full snapshot.
+          remainingCapacity: (snapshot.capacityStateByMembership.get(m.membershipId) ?? [])
+            .map((c) => ({ ...c }))
+            .sort((a, b) => a.capabilityType.localeCompare(b.capabilityType)),
+          availability: m.availability
+            ? {
+                start: m.availability.start.toISOString(),
+                end: m.availability.end.toISOString(),
+              }
+            : null,
+          // PHASE 12B FIX (defect 3): include the authorizing membership's
+          // state. If the authorizing membership is suspended, the candidate
+          // is ineligible — and the hash must reflect that state.
+          authorizingMembershipStatus: authorizing?.membershipStatus ?? 'missing',
+        }
+      })
       .sort((a, b) => a.membershipId.localeCompare(b.membershipId)),
   })
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
+}
+
+// ---------------------------------------------------------------------------
+// Constraint evaluation contract (§6.7 — constraint-aware scheduling)
+// ---------------------------------------------------------------------------
+
+/**
+ * A constraint evaluator determines whether a candidate resource membership
+ * satisfies a request's ServiceConstraints (latency, availability, quality,
+ * etc.).
+ *
+ * This is a GENERIC contract — it does NOT contain vertical-specific
+ * semantics. The evaluator is a policy predicate: given a constraint and a
+ * candidate, it returns whether the candidate satisfies the constraint.
+ *
+ * Vertical-specific measurement (throughput probing, latency measurement,
+ * quality grading) happens LATER, in the verification/evidence pipeline.
+ * The scheduler uses the evaluator only to FILTER candidates — it does not
+ * verify SLAs; it checks whether the candidate's declared profile satisfies
+ * the constraint thresholds.
+ *
+ * PHASE 12B: the default evaluator is a simple declared-profile check. A
+ * real evaluator would consult measured evidence, but that's a later slice.
+ */
+export interface ConstraintEvaluator {
+  /**
+   * Evaluate whether a candidate satisfies a constraint.
+   *
+   * @param constraint The constraint to evaluate.
+   * @param membership The candidate resource membership.
+   * @returns true if the candidate satisfies the constraint.
+   */
+  evaluate(constraint: CommitmentConstraint, membership: NetworkResourceMembership): boolean
+}
+
+/**
+ * The default constraint evaluator: checks the candidate's declared
+ * verificationProfile and capabilities against the constraint.
+ *
+ * This is a MINIMAL evaluator — it does not measure SLAs. It filters
+ * candidates whose declared profile does not match the constraint type.
+ * Real SLA verification happens in the evidence/verification pipeline.
+ *
+ * For CapacityConstraints: the scheduler already checks scalar capacity;
+ * the evaluator is a no-op (returns true) — capacity is handled separately.
+ *
+ * For ServiceConstraints: the evaluator checks that the candidate's
+ * verificationProfile references the constraint's serviceType. If the
+ * candidate has no evidence of supporting the service type, it is filtered.
+ */
+export class DefaultConstraintEvaluator implements ConstraintEvaluator {
+  evaluate(constraint: CommitmentConstraint, membership: NetworkResourceMembership): boolean {
+    if (constraint.kind === 'capacity') {
+      // Capacity constraints are handled by the scalar capacity check in
+      // the scheduler. The evaluator does not re-check them.
+      return true
+    }
+
+    // ServiceConstraint: check the candidate's verificationProfile references
+    // the constraint's serviceType. This is a declared-profile check, not a
+    // measured-evidence check.
+    const serviceConstraint = constraint as ServiceConstraint
+    return membership.verificationProfile.includes(serviceConstraint.serviceType)
+  }
 }
 
 // ---------------------------------------------------------------------------

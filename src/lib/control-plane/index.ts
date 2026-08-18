@@ -23,6 +23,7 @@ export type {
   CapacityConstraint,
   ServiceConstraint,
   AllocationDecision,
+  ConstraintEvaluator,
 } from './types'
 
 export {
@@ -32,6 +33,7 @@ export {
   authorizeRequest,
   computeDecisionSnapshotHash,
   createNetworkRequest,
+  DefaultConstraintEvaluator,
 } from './types'
 
 export { schedule, SCHEDULER_VERSION } from './scheduler'

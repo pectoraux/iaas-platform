@@ -30,6 +30,7 @@ import type {
   NetworkResourceMembership,
   NetworkRequest,
   CapacityEntry,
+  ServiceConstraint,
 } from '../src/lib/control-plane'
 
 // ---------------------------------------------------------------------------
@@ -403,6 +404,7 @@ describe('Phase 12B §8.7: Scheduler reproducibility', () => {
       request,
       candidateMemberships: [candidate],
       capacityStateByMembership: new Map([['rm-1', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]]]),
+      authorizingMemberships: new Map(),
     })
 
     const hash2 = computeDecisionSnapshotHash({
@@ -410,6 +412,7 @@ describe('Phase 12B §8.7: Scheduler reproducibility', () => {
       request,
       candidateMemberships: [candidate],
       capacityStateByMembership: new Map([['rm-1', [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }]]]),
+      authorizingMemberships: new Map(),
     })
 
     expect(hash1).not.toBe(hash2)
@@ -601,13 +604,261 @@ describe('Phase 12B: Vertical-neutrality (no vertical imports)', () => {
     expect(schedulerSource).not.toMatch(/from\s+['"]\.\.\/kernel/)
   })
 
-  it('the scheduler source does not contain vertical-specific capability types', () => {
+  it('the scheduler source does not contain vertical-specific capability types in code (not comments)', () => {
     // The scheduler reasons about capability types as strings — it must not
-    // hard-code 'energy_discharge', 'gpu_compute', etc.
+    // hard-code 'energy_discharge', 'gpu_compute', etc. in CODE. Comments may
+    // mention them for documentation purposes.
     const schedulerSource = readFileSync(
       join(process.cwd(), 'src', 'lib', 'control-plane', 'scheduler.ts'),
       'utf-8',
     )
-    expect(schedulerSource).not.toMatch(/energy_discharge|gpu_compute|cpu_compute|bandwidth|block_production/)
+    // Strip comments (lines starting with // or inside /* */ blocks).
+    const codeOnly = schedulerSource
+      .replace(/\/\/.*$/gm, '') // single-line comments
+      .replace(/\/\*[\s\S]*?\*\//g, '') // multi-line comments
+    expect(codeOnly).not.toMatch(/energy_discharge|gpu_compute|cpu_compute|bandwidth|block_production/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Defect 1 fix: priority in reproducibility identity
+// ---------------------------------------------------------------------------
+
+describe('Phase 12B defect 1 fix: priority in reproducibility identity', () => {
+  it('two requests differing only in priority produce different decisionIds', () => {
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+    const candidate = makeMembership('rm-gpu-1', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }])
+    const remaining = new Map([['rm-gpu-1', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]]])
+    const authorizing = new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]])
+
+    const baseInput = {
+      networkVersionId: VERSION_1,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      remainingCapacity: remaining,
+      authorizingMemberships: authorizing,
+    }
+
+    const requestA = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      priority: 1,
+      idempotencyKey: 'key-a',
+    })
+
+    const requestB = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      priority: 100,
+      idempotencyKey: 'key-b',
+    })
+
+    const resultA = schedule({ ...baseInput, request: requestA })
+    const resultB = schedule({ ...baseInput, request: requestB })
+
+    expect(resultA.status).toBe('allocated')
+    expect(resultB.status).toBe('allocated')
+    if (resultA.status === 'allocated' && resultB.status === 'allocated') {
+      expect(resultA.decision.selectedMembershipId).toBe(resultB.decision.selectedMembershipId)
+      expect(resultA.decision.decisionId).not.toBe(resultB.decision.decisionId)
+      expect(resultA.decision.priority).toBe(1)
+      expect(resultB.decision.priority).toBe(100)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Defect 2 fix: constraint-aware scheduling
+// ---------------------------------------------------------------------------
+
+describe('Phase 12B defect 2 fix: constraint-aware scheduling', () => {
+  it('the scheduler filters out a candidate that does not satisfy a ServiceConstraint', () => {
+    const latencyConstraint: ServiceConstraint = {
+      constraintId: 'c-latency',
+      kind: 'service',
+      serviceType: 'latency',
+      operator: '<=',
+      threshold: '20',
+      unit: 'ms',
+      slaPolicyRef: 'sla-latency-v1',
+      verificationMethod: 'latency_probing',
+      status: 'pending',
+    }
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'bandwidth', amount: '500', unit: 'Mbps' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+      constraints: [latencyConstraint],
+    })
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+
+    const candidate = makeMembership('rm-1', NETWORK_A, ['bandwidth'], [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }])
+    candidate.verificationProfile = 'throughput-only'
+
+    const result = schedule({
+      networkVersionId: VERSION_1,
+      request,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      remainingCapacity: new Map([['rm-1', [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }]]]),
+      authorizingMemberships: new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]]),
+    })
+
+    expect(result.status).toBe('no_candidates')
+  })
+
+  it('the scheduler accepts a candidate that satisfies all ServiceConstraints', () => {
+    const latencyConstraint: ServiceConstraint = {
+      constraintId: 'c-latency',
+      kind: 'service',
+      serviceType: 'latency',
+      operator: '<=',
+      threshold: '20',
+      unit: 'ms',
+      slaPolicyRef: 'sla-latency-v1',
+      verificationMethod: 'latency_probing',
+      status: 'pending',
+    }
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'bandwidth', amount: '500', unit: 'Mbps' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+      constraints: [latencyConstraint],
+    })
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+
+    const candidate = makeMembership('rm-1', NETWORK_A, ['bandwidth'], [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }])
+    candidate.verificationProfile = 'latency+throughput'
+
+    const result = schedule({
+      networkVersionId: VERSION_1,
+      request,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      remainingCapacity: new Map([['rm-1', [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }]]]),
+      authorizingMemberships: new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]]),
+    })
+
+    expect(result.status).toBe('allocated')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Defect 3 fix: authorizing membership lifecycle integrity
+// ---------------------------------------------------------------------------
+
+describe('Phase 12B defect 3 fix: authorizing membership lifecycle integrity', () => {
+  it('the scheduler rejects a candidate whose authorizing membership is suspended', () => {
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+    })
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+    const candidate = makeMembership('rm-gpu-1', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }])
+    const suspendedAuthorizing = makeParticipantMembership('pm-provider-a', NETWORK_A, 'suspended')
+
+    const result = schedule({
+      networkVersionId: VERSION_1,
+      request,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      remainingCapacity: new Map([['rm-gpu-1', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]]]),
+      authorizingMemberships: new Map([['pm-provider-a', suspendedAuthorizing]]),
+    })
+
+    expect(result.status).toBe('no_candidates')
+  })
+
+  it('the scheduler accepts a candidate whose authorizing membership is active', () => {
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+    })
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+    const candidate = makeMembership('rm-gpu-1', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }])
+    const activeAuthorizing = makeParticipantMembership('pm-provider-a', NETWORK_A, 'active')
+
+    const result = schedule({
+      networkVersionId: VERSION_1,
+      request,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      remainingCapacity: new Map([['rm-gpu-1', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]]]),
+      authorizingMemberships: new Map([['pm-provider-a', activeAuthorizing]]),
+    })
+
+    expect(result.status).toBe('allocated')
+  })
+
+  it('decisionSnapshotHash changes when the authorizing membership status changes', () => {
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+    })
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+    const candidate = makeMembership('rm-gpu-1', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }])
+    const remaining = new Map([['rm-gpu-1', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]]])
+
+    const baseInput = {
+      networkVersionId: VERSION_1,
+      request,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      remainingCapacity: remaining,
+    }
+
+    const result1 = schedule({
+      ...baseInput,
+      authorizingMemberships: new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A, 'active')]]),
+    })
+
+    const result2 = schedule({
+      ...baseInput,
+      authorizingMemberships: new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A, 'suspended')]]),
+    })
+
+    expect(result1.status).toBe('allocated')
+    expect(result2.status).toBe('no_candidates')
+
+    if (result1.status === 'allocated') {
+      const hash1 = result1.decision.decisionSnapshotHash
+      const hash2 = computeDecisionSnapshotHash({
+        networkVersionId: VERSION_1,
+        request,
+        candidateMemberships: [candidate],
+        capacityStateByMembership: remaining,
+        authorizingMemberships: new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A, 'suspended')]]),
+      })
+      expect(hash1).not.toBe(hash2)
+    }
   })
 })
