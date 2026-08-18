@@ -54,20 +54,24 @@ export {
 export type { SubmitNetworkRequestInput, SubmitNetworkRequestResult } from './service'
 
 // Phase 12B Slice 3: Allocation → Commitment → Execution → Assignment orchestration.
-// Phase 12B Slice 4: Actual execution (executeDecision).
+// Phase 12B Slice 4: Actual execution (executeDecision) + crash/retry contract.
 export {
   commitDecisionToExecution,
   releaseDecisionExecution,
+  releaseFailedAssignments,
   executeDecision,
+  recoverStuckAssignments,
   OrchestratorError,
   ExecutionFailedError,
   ProtocolRuntimeNotSupportedError,
   EXECUTION_SOURCE_TYPE,
   COMMITMENT_SOURCE_TYPE,
+  EXECUTION_LEASE_MS,
 } from './execution-orchestrator'
 export type {
   CommitDecisionToExecutionResult,
   CommittedAssignment,
   ExecuteDecisionResult,
   ExecutedAssignment,
+  RecoveredAssignment,
 } from './execution-orchestrator'

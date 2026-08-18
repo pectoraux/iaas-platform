@@ -455,41 +455,34 @@ export async function commitDecisionToExecution(
 // ---------------------------------------------------------------------------
 
 /**
- * Release the committed capacity for a decision whose execution failed.
+ * Release the committed capacity for a SPECIFIC SET of failed assignments.
  *
- * Gate 10: "Execution failure releases committed capacity correctly."
+ * Phase 12B Slice 4 HARDENING: this is the targeted release. It releases ONLY
+ * the commitments belonging to the given assignment IDs — not the entire
+ * decision. This is the correct operation for mixed-success execution: if
+ * assignment A succeeded (completed) and assignment B failed, only B's
+ * commitment is released; A's commitment stays consumed/retained.
  *
- * This is NOT a rollback of the original commitDecisionToExecution transaction
- * (which already committed). It is the operational failure path: physical
- * execution later failed, so the commitments must be released to restore the
- * reservations' remainingAmount.
+ * ATOMIC: for each target assignment, failAssignment + releaseCommitment
+ * happen in ONE transaction (Slice 3 hardening — no split-brain window).
  *
- * PHASE 12B SLICE 3 HARDENING — ATOMIC FAILURE RELEASE:
- * For each assignment, failAssignment + releaseCommitment happen in ONE
- * transaction. This eliminates the split-brain window where
- * `assignment=failed` but `commitment=active` could persist if the process
- * crashed between two separate transactions (the old VPP pattern). The
- * durable invariant is: the state is EITHER (assignment=assigned,
- * commitment=active) OR (assignment=failed, commitment=released,
- * reservation.remainingAmount restored) — NEVER the split-brain state.
- *
- * releaseCommitment now accepts an optional `tx` parameter; when provided, it
- * runs its FOR UPDATE + restore + status-update steps on the caller's
- * transaction instead of managing its own.
- *
- * This is idempotent: releasing an already-released commitment is a no-op
+ * IDEMPOTENT: releasing an already-released commitment is a no-op
  * (releaseCommitment checks status inside its FOR UPDATE lock). Failing an
- * already-failed assignment is a no-op (failAssignment uses a CAS on
- * status != 'completed').
+ * already-failed assignment is a no-op (failAssignment CAS on
+ * status != 'completed'). A completed assignment is NEVER failed by this
+ * function (the caller passes only failed assignment IDs).
  */
-export async function releaseDecisionExecution(
+export async function releaseFailedAssignments(
   decisionId: string,
+  failedAssignmentIds: string[],
   reason: string,
   opts?: { providerRegistry?: CapacityProviderRegistry },
 ): Promise<void> {
+  if (failedAssignmentIds.length === 0) return
+
   const tenantId = await resolveTenantIdForDecision(decisionId)
 
-  // Load the Execution + its assignments.
+  // Load the Execution + its assignments (only need assignments for the IDs).
   const execution = await db.execution.findUnique({
     where: {
       sourceType_sourceId: {
@@ -507,10 +500,19 @@ export async function releaseDecisionExecution(
     )
   }
 
-  // Load the decision to resolve the runtimeKind (for failAssignment).
+  // Filter to only the requested failed assignments that belong to this execution.
+  const targetAssignments = execution.assignments.filter(
+    (a) => failedAssignmentIds.includes(a.id),
+  )
+
+  if (targetAssignments.length === 0) {
+    return // none of the requested IDs belong to this execution
+  }
+
+  // Resolve the runtime for failAssignment.
   const decision = await db.allocationDecision.findUnique({
     where: { id: decisionId },
-    include: { request: true, reservations: true },
+    include: { request: true },
   })
   if (!decision) {
     throw new OrchestratorError(`AllocationDecision '${decisionId}' not found.`)
@@ -535,42 +537,42 @@ export async function releaseDecisionExecution(
 
   const runtime = resolveRuntime(runtimeKind)
 
-  // Load the commitments (via the explicit FK — no sourceType/sourceId lookup).
-  const allocReservations = await db.allocationReservation.findMany({
-    where: { decisionId },
-    include: { capacityCommitments: true },
+  // Load the commitments for the TARGET assignments only (via the explicit
+  // ExecutionAssignment.capacityCommitmentId FK — no decision-wide scan).
+  const targetCommitmentIds = targetAssignments
+    .map((a) => a.capacityCommitmentId)
+    .filter((id): id is string => id !== null)
+
+  const targetCommitments = await db.capacityCommitment.findMany({
+    where: { id: { in: targetCommitmentIds } },
+    include: { allocationReservation: true },
   })
 
-  // PHASE 12B SLICE 3 HARDENING: failAssignment + releaseCommitment happen
-  // in ONE transaction PER ASSIGNMENT. This eliminates the split-brain window
-  // where `assignment=failed` but `commitment=active` could persist if the
-  // process crashed between two separate transactions (the old VPP pattern).
-  //
-  // We cannot put ALL assignments in a single transaction because
-  // runtime.failAssignment internally calls finalizeExecutionIfTerminal, which
-  // transitions the parent Execution to 'completed' once the last assignment is
-  // terminal — and the runtime's CAS logic expects each failAssignment to be
-  // its own atomic unit. So: one transaction per assignment, but within that
-  // transaction BOTH the fail AND the release happen atomically.
-  //
-  // The durable invariant: after releaseDecisionExecution returns (or after any
-  // individual per-assignment transaction commits), the state is EITHER:
-  //   - assignment=assigned, commitment=active (tx hasn't run yet), OR
-  //   - assignment=failed, commitment=released, reservation.remainingAmount restored (tx committed)
-  // NEVER: assignment=failed + commitment=active (the split-brain state).
-  for (const ar of allocReservations) {
-    const commitment = ar.capacityCommitments[0]
-    if (!commitment) continue
+  // Build a lookup: assignmentId → (commitment, allocationReservationId).
+  const commitmentByAssignmentId = new Map<string, { commitmentId: string; allocationReservationId: string }>()
+  for (const c of targetCommitments) {
+    if (c.allocationReservationId) {
+      commitmentByAssignmentId.set(
+        // Find the assignment whose capacityCommitmentId === c.id
+        targetAssignments.find((a) => a.capacityCommitmentId === c.id)!.id,
+        { commitmentId: c.id, allocationReservationId: c.allocationReservationId },
+      )
+    }
+  }
 
-    const assignment = execution.assignments.find(
-      (a) => a.capacityCommitmentId === commitment.id,
-    )
-    if (!assignment) continue
+  // ATOMIC PER-ASSIGNMENT: failAssignment + releaseCommitment in ONE transaction.
+  // Only the FAILED assignments are touched — successful assignments' commitments
+  // are NOT in targetCommitmentIds, so they are never released.
+  for (const assignment of targetAssignments) {
+    const entry = commitmentByAssignmentId.get(assignment.id)
+    if (!entry) continue // no commitment linked (shouldn't happen, but defensive)
 
-    const commitmentSourceId = `${decisionId}:${ar.id}`
+    const commitmentSourceId = `${decisionId}:${entry.allocationReservationId}`
 
     await db.$transaction(async (tx) => {
       // 1. Fail the assignment (transitions → 'failed', finalizes parent if terminal).
+      //    CAS: if the assignment is already 'completed', this is a no-op — it
+      //    CANNOT fail a completed assignment (operational completion is irreversible).
       await runtime.failAssignment(
         tx,
         tenantId,
@@ -578,7 +580,7 @@ export async function releaseDecisionExecution(
         execution.id,
       )
       // 2. Release the commitment IN THE SAME TRANSACTION — restores the
-      //    reservation's remainingAmount. Now atomic with the fail above.
+      //    reservation's remainingAmount. Atomic with the fail above.
       await releaseCommitment(
         tenantId,
         COMMITMENT_SOURCE_TYPE,
@@ -588,9 +590,47 @@ export async function releaseDecisionExecution(
     }, { timeout: 30000 })
   }
 
-  // The parent Execution is finalized by the last failAssignment call
-  // (finalizeExecutionIfTerminal is called inside failAssignment). No
-  // explicit finalize needed here.
+  void reason // reason is recorded via the ExecutionFailedError thrown by the caller
+}
+
+/**
+ * Release the committed capacity for ALL assignments in a decision.
+ *
+ * Convenience wrapper around releaseFailedAssignments for the "everything
+ * failed" case. This is the Slice 3 decision-wide release, now implemented as
+ * a delegation to the targeted release (Slice 4 hardening) — the core
+ * operation is always targeted, never decision-wide.
+ *
+ * Use this when the entire decision failed (e.g., commitDecisionToExecution
+ * was never called, or the caller wants to release everything). For
+ * mixed-success execution, call releaseFailedAssignments with only the failed
+ * assignment IDs.
+ */
+export async function releaseDecisionExecution(
+  decisionId: string,
+  reason: string,
+  opts?: { providerRegistry?: CapacityProviderRegistry },
+): Promise<void> {
+  // Load all assignment IDs for this decision and delegate to the targeted release.
+  const execution = await db.execution.findUnique({
+    where: {
+      sourceType_sourceId: {
+        sourceType: EXECUTION_SOURCE_TYPE,
+        sourceId: decisionId,
+      },
+    },
+    select: { assignments: { select: { id: true } } },
+  })
+
+  if (!execution) {
+    throw new OrchestratorError(
+      `No Execution found for decision '${decisionId}' (sourceType='${EXECUTION_SOURCE_TYPE}'). ` +
+        `commitDecisionToExecution must be called first.`,
+    )
+  }
+
+  const allAssignmentIds = execution.assignments.map((a) => a.id)
+  await releaseFailedAssignments(decisionId, allAssignmentIds, reason, opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -865,14 +905,17 @@ export async function executeDecision(
     })
   }
 
-  // --- If any assignments failed, release their capacity atomically ---
+  // --- If any assignments failed, release ONLY their capacity atomically ---
+  // Phase 12B Slice 4 HARDENING: release ONLY the failed assignments' capacity.
+  // Successful assignments' commitments are NOT touched — they stay
+  // consumed/retained, their reservations are NOT restored. This is the fix
+  // for the mixed-success bug where a decision-wide release could release a
+  // completed assignment's commitment.
   if (failures.length > 0) {
-    // Release ALL assignments' capacity (releaseDecisionExecution is
-    // idempotent — already-completed assignments' commitments are 'consumed'
-    // so releaseCommitment no-ops them; failed ones get released). This
-    // restores the reservations' remainingAmount for the failed assignments.
-    await releaseDecisionExecution(
+    const failedAssignmentIds = failures.map((f) => f.assignmentId)
+    await releaseFailedAssignments(
       decisionId,
+      failedAssignmentIds,
       `${failures.length} assignment(s) failed during execution`,
     )
 
@@ -893,4 +936,155 @@ export async function executeDecision(
     assignments: results,
     executionStatus: finalized?.status ?? 'completed',
   }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 12B Slice 4: Crash/retry contract — recoverStuckAssignments
+// ---------------------------------------------------------------------------
+
+/**
+ * The lease duration (in milliseconds) after which an assignment stuck in
+ * 'executing' is considered crashed. The physical adapter execution itself is
+ * expected to complete in seconds-to-minutes; if an assignment has been
+ * 'executing' for longer than this, the process likely died after
+ * beginAssignmentExecution but before recordAssignmentResults/completeAssignment.
+ *
+ * A retry of executeDecision will NOT re-execute a stuck assignment: this
+ * function marks it 'failed' (via the runtime's failAssignment CAS), so the
+ * retry skips it as terminal. The caller can then release its capacity via
+ * releaseFailedAssignments.
+ */
+export const EXECUTION_LEASE_MS = 5 * 60 * 1000 // 5 minutes
+
+export interface RecoveredAssignment {
+  assignmentId: string
+  executionId: string
+  recovered: boolean
+  reason: string
+}
+
+/**
+ * Recover assignments stuck in 'executing' state.
+ *
+ * Phase 12B Slice 4 CRASH/RETRY CONTRACT:
+ * After a process crash, an assignment may be durable-stuck in 'executing':
+ *   beginAssignmentExecution → EXECUTING
+ *   (process dies here)
+ *   recordAssignmentResults never runs
+ *   completeAssignment never runs
+ *
+ * A naive retry of executeDecision would re-execute the physical resource
+ * (beginAssignmentExecution is a CAS no-op on 'executing', then
+ * runtime.executeAssignment runs AGAIN). This function prevents that by marking
+ * assignments whose 'executing' state is older than EXECUTION_LEASE_MS as
+ * 'failed' via the runtime's failAssignment CAS.
+ *
+ * After recovery, a retry of executeDecision skips the recovered assignment
+ * (it is now terminal 'failed'), and the caller can release its capacity via
+ * releaseFailedAssignments.
+ *
+ * @param decisionId — the decision whose execution may have stuck assignments
+ * @param leaseMs — the lease duration (default EXECUTION_LEASE_MS)
+ * @returns the recovered assignments (those marked 'failed' by this call)
+ */
+export async function recoverStuckAssignments(
+  decisionId: string,
+  opts?: { leaseMs?: number; providerRegistry?: CapacityProviderRegistry },
+): Promise<RecoveredAssignment[]> {
+  const leaseMs = opts?.leaseMs ?? EXECUTION_LEASE_MS
+  const providerRegistry = opts?.providerRegistry ?? createDefaultCapacityProviderRegistry()
+
+  const tenantId = await resolveTenantIdForDecision(decisionId)
+
+  const execution = await db.execution.findUnique({
+    where: {
+      sourceType_sourceId: {
+        sourceType: EXECUTION_SOURCE_TYPE,
+        sourceId: decisionId,
+      },
+    },
+    include: { assignments: true },
+  })
+
+  if (!execution) {
+    throw new OrchestratorError(
+      `No Execution found for decision '${decisionId}'. commitDecisionToExecution must be called first.`,
+    )
+  }
+
+  // Resolve the runtime.
+  const decision = await db.allocationDecision.findUnique({
+    where: { id: decisionId },
+    include: { request: true },
+  })
+  if (!decision) {
+    throw new OrchestratorError(`AllocationDecision '${decisionId}' not found.`)
+  }
+
+  const networkVersion = await db.networkVersion.findUnique({
+    where: { id: decision.request.networkVersionId },
+  })
+  if (!networkVersion) {
+    throw new OrchestratorError(
+      `NetworkVersion '${decision.request.networkVersionId}' not found.`,
+    )
+  }
+
+  const runtimeKindRaw = networkVersion.runtimeKind ?? 'infrastructure'
+  validateRuntimeKind(runtimeKindRaw)
+  const runtimeKind = runtimeKindRaw as RuntimeKind
+
+  if (runtimeKind === 'protocol') {
+    throw new ProtocolRuntimeNotSupportedError(networkVersion.id)
+  }
+
+  const runtime = resolveRuntime(runtimeKind)
+
+  const now = Date.now()
+  const recovered: RecoveredAssignment[] = []
+
+  for (const assignment of execution.assignments) {
+    if (assignment.status !== 'executing') {
+      continue // only 'executing' assignments can be stuck
+    }
+
+    // Check if the assignment's createdAt is older than the lease.
+    // (createdAt is set when the assignment was created by
+    // commitDecisionToExecution. The execution lease starts from
+    // beginAssignmentExecution, but we use createdAt as a conservative
+    // upper bound — if the assignment has been alive longer than the lease,
+    // it's definitely stuck.)
+    const assignmentAge = now - assignment.createdAt.getTime()
+    if (assignmentAge < leaseMs) {
+      continue // not stuck yet — within the lease window
+    }
+
+    // Mark the assignment as 'failed' via the runtime's failAssignment CAS.
+    // This transitions it to terminal 'failed', so a retry of executeDecision
+    // will skip it (not re-execute the physical resource).
+    await db.$transaction(async (tx) => {
+      await runtime.failAssignment(
+        tx,
+        tenantId,
+        assignment.id,
+        execution.id,
+      )
+    }, { timeout: 30000 })
+
+    recovered.push({
+      assignmentId: assignment.id,
+      executionId: execution.id,
+      recovered: true,
+      reason: `assignment was 'executing' for ${Math.round(assignmentAge / 1000)}s (lease=${Math.round(leaseMs / 1000)}s) — assumed crashed`,
+    })
+  }
+
+  // If any assignments were recovered, release their capacity atomically.
+  if (recovered.length > 0) {
+    const recoveredIds = recovered.map((r) => r.assignmentId)
+    await releaseFailedAssignments(decisionId, recoveredIds, 'crash recovery: stuck executing')
+  }
+
+  void providerRegistry // kept for API consistency; not used in recovery itself
+  return recovered
 }

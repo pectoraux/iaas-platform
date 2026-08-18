@@ -28,6 +28,7 @@ import {
   submitNetworkRequest,
   commitDecisionToExecution,
   executeDecision,
+  recoverStuckAssignments,
   ExecutionFailedError,
   EXECUTION_SOURCE_TYPE,
 } from '../src/lib/control-plane'
@@ -330,5 +331,238 @@ describeOrSkip('Phase 12B Slice 4: Actual Execution (executeDecision)', () => {
     // MUST import resolveRuntime (the indirection).
     expect(source).toContain('resolveRuntime')
     expect(source).toContain('runtime.executeAssignment')
+  })
+
+  // -------------------------------------------------------------------------
+  // Mixed-success: A succeeds + B fails → A retained, B released, no cross-contamination
+  // -------------------------------------------------------------------------
+  it('Mixed-success: completed assignment A is NOT released when assignment B fails (targeted release)', async () => {
+    // Provision ONE resource with TWO capabilities (gpu_compute + cpu_compute)
+    // so the scheduler produces ONE decision with TWO assignments.
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    const tenant = await createTenant({
+      name: 'Phase 12B Slice 4 — Mixed',
+      slug: `p12b-s4-mixed-${stamp}`,
+      plan: 'growth',
+    })
+    const instantiated = await instantiateTemplate(tenant.id, 'generic-resource-network', {
+      name: `Slice 4 Mixed Net`,
+      slug: `net-s4-mixed-${stamp}`,
+    })
+    const network = instantiated.network
+    const version = instantiated.version!
+
+    const participant = await db.participantIdentity.create({ data: {} })
+    const membership = await db.participantMembership.create({
+      data: { participantId: participant.id, networkId: network.id, status: 'active' },
+    })
+    await db.participantRole.create({
+      data: { membershipId: membership.id, role: 'consumer', status: 'active' },
+    })
+
+    const operator = await db.operator.create({
+      data: {
+        tenantId: tenant.id, organizationId: null,
+        displayName: `op-mixed-${stamp}`, status: 'active',
+      },
+    })
+    const asset = await db.asset.create({
+      data: {
+        tenantId: tenant.id, operatorId: operator.id,
+        name: `asset-mixed-${stamp}`, assetType: 'compute_node', status: 'active',
+      },
+    })
+    // TWO capabilities on the SAME asset (scheduler requires one resource to
+    // offer all requested capabilities).
+    await db.assetNetworkAssignment.create({
+      data: {
+        tenantId: tenant.id, assetId: asset.id, networkId: network.id,
+        capabilityType: 'gpu_compute', status: 'active',
+        verifiedQuantity: '8', verifiedUnit: 'GPU-hours',
+      },
+    })
+    await db.assetNetworkAssignment.create({
+      data: {
+        tenantId: tenant.id, assetId: asset.id, networkId: network.id,
+        capabilityType: 'cpu_compute', status: 'active',
+        verifiedQuantity: '32', verifiedUnit: 'CPU-hours',
+      },
+    })
+    const { ensureCapacityResource } = await import('../src/lib/services/capacity.service')
+    await ensureCapacityResource(tenant.id, asset.id, network.id, 'gpu_compute')
+    await ensureCapacityResource(tenant.id, asset.id, network.id, 'cpu_compute')
+
+    const resourceIdentity = await db.resourceIdentity.create({
+      data: {
+        resourceKind: 'compute', status: 'active',
+        metadataJson: JSON.stringify({ assetId: asset.id }),
+      },
+    })
+    await db.networkResourceMembership.create({
+      data: {
+        resourceId: resourceIdentity.id, networkId: network.id,
+        participantMembershipId: membership.id,
+        capabilitiesJson: JSON.stringify(['gpu_compute', 'cpu_compute']),
+        verifiedCapacityJson: JSON.stringify([
+          { capabilityType: 'gpu_compute', amount: '8', unit: 'GPU-hours' },
+          { capabilityType: 'cpu_compute', amount: '32', unit: 'CPU-hours' },
+        ]),
+        controlMode: 'default', verificationProfile: 'default', status: 'active',
+      },
+    })
+
+    // Submit a request for BOTH capabilities → one decision, two assignments.
+    const submitResult = await submitNetworkRequest({
+      requesterMembershipId: membership.id,
+      networkId: network.id,
+      networkVersionId: version.id,
+      capabilityRequirements: [
+        { capabilityType: 'gpu_compute', amount: '8', unit: 'GPU-hours' },
+        { capabilityType: 'cpu_compute', amount: '32', unit: 'CPU-hours' },
+      ],
+      timeWindow: {
+        start: new Date('2024-09-02T00:00:00Z'),
+        end: new Date('2024-09-02T04:00:00Z'),
+      },
+      idempotencyKey: `s4-mixed-${network.id}`,
+    })
+    const decisionId = submitResult.decision.decisionId
+    const commitResult = await commitDecisionToExecution(decisionId)
+    expect(commitResult.assignments.length).toBe(2)
+
+    // Identify which assignment is A (gpu_compute) vs B (cpu_compute).
+    const assignmentA = commitResult.assignments.find((a) => a.capabilityType === 'gpu_compute')!
+    const assignmentB = commitResult.assignments.find((a) => a.capabilityType === 'cpu_compute')!
+    const commitmentA = assignmentA.commitmentId
+    const commitmentB = assignmentB.commitmentId
+    const reservationA = assignmentA.reservationId
+    const reservationB = assignmentB.reservationId
+
+    // Capture reservation remainingAmounts before (both decremented by commitment creation).
+    const resABefore = await db.capacityReservation.findUnique({ where: { id: reservationA } })
+    const resBBefore = await db.capacityReservation.findUnique({ where: { id: reservationB } })
+    const remainingABefore = parseFloat(resABefore!.remainingAmount)
+    const remainingBBefore = parseFloat(resBBefore!.remainingAmount)
+
+    // Simulate mixed-success:
+    //   Assignment A (gpu_compute) → SUCCESS → completed (via runtime.completeAssignment)
+    //   Assignment B (cpu_compute) → FAILURE → needs release
+    //
+    // We complete A manually via the runtime (operational completion), then
+    // call releaseFailedAssignments([assignmentB]) — the targeted release.
+    // This tests the fix: A's commitment must NOT be released.
+    const { resolveRuntime } = await import('../src/lib/kernel/runtime')
+    const runtime = resolveRuntime('infrastructure')
+    await db.$transaction(async (tx) => {
+      await runtime.completeAssignment(tx, tenant.id, assignmentA.assignmentId, commitResult.executionId)
+    })
+
+    // Verify A is completed.
+    const assignABefore = await db.executionAssignment.findUnique({ where: { id: assignmentA.assignmentId } })
+    expect(assignABefore!.status).toBe('completed')
+
+    // Now release ONLY assignment B (the failed one).
+    const { releaseFailedAssignments } = await import('../src/lib/control-plane')
+    await releaseFailedAssignments(decisionId, [assignmentB.assignmentId], 'cpu_compute adapter failure')
+
+    // --- Assert A: completed + commitment RETAINED + reservation NOT restored ---
+    const assignA = await db.executionAssignment.findUnique({ where: { id: assignmentA.assignmentId } })
+    expect(assignA!.status).toBe('completed') // still completed — NOT failed
+
+    const commitA = await db.capacityCommitment.findUnique({ where: { id: commitmentA } })
+    // A's commitment must NOT be released — it completed successfully.
+    expect(commitA!.status).not.toBe('released')
+    // A's reservation must NOT be restored — the capacity was legitimately used.
+    const resAAfter = await db.capacityReservation.findUnique({ where: { id: reservationA } })
+    expect(parseFloat(resAAfter!.remainingAmount)).toBe(remainingABefore) // unchanged
+
+    // --- Assert B: failed + commitment released + reservation restored ---
+    const assignB = await db.executionAssignment.findUnique({ where: { id: assignmentB.assignmentId } })
+    expect(assignB!.status).toBe('failed')
+
+    const commitB = await db.capacityCommitment.findUnique({ where: { id: commitmentB } })
+    expect(commitB!.status).toBe('released')
+
+    const resBAfter = await db.capacityReservation.findUnique({ where: { id: reservationB } })
+    // B's reservation IS restored (the released amount was added back).
+    expect(parseFloat(resBAfter!.remainingAmount)).toBeGreaterThan(remainingBBefore)
+
+    // --- THE MIXED-SUCCESS INVARIANT: no completed assignment has a released commitment ---
+    const completedButReleased = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT COUNT(*)::bigint AS count
+      FROM "ExecutionAssignment" ea
+      JOIN "CapacityCommitment" cc ON ea."capacityCommitmentId" = cc.id
+      JOIN "AllocationReservation" ar ON cc."allocationReservationId" = ar.id
+      WHERE ar."decisionId" = ${decisionId}
+        AND ea.status = 'completed'
+        AND cc.status = 'released'
+    `
+    expect(Number(completedButReleased[0].count)).toBe(0)
+
+    // --- Inverse: the failed assignment DOES have a released commitment ---
+    const failedAndReleased = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT COUNT(*)::bigint AS count
+      FROM "ExecutionAssignment" ea
+      JOIN "CapacityCommitment" cc ON ea."capacityCommitmentId" = cc.id
+      JOIN "AllocationReservation" ar ON cc."allocationReservationId" = ar.id
+      WHERE ar."decisionId" = ${decisionId}
+        AND ea.status = 'failed'
+        AND cc.status = 'released'
+    `
+    expect(Number(failedAndReleased[0].count)).toBe(1)
+  })
+
+  // -------------------------------------------------------------------------
+  // Crash/retry contract: stuck 'executing' assignment → recover → retry skips it
+  // -------------------------------------------------------------------------
+  it('Crash/retry: a stuck "executing" assignment is recovered + not re-executed on retry', async () => {
+    const f = await createSlice4Fixture({ label: 'Crash', capacityAmount: '8' })
+    const { decisionId, executionId, assignmentId } = await submitAndCommit(f, {
+      amount: '8',
+      idempotencyKey: `s4-crash-${f.networkId}`,
+    })
+
+    // Simulate a crash: manually transition the assignment to 'executing'
+    // (as if beginAssignmentExecution ran but the process died before
+    // recordAssignmentResults/completeAssignment).
+    await db.executionAssignment.update({
+      where: { id: assignmentId },
+      data: { status: 'executing' },
+    })
+    await db.execution.update({
+      where: { id: executionId },
+      data: { status: 'executing' },
+    })
+
+    // Simulate the assignment having been created long ago (older than the lease).
+    // We use a lease of 0ms so recovery picks it up immediately.
+    const recovered = await recoverStuckAssignments(decisionId, { leaseMs: 0 })
+    expect(recovered.length).toBe(1)
+    expect(recovered[0].assignmentId).toBe(assignmentId)
+    expect(recovered[0].recovered).toBe(true)
+
+    // After recovery: the assignment is 'failed' (not 'executing').
+    const assignment = await db.executionAssignment.findUnique({ where: { id: assignmentId } })
+    expect(assignment!.status).toBe('failed')
+
+    // Its commitment is released + reservation restored (releaseFailedAssignments ran).
+    // Query the commitment directly via the assignment's capacityCommitmentId FK.
+    const commitmentId = assignment!.capacityCommitmentId
+    expect(commitmentId).not.toBeNull()
+    const commit = await db.capacityCommitment.findUnique({ where: { id: commitmentId! } })
+    expect(commit!.status).toBe('released')
+
+    // --- THE CRASH/RETRY CONTRACT: a retry of executeDecision does NOT re-execute ---
+    // executeDecision skips already-terminal assignments. The recovered assignment
+    // is now 'failed' (terminal), so executeDecision returns it as-is without
+    // calling runtime.executeAssignment again.
+    const result = await executeDecision(decisionId)
+    // The result includes the recovered (failed) assignment — NOT re-executed.
+    const recoveredInResult = result.assignments.find((a) => a.assignmentId === assignmentId)
+    expect(recoveredInResult).toBeDefined()
+    expect(recoveredInResult!.status).toBe('failed')
+    // No NEW assignment was created (still exactly one assignment for this execution).
+    const assignments = await db.executionAssignment.findMany({ where: { executionId } })
+    expect(assignments.length).toBe(1)
   })
 })

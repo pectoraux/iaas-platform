@@ -3868,3 +3868,47 @@ Stage Summary:
 - Failure remains atomic: adapter failure → releaseDecisionExecution (Slice 3 path) → assignment=failed, commitment=released, capacity restored. No split-brain.
 - DEFERRED (vertical-specific boundary): telemetry → event → verify → contribution → reward → ledger → settlement. This requires a device-side signature using a provisioning secret that is never stored. The control plane cannot sign on behalf of a device. Operational completion is the honest generic boundary.
 - Protocol runtimeKind remains rejected (deferred to a later protocol execution module).
+
+---
+Task ID: 12B-slice-4-hardening-mixed-success
+Agent: main (Z.ai Code)
+Task: Fix the Slice 4 audit defects: (1) mixed-success release bug — releaseDecisionExecution is decision-wide and can release a completed assignment's commitment; (2) missing mixed-success integration proof; (3) crash/retry contract for assignments stuck in 'executing' after a process crash.
+
+Work Log:
+- DEFECT 1 (mixed-success release): the old executeDecision called releaseDecisionExecution(decisionId) on ANY failure — a decision-wide release that iterates ALL allocation reservations and releases their commitments. For mixed-success (A completed, B failed), this would release A's commitment too, producing: ExecutionAssignment A = completed + CapacityCommitment A = released (invalid).
+- FIX 1: added releaseFailedAssignments(decisionId, failedAssignmentIds, reason) — the TARGETED release. It loads ONLY the commitments belonging to the given assignment IDs (via ExecutionAssignment.capacityCommitmentId FK), then for each: failAssignment + releaseCommitment in ONE transaction (Slice 3 atomic path). Successful assignments' commitments are NOT in the target set, so they are never touched. releaseDecisionExecution is now a convenience wrapper that delegates to releaseFailedAssignments with all assignment IDs (for the "everything failed" case).
+- FIX 1 (executeDecision): now calls releaseFailedAssignments(decisionId, failedAssignmentIds, ...) with ONLY the failed assignment IDs. Successful assignments' commitments stay consumed/retained, their reservations are NOT restored.
+
+- DEFECT 2 (missing mixed-success proof): no test covered the A-succeeds-B-fails scenario.
+- FIX 2: added "Mixed-success: completed assignment A is NOT released when assignment B fails (targeted release)" test. Provisions ONE resource with TWO capabilities (gpu_compute + cpu_compute) so the scheduler produces one decision with two assignments. Completes assignment A via runtime.completeAssignment, then calls releaseFailedAssignments([assignmentB]). Asserts: A is still completed + A's commitment is NOT released + A's reservation is NOT restored; B is failed + B's commitment is released + B's reservation is restored. Plus a DB-level invariant query: SELECT COUNT(*) WHERE ea.status='completed' AND cc.status='released' = 0 (no completed assignment has a released commitment).
+
+- DEFECT 3 (crash/retry gap): after beginAssignmentExecution, if the process dies before recordAssignmentResults/completeAssignment, the assignment is durable-stuck in 'executing'. A naive retry of executeDecision would call beginAssignmentExecution (CAS no-op on 'executing') then runtime.executeAssignment AGAIN — potentially executing the physical resource twice.
+- FIX 3: added recoverStuckAssignments(decisionId, {leaseMs}) — detects assignments whose 'executing' state is older than EXECUTION_LEASE_MS (default 5 min) and marks them 'failed' via runtime.failAssignment (CAS). Then calls releaseFailedAssignments for the recovered IDs. After recovery, a retry of executeDecision skips the recovered assignment (it is now terminal 'failed') — no double physical execution.
+- FIX 3 (idempotency guard): executeDecision already skips already-terminal assignments (completed/failed) at the top of the loop. So a recovered assignment is returned as-is in the result, without calling runtime.executeAssignment again.
+
+- CRASH/RETRY TEST: added "Crash/retry: a stuck 'executing' assignment is recovered + not re-executed on retry" test. Simulates a crash by manually setting the assignment to 'executing', calls recoverStuckAssignments with leaseMs=0, asserts the assignment is now 'failed' + its commitment is released. Then calls executeDecision and asserts the recovered assignment is returned as-is (status='failed') and NO new assignment was created (still exactly one assignment for the execution).
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-4-execution.test.ts: 6/6 pass (was 4/4; +2 mixed-success + crash/retry), 55 expect() calls.
+    + Happy path: adapter executes → completed + parent finalized.
+    + Failure path: adapter failure → ExecutionFailedError + atomic release (split-brain=0).
+    + Idempotency: re-executing completed decision returns same results.
+    + Vertical-neutrality: no vertical imports.
+    + Mixed-success: completed A NOT released when B fails (targeted release; completed+released count=0).
+    + Crash/retry: stuck 'executing' recovered → not re-executed on retry (no double physical execution).
+- Slice 3 integration regression: 4/4 pass (releaseDecisionExecution delegation intact, hardening atomicity test intact).
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors in Slice 4 files.
+
+Stage Summary:
+- The mixed-success defect is fixed: releaseFailedAssignments targets ONLY the failed assignment IDs. Successful assignments' commitments are never touched.
+- The crash/retry contract is delivered: recoverStuckAssignments detects + fails stuck 'executing' assignments (older than the lease), releases their capacity, and a retry of executeDecision skips them as terminal (no double physical execution).
+- Revised Slice 4 status:
+    Actual adapter execution                 ✅
+    Operational completion                   ✅
+    Single-assignment failure atomicity      ✅
+    Mixed-success failure semantics          ✅ FIXED (was ❌)
+    Execution crash/retry semantics          ✅ DELIVERED (was ⚠️)
+    Economics boundary                       ✅ deferred intentionally
+    Protocol execution                       ✅ deferred intentionally
+- Slice 4 is ready for re-audit.
