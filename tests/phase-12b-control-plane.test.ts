@@ -1153,3 +1153,169 @@ describe('Phase 12B: evaluator purity contract', () => {
     expect(result).toBe(false)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Total canonical ordering for duplicate-key collections
+// ---------------------------------------------------------------------------
+
+describe('Phase 12B: total canonical ordering (input-order independence)', () => {
+  it('same roles in different array orders produce the same decisionSnapshotHash', () => {
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+    })
+    const candidate = makeMembership('rm-gpu-1', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }])
+    const remaining = new Map([['rm-gpu-1', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]]])
+    const authorizing = new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]])
+
+    // Same roles, different array orders.
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const rolesOrder1 = [
+      makeRole('pm-consumer-a', 'consumer'),
+      makeRole('pm-consumer-a', 'orchestrator'),
+    ]
+    const rolesOrder2 = [
+      makeRole('pm-consumer-a', 'orchestrator'),
+      makeRole('pm-consumer-a', 'consumer'),
+    ]
+
+    const baseSnapshot = {
+      networkVersionId: VERSION_1,
+      request,
+      candidateMemberships: [candidate],
+      capacityStateByMembership: remaining,
+      authorizingMemberships: authorizing,
+      schedulerVersion: 'test-v1',
+      evaluatorVersion: 'test-ev-v1',
+    }
+
+    const hash1 = computeDecisionSnapshotHash({
+      ...baseSnapshot,
+      requesterMembership: membership,
+      requesterRoles: rolesOrder1,
+    })
+    const hash2 = computeDecisionSnapshotHash({
+      ...baseSnapshot,
+      requesterMembership: membership,
+      requesterRoles: rolesOrder2,
+    })
+
+    expect(hash1).toBe(hash2)
+  })
+
+  it('same capacity entries in different array orders produce the same decisionSnapshotHash', () => {
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+    })
+
+    // Two capacity entries with the SAME capabilityType but different units.
+    // If sorted by capabilityType alone, their order is input-dependent.
+    const cap1 = [
+      { capabilityType: 'compute', amount: '8', unit: 'GPU' },
+      { capabilityType: 'compute', amount: '100', unit: 'cores' },
+    ]
+    const cap2 = [
+      { capabilityType: 'compute', amount: '100', unit: 'cores' },
+      { capabilityType: 'compute', amount: '8', unit: 'GPU' },
+    ]
+
+    const candidate1 = makeMembership('rm-1', NETWORK_A, ['compute'], cap1)
+    const candidate2 = makeMembership('rm-1', NETWORK_A, ['compute'], cap2)
+
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+    const remaining = new Map([['rm-1', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]]])
+    const authorizing = new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]])
+
+    const baseSnapshot = {
+      networkVersionId: VERSION_1,
+      request,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      capacityStateByMembership: remaining,
+      authorizingMemberships: authorizing,
+      schedulerVersion: 'test-v1',
+      evaluatorVersion: 'test-ev-v1',
+    }
+
+    const hash1 = computeDecisionSnapshotHash({
+      ...baseSnapshot,
+      candidateMemberships: [candidate1],
+    })
+    const hash2 = computeDecisionSnapshotHash({
+      ...baseSnapshot,
+      candidateMemberships: [candidate2],
+    })
+
+    // Same semantic state, different input ordering → same hash.
+    expect(hash1).toBe(hash2)
+  })
+
+  it('same observations in different Map insertion orders produce the same decisionSnapshotHash', () => {
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'bandwidth', amount: '500', unit: 'Mbps' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+    })
+
+    const candidate = makeMembership('rm-1', NETWORK_A, ['bandwidth'], [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }])
+
+    // Same observations, different Map insertion orders.
+    const obs1 = new Map<string, ConstraintObservationSnapshot>([
+      ['rm-1', {
+        membershipId: 'rm-1',
+        observations: new Map([
+          ['latency', { value: '14', unit: 'ms' }],
+          ['availability', { value: '99.95', unit: '%' }],
+        ]),
+      }],
+    ])
+    const obs2 = new Map<string, ConstraintObservationSnapshot>([
+      ['rm-1', {
+        membershipId: 'rm-1',
+        observations: new Map([
+          ['availability', { value: '99.95', unit: '%' }],
+          ['latency', { value: '14', unit: 'ms' }],
+        ]),
+      }],
+    ])
+
+    const membership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const roles = [makeRole('pm-consumer-a', 'consumer')]
+    const remaining = new Map([['rm-1', [{ capabilityType: 'bandwidth', amount: '1000', unit: 'Mbps' }]]])
+    const authorizing = new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A)]])
+
+    const baseSnapshot = {
+      networkVersionId: VERSION_1,
+      request,
+      requesterMembership: membership,
+      requesterRoles: roles,
+      candidateMemberships: [candidate],
+      capacityStateByMembership: remaining,
+      authorizingMemberships: authorizing,
+      schedulerVersion: 'test-v1',
+      evaluatorVersion: 'test-ev-v1',
+    }
+
+    const hash1 = computeDecisionSnapshotHash({
+      ...baseSnapshot,
+      observationSnapshots: obs1,
+    })
+    const hash2 = computeDecisionSnapshotHash({
+      ...baseSnapshot,
+      observationSnapshots: obs2,
+    })
+
+    // Same observations, different insertion order → same hash.
+    expect(hash1).toBe(hash2)
+  })
+})

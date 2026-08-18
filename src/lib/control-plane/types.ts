@@ -419,7 +419,11 @@ export function computeDecisionSnapshotHash(snapshot: {
           roleStatus: r.roleStatus,
           revokedAt: r.revokedAt ? r.revokedAt.toISOString() : null,
         }))
-        .sort((a, b) => compareCanonicalStrings(a.role, b.role)),
+        .sort((a, b) => {
+          if (a.role !== b.role) return compareCanonicalStrings(a.role, b.role)
+          if (a.roleStatus !== b.roleStatus) return compareCanonicalStrings(a.roleStatus, b.roleStatus)
+          return compareCanonicalStrings(a.revokedAt ?? '', b.revokedAt ?? '')
+        }),
     },
     // PHASE 12B FIX: include schedulerVersion + evaluatorVersion in the
     // snapshot hash (not just in decisionId). The snapshot hash must be
@@ -441,13 +445,19 @@ export function computeDecisionSnapshotHash(snapshot: {
           membershipId: m.membershipId,
           resourceId: m.resourceId,
           capabilities: [...m.capabilities].sort(),
-          verifiedCapacity: m.verifiedCapacity.map((c) => ({ ...c })).sort((a, b) =>
-            compareCanonicalStrings(a.capabilityType, b.capabilityType),
-          ),
+          verifiedCapacity: m.verifiedCapacity.map((c) => ({ ...c })).sort((a, b) => {
+            if (a.capabilityType !== b.capabilityType) return compareCanonicalStrings(a.capabilityType, b.capabilityType)
+            if (a.unit !== b.unit) return compareCanonicalStrings(a.unit, b.unit)
+            return compareCanonicalStrings(a.amount, b.amount)
+          }),
           membershipStatus: m.membershipStatus,
           remainingCapacity: (snapshot.capacityStateByMembership.get(m.membershipId) ?? [])
             .map((c) => ({ ...c }))
-            .sort((a, b) => compareCanonicalStrings(a.capabilityType, b.capabilityType)),
+            .sort((a, b) => {
+              if (a.capabilityType !== b.capabilityType) return compareCanonicalStrings(a.capabilityType, b.capabilityType)
+              if (a.unit !== b.unit) return compareCanonicalStrings(a.unit, b.unit)
+              return compareCanonicalStrings(a.amount, b.amount)
+            }),
           availability: m.availability
             ? {
                 start: m.availability.start.toISOString(),
@@ -471,7 +481,11 @@ export function computeDecisionSnapshotHash(snapshot: {
           observations: observations
             ? Array.from(observations.observations.entries())
                 .map(([serviceType, val]) => ({ serviceType, value: val.value, unit: val.unit }))
-                .sort((a, b) => compareCanonicalStrings(a.serviceType, b.serviceType))
+                .sort((a, b) => {
+                  if (a.serviceType !== b.serviceType) return compareCanonicalStrings(a.serviceType, b.serviceType)
+                  if (a.unit !== b.unit) return compareCanonicalStrings(a.unit, b.unit)
+                  return compareCanonicalStrings(a.value, b.value)
+                })
             : [],
           // PHASE 12B FIX: include capacity sources in the canonical hash.
           // capacitySources are an authoritative scheduling input (the evaluator

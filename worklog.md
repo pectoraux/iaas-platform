@@ -3333,3 +3333,27 @@ Stage Summary:
 - Every authoritative input that can affect eligibility and selection is in the hash.
 - 34/34 tests pass. 122/122 total. eslint clean. tsc clean. Dev server HTTP 200.
 - Slice 1 is now ready for final audit.
+
+---
+Task ID: 12B-slice-1-fix-9
+Agent: main (Z.ai Code)
+Task: Fix the total canonical ordering defect from the audit of 26e7563: equal-key sorts caused input-order-dependent hashes.
+
+Work Log:
+- Fixed 4 single-key sorts to multi-key total-ordering sorts:
+  1. requesterRoles: was sorted by `role` only → now sorted by (role, roleStatus, revokedAt). Two consumer roles with different status/revocation are now deterministically ordered.
+  2. verifiedCapacity: was sorted by `capabilityType` only → now sorted by (capabilityType, unit, amount). Two compute entries with different units (GPU vs cores) are now deterministically ordered.
+  3. remainingCapacity: was sorted by `capabilityType` only → now sorted by (capabilityType, unit, amount).
+  4. observations: was sorted by `serviceType` only → now sorted by (serviceType, unit, value). Two observations with the same service type but different values are now deterministically ordered.
+- The capacitySources sort was already multi-keyed (sourceId → capabilityType → unit → remainingAmount) — confirmed correct.
+- Added 3 tests proving input-order independence:
+  1. Same roles in different array orders → same hash.
+  2. Same capacity entries (same capabilityType, different units) in different orders → same hash.
+  3. Same observations in different Map insertion orders → same hash.
+- VERIFICATION: tsc zero errors. eslint clean. 37/37 phase-12b tests pass. 125/125 total. Dev server HTTP 200.
+
+Stage Summary:
+- All canonical collection sorts are now total-ordering: same set of semantic values → identical canonical representation, regardless of input ordering.
+- The snapshot hash is now genuinely input-order-independent.
+- 37/37 tests pass. 125/125 total. eslint clean. tsc clean. Dev server HTTP 200.
+- Slice 1 is now ready for final acceptance.
