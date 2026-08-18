@@ -1745,9 +1745,9 @@ model NetworkRequest {
 /// candidate memberships, selected membership, allocated capacity,
 /// schedulerVersion, evaluatorVersion, decisionSnapshotHash.
 ///
-/// reservationId: the ID of the CapacityReservation created by the existing
-/// CapacityService. This is the durable allocation-to-capacity binding.
-/// Set AFTER the reservation is created inside the same transaction.
+/// The reservation binding is a COLLECTION (not a single reservationId)
+/// because a multi-capability allocation can produce multiple reservations
+/// — one per capability type. See AllocationReservation.
 model AllocationDecision {
   id                      String   @id // deterministic: SHA-256 of semantic content
   requestId               String   // FK to NetworkRequest
@@ -1761,14 +1761,36 @@ model AllocationDecision {
   schedulerVersion        String
   evaluatorVersion        String
   decisionSnapshotHash    String   // §8.7 — exact hash from the pure scheduler
-  reservationId           String?  // FK to CapacityReservation — set after reservation is created
   decidedAt               DateTime @default(now())
   expiresAt               DateTime
   status                  String   @default("active") // active | consumed | expired
+
+  reservations            AllocationReservation[]
 
   @@unique([requestId]) // one decision per request
   @@index([networkId])
   @@index([selectedMembershipId])
   @@index([decisionSnapshotHash])
+}
+
+/// Phase 12B: AllocationReservation — the durable allocation-to-capacity
+/// binding. One per allocated capability. Each entry records which
+/// CapacityReservation backs which allocated capability.
+///
+/// This is a one-to-many relationship: one AllocationDecision can have
+/// multiple AllocationReservations (one per capability type).
+model AllocationReservation {
+  id                      String   @id @default(cuid())
+  decisionId              String   // FK to AllocationDecision
+  capabilityType          String   // which capability this reservation backs
+  unit                    String
+  allocatedAmount         String
+  reservationId           String   // FK to CapacityReservation
+  createdAt               DateTime @default(now())
+
+  decision                AllocationDecision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+
+  @@unique([decisionId, capabilityType]) // one reservation per capability per decision
+  @@index([decisionId])
   @@index([reservationId])
 }

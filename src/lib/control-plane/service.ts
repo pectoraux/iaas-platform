@@ -36,8 +36,12 @@ import {
   DefaultConstraintEvaluator,
   compareCanonicalStrings,
 } from './types'
-import { createCapacityReservation } from '@/lib/services/capacity.service'
 import type { ExtendedTransactionClient } from '@/lib/db'
+import {
+  createDefaultCapacityProviderRegistry,
+  type CapacityProviderRegistry,
+  type CapacityReservationResult,
+} from './capacity-provider'
 import type {
   NetworkRequest,
   AllocationDecision,
@@ -101,7 +105,7 @@ export interface SubmitNetworkRequestInput {
 export interface SubmitNetworkRequestResult {
   request: NetworkRequest
   decision: AllocationDecision
-  reservationId: string // from the existing capacity service
+  reservations: CapacityReservationResult[] // one per allocated capability
 }
 
 // ---------------------------------------------------------------------------
@@ -194,10 +198,19 @@ export async function submitNetworkRequest(
     })
 
     if (existingDecision) {
+      // Load the multi-reservation bindings.
+      const existingReservations = await db.allocationReservation.findMany({
+        where: { decisionId: existingDecision.id },
+      })
       return {
         request: dbRequestToNetworkRequest(existing),
         decision: dbDecisionToAllocationDecision(existingDecision),
-        reservationId: existingDecision.reservationId ?? '',
+        reservations: existingReservations.map((r) => ({
+          reservationId: r.reservationId,
+          capabilityType: r.capabilityType,
+          unit: r.unit,
+          allocatedAmount: r.allocatedAmount,
+        })),
       }
     }
 
@@ -279,11 +292,39 @@ export async function submitNetworkRequest(
       where: { requestId },
     })
     if (existingDecision) {
+      const existingReservations = await tx.allocationReservation.findMany({
+        where: { decisionId: existingDecision.id },
+      })
       return {
         request: dbRequestToNetworkRequest(request),
         decision: dbDecisionToAllocationDecision(existingDecision),
-        reservationId: existingDecision.reservationId ?? '',
+        reservations: existingReservations.map((r) => ({
+          reservationId: r.reservationId,
+          capabilityType: r.capabilityType,
+          unit: r.unit,
+          allocatedAmount: r.allocatedAmount,
+        })),
       }
+    }
+
+    // 9. Validate the NetworkVersion: exists + same network + published.
+    const networkVersion = await tx.networkVersion.findUnique({
+      where: { id: input.networkVersionId },
+    })
+    if (!networkVersion) {
+      throw new RequestAuthorizationError(
+        `NetworkVersion '${input.networkVersionId}' not found`,
+      )
+    }
+    if (networkVersion.networkId !== input.networkId) {
+      throw new NetworkScopeIntegrityError(
+        `NetworkVersion.networkId '${networkVersion.networkId}' does not match request.networkId '${input.networkId}'`,
+      )
+    }
+    if (!networkVersion.publishedAt) {
+      throw new RequestAuthorizationError(
+        `NetworkVersion '${input.networkVersionId}' is not published (publishedAt is null)`,
+      )
     }
 
     // 9. Load the authoritative resource + capacity snapshot.
@@ -393,48 +434,66 @@ export async function submitNetworkRequest(
 
     const decision = schedulerResult.decision
 
-    // 11. Call the existing CapacityService to create a reservation for
-    //     each capability requirement. This uses FOR UPDATE locking on
-    //     CapacityResource — the authoritative concurrency boundary.
-    //     The reservation is created INSIDE the same transaction.
-    const reservationIds: string[] = []
-    for (const cap of decision.allocatedCapacity) {
-      // Look up the resource membership to find the assetId + tenantId.
-      const selectedMembership = resourceMemberships.find(
-        (rm) => rm.id === decision.selectedMembershipId,
+    // 11. Create capacity reservations via the CapacityProvider boundary.
+    //     The control plane does NOT pass ResourceIdentity.id as an assetId
+    //     to the existing CapacityService. Instead, it resolves the appropriate
+    //     CapacityProvider based on the selected resource's resourceKind,
+    //     and the provider translates to the existing capacity primitive.
+    //
+    //     Each capability gets a DISTINCT reservation with a distinct sourceId
+    //     (requestId:capabilityType) to prevent the capacity service's
+    //     idempotency from collapsing multiple capabilities into one.
+    const providerRegistry = createDefaultCapacityProviderRegistry()
+
+    // Resolve the selected resource's kind + tenantId.
+    const selectedMembership = resourceMemberships.find(
+      (rm) => rm.id === decision.selectedMembershipId,
+    )
+    if (!selectedMembership) {
+      throw new RequestAuthorizationError(
+        `Selected membership ${decision.selectedMembershipId} not found in loaded snapshot`,
       )
-      if (!selectedMembership) {
-        throw new RequestAuthorizationError(
-          `Selected membership ${decision.selectedMembershipId} not found in loaded snapshot`,
-        )
-      }
+    }
 
-      // Resolve tenantId from the network.
-      const network = await tx.networkDefinition.findUnique({
-        where: { id: input.networkId },
-      })
-      if (!network) {
-        throw new RequestAuthorizationError(
-          `Network ${input.networkId} not found`,
-        )
-      }
+    const selectedResource = await tx.resourceIdentity.findUnique({
+      where: { id: selectedMembership.resourceId },
+    })
+    if (!selectedResource) {
+      throw new RequestAuthorizationError(
+        `ResourceIdentity '${selectedMembership.resourceId}' not found`,
+      )
+    }
 
-      const reservationResult = await createCapacityReservation({
-        tenantId: network.tenantId,
-        assetId: selectedMembership.resourceId,
+    const network = await tx.networkDefinition.findUnique({
+      where: { id: input.networkId },
+    })
+    if (!network) {
+      throw new RequestAuthorizationError(
+        `Network ${input.networkId} not found`,
+      )
+    }
+
+    const provider = providerRegistry.resolve(selectedResource.resourceKind)
+
+    const reservationResults: CapacityReservationResult[] = []
+    for (const cap of decision.allocatedCapacity) {
+      const reservationResult = await provider.createReservation({
+        resourceId: selectedMembership.resourceId,
         networkId: input.networkId,
+        tenantId: network.tenantId,
         capabilityType: cap.capabilityType,
-        requestedAmount: cap.amount,
+        amount: cap.amount,
+        unit: cap.unit,
         startTime: decision.allocationWindow.start,
         endTime: decision.allocationWindow.end,
         sourceType: 'network_request',
         sourceId: decision.requestId,
-      }, tx as unknown as ExtendedTransactionClient)
-
-      reservationIds.push(reservationResult.reservationId)
+        tx: tx as unknown as ExtendedTransactionClient,
+      })
+      reservationResults.push(reservationResult)
     }
 
-    // 12. Persist the AllocationDecision (exact scheduler output + reservation binding).
+    // 12. Persist the AllocationDecision (exact scheduler output).
     await tx.allocationDecision.create({
       data: {
         id: decision.decisionId,
@@ -449,10 +508,18 @@ export async function submitNetworkRequest(
         schedulerVersion: decision.schedulerVersion,
         evaluatorVersion: decision.evaluatorVersion,
         decisionSnapshotHash: decision.decisionSnapshotHash,
-        reservationId: reservationIds[0] ?? null, // durable allocation-to-capacity binding
         decidedAt: decision.decidedAt,
         expiresAt: decision.expiresAt,
         status: 'active',
+        // Persist the multi-reservation bindings (one per capability).
+        reservations: {
+          create: reservationResults.map((r) => ({
+            capabilityType: r.capabilityType,
+            unit: r.unit,
+            allocatedAmount: r.allocatedAmount,
+            reservationId: r.reservationId,
+          })),
+        },
       },
     })
 
@@ -468,7 +535,7 @@ export async function submitNetworkRequest(
     return {
       request: networkRequest,
       decision,
-      reservationId: reservationIds[0] ?? '',
+      reservations: reservationResults,
     }
   })
 
