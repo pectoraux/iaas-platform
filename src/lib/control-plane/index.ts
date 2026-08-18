@@ -52,3 +52,17 @@ export {
   RequestAuthorizationError,
 } from './service'
 export type { SubmitNetworkRequestInput, SubmitNetworkRequestResult } from './service'
+
+// Phase 12B Slice 3: Allocation → Commitment → Execution → Assignment orchestration.
+export {
+  commitDecisionToExecution,
+  releaseDecisionExecution,
+  OrchestratorError,
+  ProtocolRuntimeNotSupportedError,
+  EXECUTION_SOURCE_TYPE,
+  COMMITMENT_SOURCE_TYPE,
+} from './execution-orchestrator'
+export type {
+  CommitDecisionToExecutionResult,
+  CommittedAssignment,
+} from './execution-orchestrator'

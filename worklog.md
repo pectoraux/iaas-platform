@@ -3667,3 +3667,77 @@ Stage Summary:
     Gate 2: concurrent identical requests create exactly one reservation (Test A).
     Gate 3: concurrent different requests cannot oversubscribe capacity (Test B: 8+8 > 10 → one fails, 8 reserved, never 16).
 - Slice 2 is ready for closure.
+
+---
+Task ID: 12B-slice-2-ACCEPTED
+Agent: main (Z.ai Code)
+Task: Record the closure of Phase 12B Slice 2 after user re-audit of ba0fa9e on GitHub.
+
+Work Log:
+- Pushed ba0fa9e (test-only fixture isolation) to origin/main after the user noted it was not retrievable on GitHub.
+- Replaced an automated UUID-messaged commit (7703e9b) for the worklog append with a properly-messaged 13bd699 docs(worklog) commit.
+- Verified via GitHub API (https://api.github.com/repos/pectoraux/iaas-platform/commits/ba0fa9e) that ba0fa9e is now retrievable and touches only tests/phase-12b-concurrency.test.ts (+446/-179), confirming zero production-code changes.
+- User re-audited and ACCEPTED Slice 2 at ba0fa9e.
+- User noted a terminology correction: the identical-request test proves "no duplicate allocation" (the actual gate), NOT the stronger UX property "concurrent identical callers always receive the same durable result" — the losing transaction can legitimately receive P2002/transaction-conflict rather than the same existing result. That stronger property is deferred to a future idempotency/retry refinement.
+
+Stage Summary:
+- Phase 12B Slice 1 (deterministic scheduler): ACCEPTED.
+- Phase 12B Slice 2 (durable control plane): ACCEPTED at ba0fa9e.
+- All 12 acceptance gates for Slice 2 satisfied.
+- NEXT: Phase 12B Slice 3 — Allocation → Commitment → Execution → Assignment → Runtime. The first complete path from a generic network request all the way to actual infrastructure execution. The control plane stops merely deciding WHAT should happen and starts reliably causing the frozen kernel/runtime system to EXECUTE it.
+
+---
+Task ID: 12B-slice-3-orchestrator
+Agent: main (Z.ai Code)
+Task: Phase 12B Slice 3 — Allocation → Commitment → Execution → Assignment. Turn the persisted AllocationDecision/reservation into the next durable lifecycle boundary, producing the first complete path from a generic network request all the way to actual infrastructure execution. Do NOT invent a new execution model — orchestrate on top of the existing generic kernel runtime (InfrastructureRuntime.createExecution/createExecutionAssignment, RuntimeRegistry.resolve).
+
+Work Log:
+- Explored the existing generic execution machinery via an Explore subagent. Confirmed: ExecutionAssignment.capacityCommitmentId ALREADY EXISTS (no migration needed for that link). Execution has NO networkVersionId (added). No @@unique on ExecutionAssignment or CapacityCommitment(sourceType, sourceId) (added both). releaseCommitment does NOT accept a tx (followed VPP pattern: call outside the failure tx). ProtocolRuntime throws on all infra methods (rejected up front in Slice 3). createExecution hardcodes status='assigned'.
+- Schema migration (prisma/migrations/20260819000000_control_plane_slice3_execution/migration.sql):
+    + Execution.networkVersionId (nullable FK → NetworkVersion) — preserves the immutable-version invariant.
+    + CapacityCommitment.allocationReservationId (nullable FK → AllocationReservation) — the architectural improvement: explicit cross-layer FK instead of sourceType/sourceId semantic lookup.
+    + @@unique([tenantId, sourceType, sourceId]) on CapacityCommitment — DB-level idempotency for commitment creation (closes the concurrent-insert race window).
+    + @@unique([capacityCommitmentId]) on ExecutionAssignment — DB-level "one assignment per commitment" (VPP 1:1 pattern, now structural).
+    + Added NetworkVersion.executions reverse relation + AllocationDecision.request relation + NetworkRequest.decision reverse relation (Prisma requires both sides).
+- RuntimeCreateExecutionInput: added optional networkVersionId field. InfrastructureRuntime.createExecution: passes networkVersionId through to tx.execution.create.
+- CapacityProvider boundary: added resolveExecutionBinding(resourceId, tx) → {assetId, operatorId}. AssetCapacityProvider implements it by reading ResourceIdentity.metadataJson.assetId + Asset.operatorId. The orchestrator never reads the Asset table directly (Gate 6: "the control plane must not regain the old habit of NetworkResource → Asset → direct runtime call").
+- commitDecisionToExecution(decisionId) in src/lib/control-plane/execution-orchestrator.ts:
+    1. Load AllocationDecision + NetworkRequest (→ networkVersionId) + AllocationReservations.
+    2. Resolve NetworkVersion → runtimeKind → NetworkRuntime via RuntimeRegistry.resolve (NOT direct import). Reject protocol runtimeKind.
+    3. ONE db.$transaction: idempotency check (existing Execution?) → for each AllocationReservation: resolveExecutionBinding + createCapacityCommitment (deterministic sourceId=`${decisionId}:${allocResId}`) + patch allocationReservationId FK → create ONE Execution (sourceId=decisionId, deterministic) → for each commitment: createExecutionAssignment (capacityCommitmentId link) → mark decision consumed + request fulfilled.
+    4. On retry: detects existing Execution via @@unique([sourceType, sourceId]), loads existing commitments via the explicit allocationReservationId FK, returns replayed=true.
+- releaseDecisionExecution(decisionId, reason): for each assignment — failAssignment (in a tx) then releaseCommitment (outside the tx, VPP pattern). Restores the reservation's remainingAmount. Idempotent (releaseCommitment checks status inside FOR UPDATE lock; failAssignment CAS on status != 'completed').
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-3-orchestrator.test.ts (unit, gates 1-9 + 11): 6/6 pass, 44 expect() calls.
+    + Gates 1-4: single-capability → 1 commitment, 1 execution, 1 assignment (linked via capacityCommitmentId).
+    + Gate 9: multi-capability (compute/GPU + memory/GB) → 2 distinct commitments + 2 distinct assignments, sharing 1 Execution.
+    + Gate 8: retry returns same objects (replayed=true), no duplicates.
+    + Gate 5+6: runtimeKind read from NetworkVersion; orchestrator source does NOT import InfrastructureRuntime/ProtocolRuntime/HybridRuntime (static check on import lines).
+    + Protocol runtimeKind → rejected with clear error.
+    + Gate 7: sabotaged resource (deleted ResourceIdentity) → transaction rolls back, 0 executions/commitments, decision stays 'active'.
+- tests/phase-12b-slice-3-integration.test.ts (PG integration, gates 7, 8, 10, 12): 3/3 pass, 20 expect() calls.
+    + Gate 10: releaseDecisionExecution → assignment failed, commitment released, reservation remainingAmount restored (0→8), parent Execution finalized (completed). Idempotent re-release is a no-op.
+    + Gate 12: two concurrent commits on different decisions → distinct executions/assignments/commitments, no corruption.
+    + Gate 7+8: failed first commit (sabotaged metadata) + fixed retry → exactly one clean execution, decision consumed.
+
+Regression verification (gate 11):
+- phase-12b-control-plane.test.ts: 49/49 pass.
+- phase-12b-concurrency.test.ts: 3 skip on SQLite (PostgreSQL guard).
+- phase-8-compute-reference.test.ts: 16/16 pass (calls initializeBootstrap).
+- phase-5-2-execution-economics-separation.test.ts: 0 pass, 11 fail — PRE-EXISTING (confirmed identical on baseline 13bd699; the test does not call initializeBootstrap).
+- vpp-4-2-execution-invariants.test.ts: 0 pass, 12 fail — PRE-EXISTING (does not call initializeBootstrap).
+- phase-8b-compute-economic-pipeline.test.ts: 1 pass, 3 fail — PRE-EXISTING (confirmed identical on baseline 13bd699; same error at line 278).
+- Full local suite: 433 pass, 15 skip (6 pre-existing + 9 new Slice 3 tests), 27 fail (same pre-existing portfolio math failures). ZERO regressions from Slice 3.
+- ESLint: clean. tsc: zero errors in Slice 3 files (execution-orchestrator, capacity-provider, control-plane/index, kernel/runtime/types, kernel/runtime/infrastructure-runtime).
+
+Stage Summary:
+- The first complete path from a generic network request to actual infrastructure execution is now durable: REQUEST → ALLOCATION → RESERVATION → COMMITMENT → EXECUTION → ASSIGNMENT → RUNTIME (resolved via RuntimeRegistry, not imported directly) → (future: ADAPTER via runtime.executeAssignment).
+- The architectural improvement is delivered: explicit FKs (AllocationReservation → CapacityCommitment via allocationReservationId; CapacityCommitment → ExecutionAssignment via capacityCommitmentId) replace sourceType/sourceId semantic lookups.
+- DB-level idempotency: @@unique on Execution([sourceType, sourceId]), CapacityCommitment([tenantId, sourceType, sourceId]), ExecutionAssignment([capacityCommitmentId]). No Date.now() — all sourceIds are deterministic (decisionId, `${decisionId}:${allocResId}`).
+- Atomicity: commitment + execution + assignment creation in ONE transaction. Failure anywhere → ROLLBACK.
+- Failure release: releaseDecisionExecution fails assignments + releases commitments + restores reservation remainingAmount. NOT a rollback of the creation tx (which already committed) — the operational failure path.
+- Protocol runtimeKind rejected (out of scope; ProtocolRuntime throws on all infra methods).
+- Resource boundary intact: the orchestrator never reads the Asset table directly; assetId + operatorId resolved via CapacityProvider.resolveExecutionBinding.
+- Slice 3 deliverables: 6/6 unit tests + 3/3 integration tests pass against Neon. 49/49 phase-12b unit tests still pass. 16/16 phase-8 compute tests still pass. Zero regressions.
+- REMAINING (future slice): physical execution dispatch (runtime.executeAssignment + result handling + economics) is deferred. Slice 3 = durable record boundary + release path. The control plane now reliably CAUSES the kernel to have execution records; the next step causes the kernel to physically EXECUTE them.

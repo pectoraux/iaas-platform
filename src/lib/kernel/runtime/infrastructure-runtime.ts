@@ -65,6 +65,8 @@ export class InfrastructureRuntime implements NetworkRuntime {
       data: {
         tenantId: input.tenantId,
         networkId: input.networkId,
+        // Phase 12B Slice 3: bind the Execution to the immutable NetworkVersion.
+        networkVersionId: input.networkVersionId ?? null,
         requestedQuantity: input.requestedQuantity,
         requestedUnit: input.requestedUnit,
         startTime: input.startTime,

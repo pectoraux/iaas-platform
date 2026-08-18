@@ -159,6 +159,8 @@ model NetworkVersion {
   contributions  Contribution[]
   baselineEvaluations BaselineEvaluation[]
   vppPrograms    VppBuyerProgram[]
+  // Phase 12B Slice 3: Executions bound to this immutable version.
+  executions     Execution[]
 
   @@unique([networkId, version])
   @@index([networkId])
@@ -565,17 +567,32 @@ model CapacityCommitment {
   // Terminal state: active → consumed | released | expired
   status          String   @default("active") // active | consumed | released | expired
   // What this commitment is for.
-  sourceType      String   // vpp_dispatch | storage_job | compute_job | ...
-  sourceId        String?  // e.g. VppDispatch.id
+  sourceType      String   // vpp_dispatch | storage_job | compute_job | network_request_commitment | ...
+  sourceId        String?  // e.g. VppDispatch.id, or `${decisionId}:${allocationReservationId}` for control-plane commitments
   createdAt       DateTime @default(now())
   completedAt     DateTime?
 
+  // Phase 12B Slice 3: explicit FK linking this commitment back to the
+  // AllocationReservation that produced it (the architectural improvement —
+  // cross-layer relationships use explicit foreign keys, not semantic
+  // sourceType/sourceId lookups). Nullable for backward compatibility with
+  // VPP/Compute commitments created before Slice 3.
+  allocationReservationId String?
+
   tenant      Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   reservation CapacityReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  allocationReservation AllocationReservation? @relation(fields: [allocationReservationId], references: [id], onDelete: SetNull)
   usages      CapacityUsage[]
 
+  // Phase 12B Slice 3: DB-level idempotency for commitment creation.
+  // The app-level findFirst in createCapacityCommitment already dedupes,
+  // but this unique constraint closes the concurrent-insert race window.
+  // (sourceId is nullable for legacy rows; SQL NULL semantics mean the
+  // constraint only fires when sourceId is non-null.)
+  @@unique([tenantId, sourceType, sourceId])
   @@index([tenantId])
   @@index([reservationId])
+  @@index([allocationReservationId])
   @@index([sourceType, sourceId])
 }
 
@@ -1376,6 +1393,10 @@ model Execution {
   id              String   @id @default(cuid())
   tenantId        String
   networkId       String
+  // Phase 12B Slice 3: bind the Execution to the immutable NetworkVersion
+  // the AllocationDecision was scheduled against. Nullable for backward
+  // compatibility with VPP/Compute rows created before Slice 3.
+  networkVersionId String?
   requestedQuantity String
   requestedUnit    String
   startTime       DateTime
@@ -1389,12 +1410,14 @@ model Execution {
 
   tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   network     NetworkDefinition @relation(fields: [networkId], references: [id], onDelete: Cascade)
+  networkVersion NetworkVersion? @relation(fields: [networkVersionId], references: [id], onDelete: SetNull)
   assignments ExecutionAssignment[]
   vppDispatch VppDispatch?    // VPP-4.1: reverse relation (1:1)
 
   @@unique([sourceType, sourceId])
   @@index([tenantId])
   @@index([networkId])
+  @@index([networkVersionId])
   @@index([status])
   @@index([sourceType, sourceId])
 }
@@ -1425,6 +1448,12 @@ model ExecutionAssignment {
   operator   Operator   @relation(fields: [operatorId], references: [id], onDelete: Cascade)
   vppDispatchAssignment VppDispatchAssignment?  // VPP-4.1: reverse relation (1:1)
 
+  // Phase 12B Slice 3: DB-level "one assignment per commitment" (the VPP 1:1
+  // pattern, now enforced structurally). Nullable capacityCommitmentId rows
+  // (legacy or commitments without assignments) are not constrained (SQL NULL
+  // semantics). This prevents duplicate assignments for the same commitment on
+  // retry, complementing the app-level idempotency.
+  @@unique([capacityCommitmentId])
   @@index([tenantId])
   @@index([executionId])
   @@index([assetId])
@@ -1731,6 +1760,8 @@ model NetworkRequest {
   createdAt               DateTime @default(now())
   scheduledAt             DateTime?
 
+  decision                AllocationDecision?
+
   @@unique([networkId, requesterMembershipId, idempotencyKey]) // C3: one request per identity
   @@index([networkId])
   @@index([requesterMembershipId])
@@ -1765,6 +1796,7 @@ model AllocationDecision {
   expiresAt               DateTime
   status                  String   @default("active") // active | consumed | expired
 
+  request                 NetworkRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
   reservations            AllocationReservation[]
 
   @@unique([requestId]) // one decision per request
@@ -1789,6 +1821,9 @@ model AllocationReservation {
   createdAt               DateTime @default(now())
 
   decision                AllocationDecision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  // Phase 12B Slice 3: reverse relation to CapacityCommitment (the explicit
+  // AllocationReservation → CapacityCommitment link).
+  capacityCommitments     CapacityCommitment[]
 
   @@unique([decisionId, capabilityType, unit]) // one reservation per capability+unit per decision (multi-dimensional)
   @@index([decisionId])

@@ -56,6 +56,14 @@ export type RuntimeClient = Prisma.TransactionClient | typeof dbType
 export interface RuntimeCreateExecutionInput {
   tenantId: string
   networkId: string
+  /**
+   * Phase 12B Slice 3: the immutable NetworkVersion the Execution is bound to.
+   * Optional for backward compatibility — VPP/Compute do not set it (they bind
+   * the version via their vertical wrapper record). The control-plane
+   * orchestrator sets it so the Execution preserves the same immutable-version
+   * invariant the AllocationDecision was scheduled against.
+   */
+  networkVersionId?: string
   requestedQuantity: string
   requestedUnit: string
   startTime: Date

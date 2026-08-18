@@ -39,6 +39,15 @@ export interface CapacityReservationResult {
  * ARCHITECTURAL RULE: the control plane never passes ResourceIdentity.id
  * as an assetId to the existing CapacityService. The provider decides how
  * to bridge to the capacity layer.
+ *
+ * PHASE 12B SLICE 3: the provider is ALSO the boundary for resolving the
+ * kernel-level execution binding (assetId + operatorId) needed to create
+ * an ExecutionAssignment. The control plane does NOT read the Asset table
+ * directly — that would collapse ResourceIdentity back into Asset. The
+ * provider, which already owns the resourceId → assetId translation for
+ * capacity, also owns it for execution assignment creation. This keeps the
+ * "Resource/Capacity provider → kernel execution assignment" boundary
+ * authoritative for BOTH capacity and execution.
  */
 export interface CapacityProvider {
   /**
@@ -70,6 +79,30 @@ export interface CapacityProvider {
     sourceId: string
     tx: ExtendedTransactionClient
   }): Promise<CapacityReservationResult>
+
+  /**
+   * Resolve the kernel-level execution binding for a resource.
+   *
+   * Phase 12B Slice 3: the control-plane orchestrator needs `assetId` +
+   * `operatorId` to call `runtime.createExecutionAssignment(...)`. These are
+   * kernel-level concepts that live on the Asset table, but the control plane
+   * must NOT read the Asset table directly (that would collapse
+   * ResourceIdentity → Asset). The provider, which already owns the
+   * resourceId → assetId translation for capacity, also owns it for execution.
+   *
+   * For a future non-Asset-backed resource kind (storage, connectivity,
+   * industrial, human, protocol), a different provider would return a different
+   * binding shape — but for Slice 3, only Asset-backed resources are supported.
+   *
+   * @param resourceId — the ResourceIdentity ID
+   * @param tx — the transaction client (so the read is consistent with the
+   *   orchestrator's atomic transaction)
+   * @returns the assetId + operatorId for ExecutionAssignment creation
+   */
+  resolveExecutionBinding(input: {
+    resourceId: string
+    tx: ExtendedTransactionClient
+  }): Promise<{ assetId: string; operatorId: string }>
 }
 
 /**
@@ -149,6 +182,55 @@ export class AssetCapacityProvider implements CapacityProvider {
       unit: input.unit,
       allocatedAmount: input.amount,
     }
+  }
+
+  /**
+   * Phase 12B Slice 3: resolve the kernel-level execution binding for a resource.
+   *
+   * Reads ResourceIdentity.metadataJson.assetId (the backward-compatible
+   * mapping set when the resource was created from an Asset), then reads the
+   * Asset to get its operatorId. The control-plane orchestrator uses these two
+   * values to call `runtime.createExecutionAssignment(...)`.
+   *
+   * This keeps the resource→kernel translation entirely behind the provider
+   * boundary — the orchestrator never touches the Asset table directly.
+   */
+  async resolveExecutionBinding(input: {
+    resourceId: string
+    tx: ExtendedTransactionClient
+  }): Promise<{ assetId: string; operatorId: string }> {
+    const resource = await input.tx.resourceIdentity.findUnique({
+      where: { id: input.resourceId },
+    })
+
+    if (!resource) {
+      throw new Error(
+        `AssetCapacityProvider.resolveExecutionBinding: ResourceIdentity '${input.resourceId}' not found`,
+      )
+    }
+
+    const metadata = JSON.parse(resource.metadataJson || '{}') as Record<string, unknown>
+    const assetId = metadata.assetId as string | undefined
+
+    if (!assetId) {
+      throw new Error(
+        `AssetCapacityProvider.resolveExecutionBinding: ResourceIdentity '${input.resourceId}' has no assetId in metadata. ` +
+          `This resource is not Asset-backed — a different CapacityProvider is required.`,
+      )
+    }
+
+    const asset = await input.tx.asset.findUnique({
+      where: { id: assetId },
+      select: { id: true, operatorId: true },
+    })
+
+    if (!asset) {
+      throw new Error(
+        `AssetCapacityProvider.resolveExecutionBinding: Asset '${assetId}' (referenced by ResourceIdentity '${input.resourceId}') not found`,
+      )
+    }
+
+    return { assetId: asset.id, operatorId: asset.operatorId }
   }
 }
 
