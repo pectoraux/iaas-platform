@@ -7,8 +7,8 @@
 | Predecessor | Phase 11B (accepted at `713ee10`) |
 | Supersedes | `docs/phase-12a-buyer-capability-protocol-specification.md` (`fc531b0`) — too narrow |
 | Implementation gate | Phase 12B |
-| Status | **Draft for audit (revised)** |
-| Repo HEAD at authoring | `876a8fa` (`main`) |
+| Status | **Frozen** |
+| Repo HEAD at authoring | `219be41` (`main`) |
 
 > **Supersedes the buyer-protocol spec.** The earlier `fc531b0` document
 > defined a buyer-facing API surface. On review, that framing is too narrow:
@@ -1210,6 +1210,106 @@ The control-plane API surfaces these as participant-facing statuses but
 does not own the reconciliation logic. It is a **projection** of kernel
 state, not a second source of truth.
 
+### 8.6 Network Scope Integrity (final hardening — the cross-network invariant)
+
+This is the invariant that prevents cross-network authority leakage at the
+data model level, not just at the application layer.
+
+> **For every network-scoped relationship, the referenced membership's
+> `networkId` MUST equal the relationship's `networkId`.**
+
+Formally:
+
+```
+∀ relationship R with (R.networkId, R.<some>MembershipId):
+  R.<some>Membership.networkId == R.networkId
+```
+
+This applies to:
+
+| Relationship | Referenced membership | Required equality |
+|---|---|---|
+| `NetworkResourceMembership` | `participantMembershipId` → `ParticipantMembership` | `ParticipantMembership.networkId == NetworkResourceMembership.networkId` |
+| `NetworkRequest` | `requesterMembershipId` → `ParticipantMembership` | `ParticipantMembership.networkId == NetworkRequest.networkId` |
+| `AllocationDecision` | `requestId` → `NetworkRequest` | `NetworkRequest.networkId == AllocationDecision.networkId` |
+| `AllocationDecision` | `selectedMembershipId` → `NetworkResourceMembership` | `NetworkResourceMembership.networkId == AllocationDecision.networkId` |
+| `CapacityReservation` | (resource membership) | same network |
+| `CapacityCommitment` | (reservation) | same network |
+| `ExecutionAssignment` | (commitment) | same network |
+
+**Why this matters:** without this invariant, an implementation that validates
+only the IDs independently could permit a resource in Network A to be
+governed by a participant membership in Network B, or a request in Network A
+to trigger an allocation against a resource in Network B. The IDs would be
+valid; the cross-network authority leakage would be silent.
+
+**Structural enforcement (recommended for Phase 12B):**
+
+The strongest implementation enforces this structurally with composite
+foreign keys where the schema permits:
+
+```sql
+-- Example: NetworkResourceMembership references ParticipantMembership
+-- with a composite FK that includes networkId, so the DB enforces
+-- same-network at the constraint level, not just the application layer.
+ALTER TABLE "NetworkResourceMembership"
+  ADD CONSTRAINT "network_scope_integrity"
+  FOREIGN KEY ("participantMembershipId", "networkId")
+  REFERENCES "ParticipantMembership" ("id", "networkId");
+```
+
+This means the database itself refuses a `NetworkResourceMembership` whose
+`participantMembershipId` points to a `ParticipantMembership` in a different
+network — the cross-network leak is impossible at the storage layer, not
+just rejected by a service check.
+
+Where composite FKs are impractical (e.g., cross-table joins in NoSQL or
+certain ORM limitations), the invariant MUST be enforced by a service-layer
+check that is tested by an architecture test (§12 criterion 22).
+
+**This invariant supersedes the informal "network isolation" mention in §5.5
+and makes it formally structural.**
+
+### 8.7 Scheduler reproducibility — full snapshot (final hardening)
+
+The reproducibility criterion (§12 criterion 21) is tightened: `schedulerVersion`
+alone is not sufficient to reproduce a decision.
+
+A scheduler may depend on:
+
+```
+NetworkVersion (policy bundle)
+NetworkRequest
+ResourceMembership snapshot (which resources exist, their statuses)
+Capacity state (remaining amounts)
+Availability state (time windows)
+Scheduler policy version
+```
+
+So reproducibility is defined as:
+
+> **Same (NetworkVersion, NetworkRequest, authoritative resource/capacity
+> snapshot, schedulerVersion) ⇒ same AllocationDecision.**
+
+The `AllocationDecision` MUST capture or deterministically reference the
+**resource/capacity snapshot used to make the decision**:
+
+```typescript
+interface AllocationDecision {
+  // ... (existing fields) ...
+  schedulerVersion      // the scheduler policy version
+  decisionSnapshotHash   // SHA-256 of the canonical snapshot used:
+                         // (NetworkVersion, NetworkRequest,
+                         //  ResourceMembership state, Capacity state,
+                         //  Availability state)
+}
+```
+
+Without the snapshot reference, `same request + same schedulerVersion +
+different resource state → different decision` is possible, while the audit
+trail would incorrectly appear reproducible. The `decisionSnapshotHash`
+makes the decision's inputs auditable and reproducible.
+
 ---
 
 ## 9. What is explicitly out of scope
@@ -1389,15 +1489,28 @@ Phase 12B (implementation) is complete when:
     Verified by test: replaying the same request+state produces the same
     decision, or records a different `schedulerVersion` if the policy
     changed.
+22. **`[NEW]`** **Network Scope Integrity:** every network-scoped relationship
+    enforces `referenced_membership.networkId == relationship.networkId`
+    (§8.6). Enforced structurally via composite foreign keys where the
+    schema permits, OR by a tested service-layer check. Verified by test:
+    a `NetworkResourceMembership` pointing to a `ParticipantMembership` in a
+    different network is rejected at the DB or service layer.
+23. **`[NEW]`** **Scheduler reproducibility — full snapshot:** the
+    `AllocationDecision` captures `decisionSnapshotHash` (SHA-256 of the
+    canonical snapshot: NetworkVersion + NetworkRequest + ResourceMembership
+    state + Capacity state + Availability state) (§8.7). Reproducibility is
+    defined as: same (NetworkVersion, NetworkRequest, snapshot, schedulerVersion)
+    ⇒ same decision. Verified by test: replaying the same request + snapshot +
+    schedulerVersion produces the same decision.
 
 ---
 
-## 13. Summary (revised)
+## 13. Summary (frozen)
 
 ```
 Phase 11B (713ee10): runtime + reconciliation substrate ✅ accepted
     ↓
-Phase 12A (this document, revised): universal network control plane specification
+Phase 12A (this document, FROZEN): universal network control plane specification
     ↓
     - Thesis: a network is a programmable infrastructure environment
     - Rule: control plane may add generic objects; may NOT add vertical-specific
@@ -1412,16 +1525,21 @@ Phase 12A (this document, revised): universal network control plane specificatio
       separated from membership)
     - NetworkRequest (actor-neutral scheduler input, authorized by
       requesterMembershipId)
-    - AllocationDecision (first-class scheduler output, reproducible)
+    - AllocationDecision (first-class scheduler output, reproducible via
+      decisionSnapshotHash + schedulerVersion)
     - ServiceCommitment (CapacityConstraint vs ServiceConstraint — capacity
       depletes; SLA does not)
     - NetworkLaunch (atomic control-plane operation; external onboarding is
       a separate lifecycle)
     - ProtocolResourceAdapter (separate from InfrastructureAdapter)
+    - Network Scope Integrity invariant (§8.6): every network-scoped
+      relationship enforces same-network at the DB level via composite FKs
+    - Scheduler reproducibility full snapshot (§8.7): decisionSnapshotHash
+      captures the resource/capacity snapshot used
     - Every vertical is a network configuration, not a product
     - Marketplace-neutral, payment-rail-neutral
     ↓
-Phase 12B: implement the control plane (21 completeness criteria)
+Phase 12B: implement the control plane (23 completeness criteria)
 Phase 12C: prove physical verticals (Energy, Compute, Storage, Wireless)
 Phase 12D: prove service networks (Telecom/Edge, Construction, Industrial)
 Phase 12E: protocol/blockchain networks (ProtocolRuntime + ProtocolResourceAdapter + multi-node transport)
@@ -1437,7 +1555,7 @@ The next audit target is this document. It should be reviewed for:
 - Is the "no vertical-specific kernel services" rule (§2) precise enough
   (control plane may add generic objects; may not add vertical-specific
   kernel primitives)?
-- Are the 21 completeness criteria (§12) sufficient to gate Phase 12B,
+- Are the 23 completeness criteria (§12) sufficient to gate Phase 12B,
   including launch atomicity, multi-network sharing, scheduler correctness,
   and multi-dimensional commitments?
 - Does the `ProtocolResourceAdapter` vs `InfrastructureAdapter` split (§7.8)

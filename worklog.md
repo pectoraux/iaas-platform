@@ -3137,3 +3137,22 @@ Stage Summary:
 - All three corrections + two tightenings + two new criteria applied to docs/phase-12a-universal-network-control-plane-specification.md.
 - The spec now has: no internal contradictions (NR1 fixed); explicit resource→ParticipantMembership binding; NetworkRequest as the actor-neutral scheduler input; CapacityConstraint vs ServiceConstraint distinction; realistic NetworkLaunch atomicity boundary; 21 completeness criteria including request isolation and allocation reproducibility.
 - Phase 12A is now ready to freeze. The next step is Phase 12B: implement the control plane with NetworkRequest → Scheduler → AllocationDecision → Capacity → Execution as the central path.
+
+---
+Task ID: 12A-frozen
+Agent: main (Z.ai Code)
+Task: Apply the final two hardening points from the user's audit of 219be41, then freeze Phase 12A: (1) Network Scope Integrity invariant (cross-network authority leakage prevention), (2) scheduler reproducibility full snapshot.
+
+Work Log:
+- Accepted both final hardening points. These are the last corrections before freezing.
+- Hardening 1 (Network Scope Integrity invariant): added §8.6. The invariant: for every network-scoped relationship, referenced_membership.networkId MUST equal relationship.networkId. Applies to: NetworkResourceMembership→ParticipantMembership, NetworkRequest→requesterMembership, AllocationDecision→request, AllocationDecision→selectedResourceMembership, CapacityReservation, CapacityCommitment, ExecutionAssignment. Recommended structural enforcement via composite foreign keys (e.g., FOREIGN KEY (participantMembershipId, networkId) REFERENCES ParticipantMembership(id, networkId)) so the DB itself refuses cross-network leaks. Where composite FKs are impractical, a tested service-layer check is required (criterion 22). This supersedes the informal §5.5 network isolation mention — makes it formally structural.
+- Hardening 2 (scheduler reproducibility full snapshot): added §8.7. schedulerVersion alone is insufficient — a scheduler depends on NetworkVersion + NetworkRequest + ResourceMembership snapshot + Capacity state + Availability state. Reproducibility is now defined as: same (NetworkVersion, NetworkRequest, authoritative snapshot, schedulerVersion) ⇒ same decision. AllocationDecision must capture decisionSnapshotHash (SHA-256 of the canonical snapshot). Without this, same request + same schedulerVersion + different resource state → different decision is possible while the audit trail appears reproducible.
+- Added criterion 22 (Network Scope Integrity): verified by test — a NetworkResourceMembership pointing to a ParticipantMembership in a different network is rejected at the DB or service layer.
+- Added criterion 23 (scheduler reproducibility full snapshot): verified by test — replaying the same request + snapshot + schedulerVersion produces the same decision.
+- Updated §12 to 23 criteria. Updated §13 summary to include the two new invariants and mark the document FROZEN. Updated the status header to "Frozen" and the HEAD reference to 219be41.
+- VERIFICATION: eslint clean. Dev server HTTP 200. No code changed (specification only).
+
+Stage Summary:
+- Phase 12A is now FROZEN. The specification has 23 completeness criteria, the Network Scope Integrity invariant (structurally enforced via composite FKs), and the full scheduler reproducibility snapshot.
+- The architecture is complete: Network → Participants → Resources → Capabilities → Capacity → NetworkRequest → AllocationDecision → Reservation → Commitment → Assignment → Execution → Evidence → Verification → Contribution → Reward → Settlement.
+- The next step is Phase 12B: implement the control plane with NetworkRequest → Scheduler → AllocationDecision → Capacity → Execution as the central path. That is where the platform starts becoming a Network Operating System where launching a network = launching a programmable infrastructure environment.
