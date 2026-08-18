@@ -401,9 +401,14 @@ describe('Phase 12B §8.7: Scheduler reproducibility', () => {
 
     const candidate = makeMembership('rm-1', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }])
 
+    const requesterMembership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const requesterRoles = [makeRole('pm-consumer-a', 'consumer')]
+
     const hash1 = computeDecisionSnapshotHash({
       networkVersionId: VERSION_1,
       request,
+      requesterMembership,
+      requesterRoles,
       candidateMemberships: [candidate],
       capacityStateByMembership: new Map([['rm-1', [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }]]]),
       authorizingMemberships: new Map(),
@@ -414,6 +419,8 @@ describe('Phase 12B §8.7: Scheduler reproducibility', () => {
     const hash2 = computeDecisionSnapshotHash({
       networkVersionId: VERSION_1,
       request,
+      requesterMembership,
+      requesterRoles,
       candidateMemberships: [candidate],
       capacityStateByMembership: new Map([['rm-1', [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }]]]),
       authorizingMemberships: new Map(),
@@ -987,6 +994,8 @@ describe('Phase 12B defect 3 fix: authorizing membership lifecycle integrity', (
       const hash2 = computeDecisionSnapshotHash({
         networkVersionId: VERSION_1,
         request,
+        requesterMembership: membership,
+        requesterRoles: roles,
         candidateMemberships: [candidate],
         capacityStateByMembership: remaining,
         authorizingMemberships: new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A, 'suspended')]]),
@@ -1033,9 +1042,14 @@ describe('Phase 12B: capacity-source state in snapshot hash', () => {
 
     const remaining = new Map([['rm-gpu-1', [{ capabilityType: 'compute', amount: '10', unit: 'GPU' }]]])
 
+    const reqMembership = makeParticipantMembership('pm-consumer-a', NETWORK_A)
+    const reqRoles = [makeRole('pm-consumer-a', 'consumer')]
+
     const hash1 = computeDecisionSnapshotHash({
       networkVersionId: VERSION_1,
       request,
+      requesterMembership: reqMembership,
+      requesterRoles: reqRoles,
       candidateMemberships: [candidate],
       capacityStateByMembership: remaining,
       authorizingMemberships: new Map(),
@@ -1047,6 +1061,8 @@ describe('Phase 12B: capacity-source state in snapshot hash', () => {
     const hash2 = computeDecisionSnapshotHash({
       networkVersionId: VERSION_1,
       request,
+      requesterMembership: reqMembership,
+      requesterRoles: reqRoles,
       candidateMemberships: [candidate],
       capacityStateByMembership: remaining,
       authorizingMemberships: new Map(),

@@ -261,6 +261,8 @@ export function schedule(input: SchedulerInput): SchedulerResult {
   const decisionSnapshotHash = computeDecisionSnapshotHash({
     networkVersionId: input.networkVersionId,
     request,
+    requesterMembership,
+    requesterRoles,
     candidateMemberships: candidateMemberships,
     capacityStateByMembership: input.remainingCapacity,
     authorizingMemberships: input.authorizingMemberships,

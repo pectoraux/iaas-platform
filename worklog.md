@@ -3311,3 +3311,25 @@ Stage Summary:
 - All protocol-relevant sorting uses compareCanonicalStrings (simple < / > comparison), not localeCompare().
 - 34/34 tests pass. 122/122 total. eslint clean. tsc clean. Dev server HTTP 200.
 - Slice 1 is now ready for the final audit. The scheduler's reproducibility is cross-runtime safe.
+
+---
+Task ID: 12B-slice-1-fix-8
+Agent: main (Z.ai Code)
+Task: Fix the final two reproducibility defects from the audit of bd456c6: (1) requester authorization state missing from snapshot hash, (2) candidate authorizing membership networkId missing from snapshot hash.
+
+Work Log:
+- Defect 1 (requester authorization state in hash): computeDecisionSnapshotHash now accepts requesterMembership + requesterRoles and includes a canonical requesterAuthorization block in the hash: { membershipId, networkId, membershipStatus, roles: [{ role, roleStatus, revokedAt }] }. If the requester's membership is suspended or a role is revoked, the hash changes — even if everything else is the same. This is because authorizeRequest() depends on this state, so it must be in the authoritative snapshot.
+- Defect 2 (candidate authorizer networkId in hash): the snapshot now includes the full authorizing membership identity for each candidate — { membershipId, networkId, membershipStatus } — not just membershipStatus. The scheduler checks authorizing.networkId === request.networkId, so networkId is load-bearing. If the authorizing membership's networkId changes, eligibility can change, and the hash must reflect that.
+- Updated all 5 test calls to computeDecisionSnapshotHash to pass the new required parameters (requesterMembership + requesterRoles).
+- VERIFICATION: tsc zero errors. eslint clean. 34/34 phase-12b tests pass. 122/122 total. Dev server HTTP 200.
+
+Stage Summary:
+- The scheduler's canonical snapshot is now complete with ALL authorization state:
+  NetworkVersion + NetworkRequest (incl priority + full constraints) +
+  RequesterAuthorizationState (membershipId, networkId, membershipStatus, roles[]) +
+  ALL candidate resource/capacity/observation/capacity-source state +
+  ALL candidate authorizing membership identity (membershipId, networkId, membershipStatus) +
+  schedulerVersion + evaluatorVersion.
+- Every authoritative input that can affect eligibility and selection is in the hash.
+- 34/34 tests pass. 122/122 total. eslint clean. tsc clean. Dev server HTTP 200.
+- Slice 1 is now ready for final audit.

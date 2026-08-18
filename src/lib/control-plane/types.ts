@@ -354,6 +354,8 @@ export function authorizeRequest(
 export function computeDecisionSnapshotHash(snapshot: {
   networkVersionId: string
   request: NetworkRequest
+  requesterMembership: ParticipantMembership
+  requesterRoles: ParticipantRole[]
   candidateMemberships: NetworkResourceMembership[]
   capacityStateByMembership: Map<string, CapacityEntry[]>
   authorizingMemberships: Map<string, ParticipantMembership>
@@ -401,6 +403,24 @@ export function computeDecisionSnapshotHash(snapshot: {
       start: snapshot.request.timeWindow.start.toISOString(),
       end: snapshot.request.timeWindow.end.toISOString(),
     },
+    // PHASE 12B FIX: include requester authorization state. The scheduler's
+    // eligibility depends on the requester's membership being active and
+    // having an active consumer/orchestrator role. If this state changes
+    // (e.g., membership suspended, role revoked), the decision changes —
+    // so the hash must reflect it.
+    requesterAuthorization: {
+      membershipId: snapshot.requesterMembership.membershipId,
+      networkId: snapshot.requesterMembership.networkId,
+      membershipStatus: snapshot.requesterMembership.membershipStatus,
+      roles: snapshot.requesterRoles
+        .filter((r) => r.membershipId === snapshot.requesterMembership.membershipId)
+        .map((r) => ({
+          role: r.role,
+          roleStatus: r.roleStatus,
+          revokedAt: r.revokedAt ? r.revokedAt.toISOString() : null,
+        }))
+        .sort((a, b) => compareCanonicalStrings(a.role, b.role)),
+    },
     // PHASE 12B FIX: include schedulerVersion + evaluatorVersion in the
     // snapshot hash (not just in decisionId). The snapshot hash must be
     // independently auditable — it must describe all inputs that affect
@@ -434,7 +454,18 @@ export function computeDecisionSnapshotHash(snapshot: {
                 end: m.availability.end.toISOString(),
               }
             : null,
-          authorizingMembershipStatus: authorizing?.membershipStatus ?? 'missing',
+          // PHASE 12B FIX: include the FULL authorizing membership identity,
+          // not just the status. The scheduler checks authorizing.networkId
+          // === request.networkId, so networkId is load-bearing. If the
+          // authorizing membership's networkId or membershipId changes, the
+          // eligibility can change — the hash must reflect that.
+          authorizingMembership: authorizing
+            ? {
+                membershipId: authorizing.membershipId,
+                networkId: authorizing.networkId,
+                membershipStatus: authorizing.membershipStatus,
+              }
+            : null,
           // The observation snapshot for THIS membership — the full
           // authoritative observation state used for ServiceConstraint evaluation.
           observations: observations
