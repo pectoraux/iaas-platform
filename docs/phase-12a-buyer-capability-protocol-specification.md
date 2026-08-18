@@ -6,8 +6,18 @@
 | Artifact type | Specification (not implementation) |
 | Predecessor | Phase 11B (accepted at `713ee10`) |
 | Implementation gate | Phase 12B |
-| Status | **Draft for audit** |
+| Status | **SUPERSEDED** — see `docs/phase-12a-universal-network-control-plane-specification.md` |
 | Repo HEAD at authoring | `713ee10` (`main`) |
+
+> **SUPERSEDED.** This document defined a buyer-facing API surface. On
+> review, that framing is too narrow: the actual requirement is a
+> **Universal Network Control Plane** where the buyer is one participant
+> role among many, and where launching a network feels like launching a
+> cloud platform. The canonical objects and invariants from this document
+> are preserved and generalized in
+> `docs/phase-12a-universal-network-control-plane-specification.md`. This
+> document is retained for historical reference but is no longer the
+> active specification.
 
 > **Phase 11B is accepted.** The runtime selection, infrastructure boundary,
 > generic execution model, adapter registry, protocol runtime, hybrid runtime,

@@ -1,0 +1,846 @@
+# Phase 12A — Universal Network Control Plane Specification
+
+| Field | Value |
+|---|---|
+| Phase | 12A — Universal Network Control Plane Specification |
+| Artifact type | Specification (not implementation) |
+| Predecessor | Phase 11B (accepted at `713ee10`) |
+| Supersedes | `docs/phase-12a-buyer-capability-protocol-specification.md` (`fc531b0`) — too narrow |
+| Implementation gate | Phase 12B |
+| Status | **Draft for audit** |
+| Repo HEAD at authoring | `fc531b0` (`main`) |
+
+> **Supersedes the buyer-protocol spec.** The earlier `fc531b0` document
+> defined a buyer-facing API surface. On review, that framing is too narrow:
+> it positions the buyer protocol as the next layer, when the actual
+> requirement is a **Universal Network Control Plane** where the buyer is one
+> participant role among many, and where launching a network feels like
+> launching a cloud platform. This document replaces the buyer-only framing
+> with the broader control-plane architecture. The canonical objects and
+> invariants from `fc531b0` are preserved and generalized; the actor model
+> is expanded; the `Asset`-centric model is generalized to `NetworkResource`.
+
+---
+
+## 0. The thesis
+
+> **A network is a programmable infrastructure environment.**
+
+The project should evolve from "a platform with several generic primitives"
+into a **Network Operating System control plane** where launching a network
+feels like launching an AWS platform — not because the platform is a cloud,
+but because the **network** becomes the runtime environment, not merely a
+record in the database.
+
+The critical shift is:
+
+```
+old:  new vertical → new implementation
+new:  new network → network definition + policy + runtime
+                  → participants join
+                  → participants register resources
+                  → resources advertise capabilities
+                  → network scheduler/capacity layer coordinates them
+                  → execution + verification + contribution + economics
+```
+
+The existing repository already has the substrate for this: immutable
+`NetworkVersion`, explicit `AssetNetworkAssignment`, generic `Capability`,
+generic capacity layers (`CapacityResource` → `CapacityReservation` →
+`CapacityCommitment` → `CapacityUsage`), runtime selection, generic execution,
+infrastructure adapters, protocol runtime, hybrid runtime, and the Phase 11B
+reconciliation substrate.
+
+What is missing is the **network control plane that assembles those pieces
+into a complete runnable network**. This document specifies it.
+
+---
+
+## 1. The target architecture (frozen)
+
+```
+                    NETWORK CONTROL PLANE
+┌─────────────────────────────────────────────────────────────┐
+│ Network Definition                                          │
+│ Network Version / Policy Bundle                             │
+│ Runtime                                                      │
+│ Participant Model                                            │
+│ Resource Registry                                            │
+│ Capability Registry                                          │
+│ Capacity Policy                                              │
+│ Scheduling / Allocation Policy                               │
+│ Verification Policy                                          │
+│ Contribution / Reward Policy                                 │
+│ Settlement Policy                                            │
+│ Network Identity / Membership                                │
+└─────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+                    RESOURCE CONTROL PLANE
+┌─────────────────────────────────────────────────────────────┐
+│ Participants                                                 │
+│   ├─ Operators (providers)                                   │
+│   ├─ Consumers (buyers)                                      │
+│   ├─ Validators                                              │
+│   ├─ Verifiers                                               │
+│   └─ Service providers                                       │
+│                                                             │
+│ Resources                                                    │
+│   ├─ Physical assets                                         │
+│   ├─ Compute nodes                                           │
+│   ├─ Storage nodes                                           │
+│   ├─ Network links                                           │
+│   ├─ Industrial equipment                                   │
+│   ├─ Human work units                                        │
+│   └─ Protocol nodes                                          │
+│                                                             │
+│ Capabilities                                                 │
+│ Capacity → Reservation → Commitment → Assignment             │
+└─────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+                        EXECUTION
+┌─────────────────────────────────────────────────────────────┐
+│ InfrastructureRuntime | ProtocolRuntime | HybridRuntime     │
+└─────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+                 VERIFICATION / ECONOMICS
+┌─────────────────────────────────────────────────────────────┐
+│ Evidence → Verification → Attestation → Contribution        │
+│       → Reward → Ledger → Settlement → Reconciliation        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+This architecture is **frozen** as the target. Phase 12B implements it; later
+phases prove it across verticals.
+
+---
+
+## 2. The non-negotiable rule (thesis preservation)
+
+> **A new vertical must NOT require new kernel primitives.**
+
+A new vertical should primarily require:
+
+```
+network template
+  +
+resource adapter
+  +
+capability definitions
+  +
+verification policy
+  +
+economic policy
+```
+
+not new kernel services. We explicitly **forbid** solving this by adding
+`StorageService`, `WirelessService`, `TelecomService`,
+`ConstructionService`, `IndustrialService`, or `BlockchainService` to the
+kernel. That would destroy the thesis.
+
+The universal pattern is:
+
+```
+Universal Network Kernel
+        ↓
+Network Configuration
+        ↓
+Resource + Capability model
+        ↓
+Vertical adapter/policy packages
+```
+
+Every vertical (Energy, Compute, Storage, Wireless, Telecom/Edge, Construction,
+Industrial, Blockchain) is a **network configuration** running on the same
+operating system, not a separate product.
+
+---
+
+## 3. What "launch a network" should mean
+
+Launching a network becomes analogous to creating a cloud platform:
+
+```
+Launch "West Africa GPU Network"
+  ↓
+Network created
+  ↓
+NetworkVersion published (runtimeKind, capability defs, policies)
+  ↓
+Participants onboarded (providers, consumers, verifiers, validators)
+  ↓
+Providers register resources (GPU clusters)
+  ↓
+Resources advertise capabilities (compute, with capacity in GPU)
+  ↓
+Network is ACTIVE — participants can reserve/commit/execute
+  ↓
+Consumer requests 200 GPU-hours
+  ↓
+Network coordinates: reserve → commit → assign → execute → verify → contribute → settle
+```
+
+The network becomes the **runtime environment**, not merely a record in the
+database. The `NetworkVersion` is the immutable policy bundle that defines
+what the network IS; everything else is participants and resources operating
+within that bundle.
+
+---
+
+## 4. The missing abstraction: NetworkResource
+
+The current `Asset` model is too infrastructure-oriented to be the ultimate
+abstraction. Today:
+
+```
+Asset → AssetNetworkAssignment → Capability → CapacityResource
+```
+
+This works for DERs and compute, but doesn't generalize to storage nodes,
+network links, industrial equipment, human work units, or protocol nodes.
+
+### 4.1 NetworkResource (the universal abstraction)
+
+**`[NEW]`** The spec introduces `NetworkResource` as the universal resource
+abstraction. An `Asset` becomes one *kind* of resource.
+
+```typescript
+interface NetworkResource {
+  resourceId        // content-addressed or operational UUID
+  networkId         // the network this resource belongs to
+  participantId     // the participant that controls/contributes it
+
+  resourceKind      // physical | compute | storage | connectivity |
+                    // industrial | human | protocol | ...
+
+  lifecycleStatus   // registering → active → suspended → decommissioned
+
+  capabilities[]    // what this resource can DO
+  capacity[]        // how MUCH of each capability
+
+  location?         // geographic/topological
+  topology?         // network position (links, edges)
+  availability?     // time windows
+
+  controlMode       // how execution is commanded (adapter selection)
+  verificationProfile // how evidence is verified
+
+  metadata          // vertical-specific, opaque to the kernel
+}
+```
+
+**Kinds** (NOT separate kernel models — just a discriminator on
+`NetworkResource`):
+
+| Kind | Example resources | Existing mapping |
+|---|---|---|
+| `physical` | DER, battery, generator | `Asset` (VPP) |
+| `compute` | GPU cluster, CPU node | `Asset` (Compute) |
+| `storage` | storage node, disk array | `[NEW]` adapter |
+| `connectivity` | access point, router, fiber link | `[NEW]` adapter |
+| `industrial` | turbine, pump, PLC, robot | `[NEW]` adapter |
+| `human` | crew, inspection team, operator | `[NEW]` adapter |
+| `protocol` | validator node, sequencer, RPC node | `[NEW]` adapter |
+
+The kernel does NOT have seven different resource models. It has ONE
+`NetworkResource` with a `resourceKind` discriminator. Each kind's
+specifics live in its adapter + capability definitions + verification
+policy, not in the kernel.
+
+### 4.2 The separation: Participant vs. Resource
+
+> **Participant = who controls/contributes. Resource = what the participant
+> makes available.**
+
+This separation is critical for blockchain, construction, and industrial
+networks, where the distinction between "who" and "what" is load-bearing.
+
+---
+
+## 5. The participant model
+
+Participants are first-class network entities, not merely "operators." A
+network contains participants with roles:
+
+### 5.1 Participant
+
+**`[NEW]`** A participant is a network-scoped identity with one or more
+roles.
+
+```typescript
+interface Participant {
+  participantId     // network-scoped identity
+  networkId         // the network this participant belongs to
+  organizationId    // the real-world org (maps to existing Organization)
+  roles[]           // provider | consumer | verifier | validator | orchestrator | observer
+  membershipStatus // pending → active → suspended → revoked
+  joinedAt
+  metadata
+}
+```
+
+### 5.2 Roles
+
+| Role | Responsibility | Existing mapping |
+|---|---|---|
+| `provider` | Owns resources, commits capacity | `Operator` (generalized) |
+| `consumer` | Requests capability execution, receives contributions, settles | `PlatformUser` (buyer role, generalized) |
+| `verifier` | Verifies execution evidence | `VerificationService` (existing) |
+| `validator` | Participates in consensus (protocol/hybrid networks) | `ValidatorRegistry` (existing) |
+| `orchestrator` | Schedules/allocation authority for the network | `[NEW]` — the network scheduler role |
+| `observer` | Read-only access (auditors, regulators) | `[NEW]` — read-only role |
+
+One organization may hold multiple roles. The kernel does not prescribe the
+mapping; the network's policy bundle defines role requirements.
+
+### 5.3 Membership
+
+**`[NEW]`** Network membership is a first-class lifecycle:
+
+```
+pending → active → suspended → revoked
+```
+
+- `pending`: a participant has requested to join; awaiting network policy
+  approval (open network = auto-approve; gated network = orchestrator
+  approval).
+- `active`: the participant can register resources and transact.
+- `suspended`: temporarily unable to transact (policy violation, payment
+  failure, etc.).
+- `revoked`: permanently removed (terminal).
+
+This is network-scoped identity, not platform-level auth. A participant in
+Network A has no standing in Network B unless they join it.
+
+---
+
+## 6. Canonical control-plane objects
+
+These are the protocol artifacts. Each has an identity, a lifecycle, and
+explicit invariants. Where an object already exists in the schema, the spec
+references it and generalizes the contract.
+
+### 6.1 NetworkDefinition + NetworkVersion
+
+**`[EXISTS]`** as `NetworkDefinition` + `NetworkVersion`.
+
+The `NetworkVersion` is the **immutable policy bundle** — the frozen
+configuration that defines what the network IS:
+
+| Policy field | Source | Meaning |
+|---|---|---|
+| `runtimeKind` | existing | infrastructure \| protocol \| hybrid |
+| `configurationJson` | existing | capability definitions, capacity rules |
+| `baselinePolicyJson` | existing | verification baseline policy |
+
+**`[NEW]`** The spec extends the policy bundle conceptually (not necessarily
+new columns — may be in `configurationJson`):
+
+```
+NetworkVersion policy bundle:
+  - capabilityDefinitions[]   (what capabilities this network supports)
+  - capacityPolicy            (reservation/commitment rules)
+  - schedulingPolicy          (allocation, priority, fairness)
+  - verificationPolicy         (how evidence is verified)
+  - contributionPolicy        (how contributions are derived)
+  - rewardPolicy              (RewardRules — [EXISTS])
+  - settlementPolicy          (ledger/settlement rules)
+  - participantOnboardingRules (open vs gated, role requirements)
+```
+
+The key invariant: **the policy bundle is immutable once published.** A
+new policy = a new `NetworkVersion`. This is the existing immutability
+invariant, generalized.
+
+### 6.2 NetworkResource
+
+**`[NEW]`** (see §4.1). The universal resource abstraction. Generalizes
+`Asset` + `AssetNetworkAssignment`.
+
+**Lifecycle:**
+
+```
+registering → active → suspended → decommissioned
+```
+
+- `registering`: the resource is being registered; capability/capacity not
+  yet verified.
+- `active`: verified and available for reservation.
+- `suspended`: temporarily unavailable (maintenance, policy violation).
+- `decommissioned`: permanently removed (terminal).
+
+**Invariants:**
+
+- NR1. A resource is scoped to exactly one `networkId` and one
+  `participantId`.
+- NR2. A resource's capabilities and capacity are **verified** before
+  `active` — self-reported numbers are not trusted (existing pattern:
+  `AssetNetworkAssignment.verifiedQuantity`).
+- NR3. A resource's `controlMode` determines the adapter selection at
+  execution time (existing: `AdapterRegistry.resolve` by assetType +
+  capabilityType; generalized to resourceKind + capability).
+
+### 6.3 Capability
+
+**`[EXISTS]`** as `Capability` (the type/schema) + `CapacityResource` (the
+verified capacity). Generalized to be resource-kind-neutral.
+
+The capability definition is part of the `NetworkVersion` policy bundle:
+"this network supports `energy_discharge`, `compute`, `storage`, `bandwidth`,
+`earth_moving`, `block_production`, ..."
+
+### 6.4 Capacity → Reservation → Commitment → Assignment
+
+**`[EXISTS]`** as `CapacityResource` → `CapacityReservation` →
+`CapacityCommitment` → `ExecutionAssignment`. These are already generic
+(kW, GPU, TB, Gbps, m³, etc.). The spec preserves them and generalizes the
+buyer-facing contract (from `fc531b0`):
+
+```
+CapacityResource (verified capacity)
+    ↓
+CapacityReservation (buyer reserves a window)
+    ↓
+CapacityCommitment (specific job commits an amount)
+    ↓
+ExecutionAssignment (kernel assigns to a resource for execution)
+```
+
+**Lifecycles (existing + buyer-facing):**
+
+| Object | Lifecycle |
+|---|---|
+| `CapacityReservation` | active → released \| expired |
+| `CapacityCommitment` | active → consumed \| released \| expired |
+| `ExecutionAssignment` | assigned → executing → completed \| failed |
+
+**Invariants (from `fc531b0`, preserved):**
+
+- CR3. Cancellation allowed only before consumption.
+- CC2. `consumed` is terminal — irreversible.
+- A2. `completed` is irreversible (Phase 5.2 CAS).
+
+### 6.5 Execution + Evidence + Verification + Contribution + Reward + Settlement
+
+**`[EXISTS]`** — the full economic pipeline, unchanged:
+
+```
+Execution (NetworkRuntime)
+    ↓
+RuntimeExecuteResult (raw evidence)
+    ↓
+Event (signed, queued)
+    ↓
+VerificationResult (policy-checked)
+    ↓
+Attestation (verified claim)
+    ↓
+Contribution (economically valid work)
+    ↓
+Reward (from RewardRule)
+    ↓
+LedgerPosting + LedgerEntry
+    ↓
+Settlement
+```
+
+For hybrid networks, this includes the Phase 11B reconciliation substrate:
+`PhysicalExecutionEvidence` → `ReconciliationAttempt` → `ProtocolOutcome`.
+
+The spec does NOT modify this pipeline. It is frozen (Phase 11B accepted).
+
+---
+
+## 7. The verticals as network configurations
+
+This is where the architecture proves itself. Each vertical is a network
+configuration, not a kernel extension.
+
+### 7.1 Energy (VPP) — `[EXISTS]`
+
+```
+Network: "West Africa VPP"
+  runtimeKind: infrastructure
+  capabilities: energy_discharge, energy_charge
+  capacity: kW
+  verification: baseline + telemetry
+  reward: per-kWh rules
+  resources: DERs, batteries (physical kind)
+```
+
+Already implemented. No kernel change.
+
+### 7.2 Compute — `[EXISTS]`
+
+```
+Network: "GPU Compute Network"
+  runtimeKind: infrastructure
+  capabilities: gpu_compute, cpu_compute
+  capacity: GPU, CPU
+  verification: job completion telemetry
+  reward: per-GPU-hour rules
+  resources: GPU clusters, CPU nodes (compute kind)
+```
+
+Already implemented. No kernel change.
+
+### 7.3 Storage — `[NEW]` network config, `[NEW]` adapter
+
+```
+Network: "Distributed Storage Network"
+  runtimeKind: infrastructure
+  capabilities: storage_capacity
+  capacity: TB
+  verification: proof of stored capacity / availability
+  reward: per-TB-day rules
+  resources: storage nodes (storage kind)
+  commitment: 50 TB / 30 days
+  execution: storage placement / retention
+  usage: TB-days
+```
+
+**No kernel change.** Requires: a storage network template, a storage
+resource adapter, storage capability definitions, storage verification
+policy, storage economic policy.
+
+### 7.4 Wireless / Bandwidth — `[NEW]` network config, `[NEW]` adapter
+
+```
+Network: "Wireless Access Network"
+  runtimeKind: infrastructure
+  capabilities: bandwidth
+  capacity: Mbps / Gbps
+  verification: throughput evidence
+  reward: per-Mbps-hour rules
+  resources: access points, routers, links (connectivity kind)
+  commitment: 50 Mbps for 4 hours
+  execution: traffic routing
+  usage: Mbps-hours / GB transferred
+```
+
+**No kernel change.** Requires: a wireless network template, a connectivity
+resource adapter, etc.
+
+### 7.5 Telecom / Edge — `[NEW]` network config, `[NEW]` adapter
+
+```
+Network: "Edge Compute Network"
+  runtimeKind: infrastructure (or hybrid)
+  capabilities: compute, bandwidth, latency, availability, storage, coverage
+  capacity: multi-dimensional (Mbps, ms, %, GB)
+  verification: service-level verification (latency, availability SLAs)
+  reward: per-SLA-unit rules
+  resources: edge nodes, base stations, routers, 5G slices, MEC workloads
+  commitment: 50 Mbps + <20ms latency + 99.9% availability + 4 hours
+  execution: service execution (not just physical measurement)
+```
+
+This is where the capability/commitment model becomes much more powerful
+than today's VPP-derived assumptions: a commitment is multi-dimensional
+(bandwidth + latency + availability), and verification verifies the
+**service**, not just a physical quantity.
+
+**No kernel change.** The `Capability` model already supports multi-field
+definitions (`fieldsJson`). The `CapacityCommitment` already separates
+capacity (committed amount) from usage. The multi-dimensional aspect is a
+policy/adapter concern.
+
+### 7.6 Construction / Physical Work — `[NEW]` network config, `[NEW]` adapter
+
+```
+Network: "Construction Work Network"
+  runtimeKind: infrastructure
+  capabilities: earth_moving, lifting, transport, welding, inspection, installation
+  capacity: m³, tons, items, hours
+  verification: machine telemetry + GPS + operator attestation + inspection records + photos
+  reward: per-verified-work-unit rules
+  resources: excavators, cranes, trucks, crews, robots, inspection teams (industrial + human kinds)
+  commitment: move 500 m³ within 3 days with quality requirement X
+  execution: work assignment
+  usage: verified work completed
+```
+
+This is where the architecture proves it is truly generic. A construction
+network is a **work execution network**, not an asset marketplace.
+
+**No kernel change.** Requires: a construction network template, industrial +
+human resource adapters, construction capability definitions, construction
+verification policy (multi-source evidence), construction economic policy.
+
+### 7.7 Industrial — `[NEW]` network config, `[NEW]` adapter
+
+```
+Network: "Industrial Asset Network"
+  runtimeKind: infrastructure
+  capabilities: generation, throughput, cooling, compression, machining, storage
+  capacity: MW, units/hour, BTU, m³/min, parts/hour, m³
+  verification: sensor measurements + PLC telemetry
+  resources: turbines, pumps, generators, robots, PLCs, production lines, warehouses
+```
+
+**No kernel change.**
+
+### 7.8 Blockchain — `[NEW]` network config, `[NEW]` adapter
+
+```
+Network: "Validator Network"
+  runtimeKind: protocol (existing ProtocolRuntime)
+  capabilities: block_production, validation, execution, data_availability, storage, RPC
+  capacity: blocks/s, tx/s, GB, queries/s
+  verification: finality certificates (existing — Phase 9C/11B)
+  resources: validator nodes, sequencers, execution nodes, DA nodes, RPC/indexing nodes (protocol kind)
+  commitment: produce N blocks/hour with <Xs finality
+  execution: protocol transaction execution (existing)
+  usage: finalized transactions / blocks
+```
+
+This fits the existing `ProtocolRuntime` rather than requiring a separate
+blockchain kernel. The repository already has protocol runtime selection
+and consensus/finality primitives (Phase 9C) + the reconciliation substrate
+(Phase 11B).
+
+What remains later (Phase 12E) is a **true multi-node network layer**: peer
+discovery, node-to-node transport, validator membership, distributed
+consensus, block propagation. That is a network-transport concern, not a
+kernel concern — it plugs in via the protocol resource adapter.
+
+---
+
+## 8. Invariants (preserved + generalized from `fc531b0`)
+
+### 8.1 Identity
+
+- **Content-addressed where it matters:** `PhysicalExecutionEvidence`,
+  `ProtocolTransaction`, `ProtocolOutcome` (Phase 11B) are content-addressed.
+- **Operational UUIDs:** `NetworkResource`, `Participant`,
+  `CapacityReservation`, `CapacityCommitment` use operational UUIDs with
+  buyer/participant-supplied idempotency keys layered on top.
+- **Scope:** all objects are scoped to `tenantId` + `networkVersionId` /
+  `networkId`. A participant/resource in Network A has no standing in
+  Network B.
+
+### 8.2 Idempotency
+
+**`[NEW]`** The control-plane API must support idempotency for all mutating
+operations (resource registration, reservation, commitment, assignment). The
+existing `IdempotencyRecord` model `[EXISTS]` is the mechanism.
+
+- A participant supplies an `Idempotency-Key` header on mutating requests.
+- The API stores the key + resulting object ID in `IdempotencyRecord`.
+- A retry with the same key returns the original result, not a duplicate.
+
+### 8.3 Cancellation and expiry
+
+| Object | Cancellation | Expiry |
+|---|---|---|
+| `Participant` | `active → suspended` (reversible) / `active → revoked` (terminal) | N/A |
+| `NetworkResource` | `active → suspended` (reversible) / `active → decommissioned` (terminal) | N/A |
+| `CapacityReservation` | `active → released` (before consumption) | `active → expired` |
+| `CapacityCommitment` | `active → released` (before execution) | `active → expired` |
+| `ExecutionAssignment` | `assigned → failed` (before completion) | kernel-managed |
+| `Settlement` | N/A | `pending → reconciliation_required` |
+
+**Invariant:** terminal states are irreversible. `consumed`, `completed`,
+`settled`, `decommissioned`, `revoked` cannot be reverted. This is the
+kernel's existing write-once discipline (Phase 5.2, 5.4), extended to the
+control-plane layer.
+
+### 8.4 Verification
+
+**`[EXISTS]`** and control-plane-neutral:
+
+- The control plane does not verify. It reads `VerificationResult` and
+  `Attestation` records.
+- The verification policy is bound to `NetworkVersion`.
+- A participant cannot override verification — they receive the verified
+  result or a rejection.
+
+### 8.5 Failure and reconciliation
+
+**`[EXISTS]`** (layered, from `fc531b0`):
+
+| Layer | Failure | Reconciliation |
+|---|---|---|
+| Physical execution | adapter throws | `failAssignment` (kernel) |
+| Hybrid protocol | consensus rejects / execution fails | `ReconciliationAttempt` (Phase 11B) |
+| Economic pipeline | verification rejects | event marked `rejected`; no contribution |
+| Settlement | settlement fails | `Settlement → reconciliation_required` (existing) |
+
+The control-plane API surfaces these as participant-facing statuses but
+does not own the reconciliation logic. It is a **projection** of kernel
+state, not a second source of truth.
+
+---
+
+## 9. What is explicitly out of scope
+
+- **Marketplace mechanics:** pricing discovery, order books, bidding,
+  multi-party matching. The control plane is marketplace-neutral.
+- **Payment rails:** Stripe, bank transfers. Settlement produces ledger
+  entries; external payment integration is an application concern.
+- **New kernel work:** this spec does not require changes to `NetworkRuntime`,
+  `ProtocolRuntime`, `HybridRuntime`, the executor, consensus, or the
+  economic pipeline. Those are frozen (Phase 11B accepted).
+- **Vertical-specific kernel services:** `StorageService`, `WirelessService`,
+  etc. are FORBIDDEN in the kernel (§2).
+- **Multi-node network transport:** peer discovery, node-to-node transport,
+  block propagation for blockchain networks. That is Phase 12E, and it plugs
+  in via the protocol resource adapter, not the kernel.
+- **Implementation:** this is a specification. No code, no schema changes.
+  Phase 12B is the implementation gate.
+
+---
+
+## 10. Phase roadmap
+
+This spec is Phase 12A. The subsequent phases prove the architecture across
+verticals:
+
+### Phase 12A — Universal Network Control Plane Specification (this document)
+
+Specification only. Defines Network + Participant + NetworkResource +
+Capability + Capacity + Reservation + Commitment + Assignment + Execution +
+Evidence + Verification + Contribution + Reward + Settlement as the
+control-plane object model.
+
+### Phase 12B — Implement the network control plane
+
+- `[NEW]` `NetworkResource` model (generalizing `Asset`).
+- `[NEW]` `Participant` model (generalizing operator/buyer roles).
+- `[NEW]` Control-plane API endpoints (launch network, register resource,
+  reserve, commit, assign, execute, query status).
+- `[NEW]` Idempotency for all mutating operations.
+- `[NEW]` Architecture tests proving the control plane does NOT bypass the
+  kernel runtime/economic pipeline.
+- `[NEW]` Lifecycle enforcement (terminal states irreversible).
+- `[NEW]` Integration test: launch a network → register resources → reserve
+  → commit → execute → verify → contribute → settle, end to end.
+
+### Phase 12C — Prove network portability (physical verticals)
+
+Prove that Energy, Compute, Storage, and Wireless all run on the same control
+plane with only adapter/policy differences. No kernel changes. Each is a
+network configuration.
+
+### Phase 12D — Prove service networks
+
+Prove Telecom/Edge, Construction, and Industrial as network configurations.
+This is where multi-dimensional commitments (latency + availability + bandwidth)
+and multi-source verification (telemetry + GPS + attestation + photos) prove
+the generality.
+
+### Phase 12E — Protocol/blockchain network support
+
+Prove that a validator network runs on the `ProtocolRuntime` (existing)
+via the protocol resource adapter. Includes the multi-node transport layer
+(peer discovery, node-to-node, block propagation) as an adapter concern, not
+a kernel concern.
+
+### Phase 12F — Network launch experience
+
+The "launch a platform on AWS" experience:
+
+```
+Create Network
+  ↓
+Select network class (energy, compute, storage, wireless, ...)
+  ↓
+Configure capabilities
+  ↓
+Configure policies (capacity, verification, contribution, reward, settlement)
+  ↓
+Register participants
+  ↓
+Attach resources
+  ↓
+Publish network version
+  ↓
+Network becomes ACTIVE
+```
+
+This is where the vision becomes tangible.
+
+---
+
+## 11. Relationship to Phase 11B
+
+The Phase 11B reconciliation substrate is a **dependency** of the control
+plane for hybrid networks:
+
+- `HybridRuntime.executeHybrid()` is the execution path for hybrid networks.
+- `PhysicalExecutionEvidence` + `ReconciliationAttempt` + `ProtocolOutcome`
+  are the durable proof + reconciliation records.
+- The control-plane failure projection (§8.5) maps the Phase 11B
+  `ReconciliationState` values to participant-facing statuses.
+
+The control plane is the first consumer of the Phase 11B contracts outside
+the test suite. Phase 11B's acceptance (`713ee10`) is the precondition for
+this spec.
+
+---
+
+## 12. Completeness criteria for Phase 12B
+
+Phase 12B (implementation) is complete when:
+
+1. **`[NEW]`** `NetworkResource` model exists, generalizing `Asset` with a
+   `resourceKind` discriminator (no seven separate models).
+2. **`[NEW]`** `Participant` model exists with role-based membership
+   (provider, consumer, verifier, validator, orchestrator, observer).
+3. **`[NEW]`** Control-plane API: launch network, register resource, reserve,
+   commit, assign, execute, query — all translating to kernel operations
+   WITHOUT bypassing the runtime.
+4. **`[NEW]`** Idempotency for all mutating operations (via existing
+   `IdempotencyRecord`).
+5. **`[NEW]`** Architecture tests proving the control plane does NOT import
+   kernel internals directly (no `Execution` model manipulation outside the
+   runtime; no `ProtocolRuntime.deps` access; no vertical-specific kernel
+   services).
+6. **`[NEW]`** Lifecycle enforcement: terminal states irreversible.
+7. **`[NEW]`** Failure projection: participant-facing statuses correctly
+   map to kernel states, including Phase 11B reconciliation states.
+8. **`[NEW]`** A control-plane integration test: launch a network →
+   register resources → reserve → commit → execute → verify → contribute →
+   settle, against the real runtime + economic pipeline, proving the adapter
+   boundary holds end to end.
+9. **`[NEW]`** A network-portability proof: at least two verticals (e.g.,
+   Energy + Compute, both already implemented) run on the control plane
+   with only adapter/policy differences, no kernel changes.
+
+---
+
+## 13. Summary
+
+```
+Phase 11B (713ee10): runtime + reconciliation substrate ✅ accepted
+    ↓
+Phase 12A (this document): universal network control plane specification
+    ↓
+    - Thesis: a network is a programmable infrastructure environment
+    - Rule: a new vertical must NOT require new kernel primitives
+    - Architecture: Network → Participants → Resources → Capabilities →
+      Capacity → Reservation → Commitment → Assignment → Execution →
+      Evidence → Verification → Contribution → Reward → Settlement
+    - NetworkResource generalizes Asset (one model, resourceKind discriminator)
+    - Participant model (roles, membership lifecycle)
+    - Every vertical is a network configuration, not a product
+    - Marketplace-neutral, payment-rail-neutral
+    ↓
+Phase 12B: implement the control plane (9 completeness criteria)
+Phase 12C: prove physical verticals (Energy, Compute, Storage, Wireless)
+Phase 12D: prove service networks (Telecom/Edge, Construction, Industrial)
+Phase 12E: protocol/blockchain networks (ProtocolRuntime + multi-node transport)
+Phase 12F: network launch experience ("launch a platform on AWS")
+```
+
+The next audit target is this document. It should be reviewed for:
+- Does the `NetworkResource` abstraction generalize `Asset` without losing
+  the existing VPP/Compute functionality?
+- Is the participant model complete enough for the verticals listed (§7)?
+- Is the "no vertical-specific kernel services" rule (§2) strong enough to
+  prevent the thesis from being destroyed?
+- Are the completeness criteria (§12) sufficient to gate Phase 12B?
+- Does the phase roadmap (§10) make the "launch a network = launch a cloud
+  platform" experience tangible by Phase 12F?

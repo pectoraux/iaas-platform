@@ -3052,3 +3052,40 @@ Stage Summary:
 - The spec preserves the frozen rules: buyer API is an adapter boundary (not a kernel); marketplace-neutral; no new kernel work required.
 - The [NEW] markers (idempotency, buyer-facing views, endpoints, architecture tests, lifecycle enforcement, failure projection, integration test) are the Phase 12B implementation gate.
 - Phase 11B remains accepted (713ee10). This document is the next frontier, specification-first, as directed.
+
+---
+Task ID: 12A-universal
+Agent: main (Z.ai Code)
+Task: Supersede the narrow buyer-protocol spec (fc531b0) with a Universal Network Control Plane specification. The user's vision: the project should evolve into a Network Operating System where every vertical is a network configuration, not a new product. Launching a network should feel like launching an AWS platform.
+
+Work Log:
+- Accepted the user's architectural direction in full. The buyer-protocol framing was too narrow — the buyer is one participant role among many, and the real requirement is a control plane over Network + Participants + Resources + Capabilities + Capacity + the full economic pipeline.
+- Explored the existing substrate to ground the universal spec:
+  - Confirmed the existing generic primitives: NetworkVersion (immutable policy bundle), AssetNetworkAssignment, Capability (generic, multi-field), CapacityResource → CapacityReservation → CapacityCommitment → CapacityUsage (already unit-neutral: kW, GPU, TB, Gbps), runtime selection (infrastructure/protocol/hybrid), generic Execution/ExecutionAssignment, adapters, protocol runtime, hybrid runtime, Phase 11B reconciliation.
+  - Identified what's missing: the NetworkResource universal abstraction (Asset is too infrastructure-oriented), the Participant model (operators are too narrow), and the control-plane assembly that makes "launch a network" a complete environment.
+- Marked docs/phase-12a-buyer-capability-protocol-specification.md as SUPERSEDED with a pointer to the new universal spec. Retained for historical reference.
+- Authored docs/phase-12a-universal-network-control-plane-specification.md — specification only, no code. Contents:
+  - §0 Thesis: "a network is a programmable infrastructure environment." The shift from "new vertical → new implementation" to "new network → definition + policy + runtime + participants + resources."
+  - §1 Target architecture (frozen): three-layer diagram (Network Control Plane → Resource Control Plane → Execution → Verification/Economics).
+  - §2 Non-negotiable rule: a new vertical must NOT require new kernel primitives. Explicitly FORBIDS StorageService/WirelessService/TelecomService/ConstructionService/IndustrialService/BlockchainService in the kernel. A new vertical requires only: network template + resource adapter + capability definitions + verification policy + economic policy.
+  - §3 "Launch a network" = launch a cloud platform: the full flow from Network creation to ACTIVE status.
+  - §4 NetworkResource: the universal abstraction that generalizes Asset. One model with a resourceKind discriminator (physical, compute, storage, connectivity, industrial, human, protocol). NOT seven separate kernel models. Participant vs. Resource separation.
+  - §5 Participant model: first-class network-scoped identity with roles (provider, consumer, verifier, validator, orchestrator, observer). Membership lifecycle (pending → active → suspended → revoked).
+  - §6 Canonical control-plane objects: NetworkDefinition + NetworkVersion (immutable policy bundle), NetworkResource, Capability, Capacity → Reservation → Commitment → Assignment, Execution + Evidence + Verification + Contribution + Reward + Settlement. Most [EXISTS]; [NEW] items are NetworkResource, Participant, and the control-plane API.
+  - §7 Verticals as network configurations: Energy [EXISTS], Compute [EXISTS], Storage [NEW config], Wireless [NEW config], Telecom/Edge [NEW config with multi-dimensional commitments], Construction [NEW config — the generality proof], Industrial [NEW config], Blockchain [NEW config on ProtocolRuntime]. Each is a network configuration, NOT a kernel extension.
+  - §8 Invariants: identity (content-addressed + operational UUIDs + scope), idempotency (via existing IdempotencyRecord), cancellation/expiry (terminal states irreversible), verification (control-plane-neutral), failure/reconciliation (layered projection, not a second source of truth).
+  - §9 Out of scope: marketplace mechanics, payment rails, new kernel work, vertical-specific kernel services (forbidden), multi-node transport (Phase 12E), implementation.
+  - §10 Phase roadmap: 12A (this spec) → 12B (implement control plane) → 12C (prove physical verticals) → 12D (prove service networks) → 12E (protocol/blockchain) → 12F (network launch experience — the "launch a platform on AWS" moment).
+  - §11 Relationship to Phase 11B: the control plane is the first consumer of the Phase 11B reconciliation contracts outside tests.
+  - §12 Completeness criteria for Phase 12B: 9 criteria (NetworkResource model, Participant model, control-plane API, idempotency, architecture tests for boundary, lifecycle enforcement, failure projection, integration test, network-portability proof with 2 verticals).
+  - §13 Summary.
+- No code changed. No schema changed. No tests added. Specification artifact only.
+- VERIFICATION: eslint clean. Dev server HTTP 200. The spec is grounded in the actual repository (every [EXISTS] marker verified; every [NEW] marker is the Phase 12B work).
+
+Stage Summary:
+- Phase 12A universal specification delivered: docs/phase-12a-universal-network-control-plane-specification.md
+- Supersedes the buyer-protocol spec (marked SUPERSEDED, retained for reference).
+- Preserves the frozen rules: no vertical-specific kernel services; the buyer API is an adapter boundary; marketplace-neutral.
+- Grounded in the existing substrate (45 models, 28 services, 40+ API routes, kernel contracts, Phase 11B reconciliation).
+- Defines the phase roadmap (12A-12F) that makes "launch a network = launch a cloud platform" tangible by Phase 12F.
+- Phase 11B remains accepted (713ee10). This document is the next frontier, specification-first, as directed.
