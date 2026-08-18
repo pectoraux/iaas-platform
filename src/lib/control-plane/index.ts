@@ -47,6 +47,7 @@ export {
   submitNetworkRequest,
   computePayloadHash,
   validateNoDuplicateCapabilityDimensions,
+  validateNoDuplicateConstraintIds,
   IdempotencyConflictError,
   RequestAuthorizationError,
 } from './service'

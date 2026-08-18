@@ -161,38 +161,62 @@ export function computePayloadHash(input: SubmitNetworkRequestInput): string {
 /**
  * Recursively canonicalize a constraint object for hashing.
  *
- * This recursively sorts all object keys and converts all values to
- * canonical string representations. It does NOT hard-code which fields
- * belong to which constraint kind — every field on the constraint object
- * participates in the hash, regardless of which module defined it.
+ * RULES:
+ *   1. Object keys → sorted (deterministic key order).
+ *   2. Arrays → sorted recursively (treated as unordered sets —
+ *      same elements in different order produce the same canonical form).
+ *   3. Primitive values → wrapped as { type, value } to preserve
+ *      semantic type (number 1 ≠ string "1"; boolean true ≠ string "true").
  *
- * This is the "modules don't modify the core" principle applied to
- * idempotency: a future constraint kind (e.g., "quality" with fields
- * grade/tolerance/inspectionPolicy) will have ALL its fields included
- * without modifying this function.
+ * This does NOT hard-code which fields belong to which constraint kind —
+ * every field on the constraint object participates in the hash, regardless
+ * of which module defined it. This is the "modules don't modify the core"
+ * principle applied to idempotency.
  *
  * PURE: same inputs → same output.
  */
 function canonicalizeConstraint(c: unknown): Record<string, unknown> {
-  if (c === null || typeof c !== 'object') {
-    return { value: String(c ?? '') }
+  if (c === null) {
+    return { type: 'null', value: 'null' }
+  }
+  if (c === undefined) {
+    return { type: 'null', value: 'undefined' }
+  }
+  if (typeof c !== 'object') {
+    // Primitive — preserve type information.
+    return { type: typeof c, value: String(c) }
   }
   if (Array.isArray(c)) {
-    return { array: c.map(canonicalizeConstraint) }
+    // Sort array elements recursively, then serialize.
+    // Arrays are treated as unordered sets: same elements in different
+    // order produce the same canonical form.
+    const sorted = c
+      .map(canonicalizeConstraint)
+      .sort((a, b) => compareCanonicalStrings(
+        JSON.stringify(canonicalizeForSort(a)),
+        JSON.stringify(canonicalizeForSort(b)),
+      ))
+    return { array: sorted }
   }
   const entry = c as Record<string, unknown>
   const result: Record<string, unknown> = {}
   for (const key of Object.keys(entry).sort()) {
-    const val = entry[key]
-    if (val === null || val === undefined) {
-      result[key] = null
-    } else if (typeof val === 'object') {
-      result[key] = canonicalizeConstraint(val)
-    } else {
-      result[key] = String(val)
-    }
+    result[key] = canonicalizeConstraint(entry[key])
   }
   return result
+}
+
+/**
+ * Helper to produce a stable string for sorting canonicalized elements.
+ * The canonicalized form is already deterministic per-element; we just
+ * need a string to sort by.
+ */
+function canonicalizeForSort(val: unknown): string {
+  if (val === null) return 'null'
+  if (typeof val === 'object') {
+    return JSON.stringify(val)
+  }
+  return String(val)
 }
 
 /**
@@ -217,6 +241,29 @@ export function validateNoDuplicateCapabilityDimensions(
         `aggregated into a single requirement before submission.`
     }
     seen.add(key)
+  }
+  return null
+}
+
+/**
+ * Validate that constraint IDs are unique within a request.
+ *
+ * PHASE 12B FIX: duplicate constraintId → INVALID_REQUEST. Two constraints
+ * with the same ID would leave their relative order in the canonical
+ * serialization input-dependent, breaking the determinism guarantee.
+ */
+export function validateNoDuplicateConstraintIds(
+  constraints: unknown[],
+): string | null {
+  const seen = new Set<string>()
+  for (const c of constraints) {
+    const entry = c as Record<string, unknown>
+    const constraintId = String(entry?.constraintId ?? '')
+    if (constraintId && seen.has(constraintId)) {
+      return `Duplicate constraintId: '${constraintId}'. ` +
+        `Each constraint must have a unique ID within the request.`
+    }
+    seen.add(constraintId)
   }
   return null
 }
@@ -253,6 +300,14 @@ export async function submitNetworkRequest(
   const dupError = validateNoDuplicateCapabilityDimensions(input.capabilityRequirements)
   if (dupError) {
     throw new RequestAuthorizationError(dupError)
+  }
+
+  // 0b. Validate no duplicate constraint IDs.
+  if (input.constraints && input.constraints.length > 0) {
+    const dupConstraintError = validateNoDuplicateConstraintIds(input.constraints)
+    if (dupConstraintError) {
+      throw new RequestAuthorizationError(dupConstraintError)
+    }
   }
 
   // 1-4: Resolve identity (outside the transaction — these are reads).

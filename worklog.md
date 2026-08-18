@@ -3536,3 +3536,23 @@ Stage Summary:
 - Migration exists for the unique constraint change.
 - 130/130 tests pass. eslint clean. tsc clean. Dev server HTTP 200.
 - REMAINING: PostgreSQL concurrency tests are CI-only. The in-memory tests pass.
+
+---
+Task ID: 12B-slice-2-canonicalizer-final
+Agent: main (Z.ai Code)
+Task: Fix the three canonicalizer correctness issues from the audit of 8de09c0: (1) nested arrays not sorted, (2) duplicate constraintId ambiguity, (3) type-collapsing string coercion.
+
+Work Log:
+- Fix 1 (nested array canonicalization): canonicalizeConstraint now sorts array elements recursively before serializing. Arrays are treated as unordered sets — same elements in different order produce the same canonical form. A helper canonicalizeForSort produces a stable string for each element. This handles future constraints with array fields (e.g., allowedGrades: ["A","B","C"] vs ["C","A","B"]).
+
+- Fix 2 (duplicate constraintId rejection): added validateNoDuplicateConstraintIds() — checks that each constraint has a unique constraintId within the request. Called in submitNetworkRequest right after the duplicate-capability-dimension check. Duplicate IDs are rejected with RequestAuthorizationError. This prevents two constraints with the same ID from leaving their relative order in the canonical serialization input-dependent.
+
+- Fix 3 (primitive type preservation): canonicalizeConstraint now wraps primitives as { type, value } instead of String(val). So number 1 → { type: 'number', value: '1' } and string '1' → { type: 'string', value: '1' } — they produce different hashes. Similarly boolean true → { type: 'boolean', value: 'true' } vs string 'true' → { type: 'string', value: 'true' }. This preserves semantic type distinction for future modular constraints.
+
+- Exported validateNoDuplicateConstraintIds from index.ts.
+- VERIFICATION: tsc zero errors. eslint clean. 130/130 tests pass. Dev server HTTP 200.
+
+Stage Summary:
+- The canonicalizer is now: recursive (all fields), type-preserving ({type, value}), array-sorting (unordered sets), and duplicate-ID-rejecting.
+- The user's directive: "After that, stop refining the idempotency layer." — this is the final canonicalizer fix. The next step is PostgreSQL concurrency tests, then close Slice 2.
+- 130/130 tests pass. eslint clean. tsc clean. Dev server HTTP 200.
