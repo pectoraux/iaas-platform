@@ -3020,3 +3020,35 @@ Stage Summary:
 - All 3 corrected tests pass against live Neon PostgreSQL.
 - 26 pass, 3 skip locally. eslint clean.
 - Criterion 8 is now genuinely proven against real PostgreSQL with a correct test harness.
+
+---
+Task ID: 12A
+Agent: main (Z.ai Code)
+Task: Phase 12A — Buyer Capability Protocol Specification (specification only, no implementation). Builds on the accepted Phase 11B substrate. Defines the actor model, canonical objects, protocol flow, and invariants for a buyer-facing capability protocol that sits as an adapter boundary over the kernel contracts.
+
+Work Log:
+- Read the user's audit accepting Phase 11B (713ee10). The next frontier is specification-first: a buyer capability protocol, NOT another runtime extraction.
+- Explored the existing repository substrate to ground the spec:
+  - API route tree (40+ routes under src/app/api/v1/: assets, capabilities, contributions, networks, ledger, rewards, payouts, vpp/dispatches, etc.)
+  - Domain services (28 services: capacity, contribution, reward, settlement, verification, ledger, buyer-settlement, portfolio-*, etc.)
+  - Schema models (45 models including the full economic pipeline: Event → VerificationResult → Attestation → Contribution → Reward → LedgerPosting → Settlement, plus the capacity lifecycle: CapacityResource → CapacityReservation → CapacityCommitment → CapacityUsage, plus the Phase 11B reconciliation models)
+  - Kernel contracts (NetworkRuntime, RuntimeExecuteInput/Result, Execution/ExecutionAssignment, HybridRuntime, ProtocolRuntime)
+- Authored docs/phase-12a-buyer-capability-protocol-specification.md — a specification document (no code, no schema changes). Contents:
+  - §1 Architectural boundary (non-negotiable): the buyer API is an adapter boundary over the kernel, NOT a kernel itself. Must not redefine execution/settlement semantics in HTTP handlers, must not bypass NetworkRuntime/ProtocolRuntime, must not introduce a second economic pipeline. Explicitly NOT a marketplace API (no pricing discovery, order books, bidding, matching engines, payment rails). Lists what already exists (do not duplicate).
+  - §2 Actor model: Provider (maps to Operator), Consumer/Buyer (tenant-scoped principal), Verifier (existing VerificationService), Validator (existing ValidatorRegistry/ConsensusEngine). Roles, not implementation classes.
+  - §3 Canonical objects: CapabilityAdvertisement, CapabilityReservation, CapabilityCommitment, Assignment, ExecutionEvidence, Contribution, Reward, Settlement. Each maps to existing schema models (marked [EXISTS]) with buyer-facing contracts defined on top. [NEW] markers for what Phase 12B must add (idempotency IDs, buyer-facing views).
+  - §4 Protocol flow: the 9-step end-to-end flow (advertisement → reserve → commit → dispatch → execute → verify → contribute → reward → settle). Almost entirely [EXISTS]; [NEW] items are idempotency + buyer-facing views + HTTP endpoints.
+  - §4 Invariants: identity (content-addressed where it matters; tenant+networkVersion scoped), idempotency (buyer-supplied Idempotency-Key via existing IdempotencyRecord), cancellation/expiry (terminal states irreversible, mirroring kernel write-once discipline), verification (buyer-neutral, policy-bound to NetworkVersion), failure/reconciliation (layered, buyer API is a projection not a second source of truth).
+  - §5 Out of scope: marketplace mechanics, payment rails, new kernel work, vertical-specific semantics, implementation.
+  - §6 Completeness criteria for Phase 12B: 7 criteria (idempotency, read contracts, write endpoints, architecture tests for boundary, lifecycle enforcement, failure projection, integration test).
+  - §7 Relationship to Phase 11A: the buyer protocol is the first consumer of the Phase 11B reconciliation contracts outside the test suite; references PhysicalExecutionEvidence + ReconciliationAttempt for hybrid networks.
+  - §8 Summary.
+- No code changed. No schema changed. No tests added. Specification artifact only, as directed.
+- VERIFICATION: eslint clean (exit 0). Dev server HTTP 200. The spec is internally consistent and grounded in the actual repository (every [EXISTS] reference points to a real model/service/route that was verified by reading the schema and file tree).
+
+Stage Summary:
+- Phase 12A specification delivered: docs/phase-12a-buyer-capability-protocol-specification.md
+- The spec is grounded in the existing substrate (45 models, 28 services, 40+ API routes, kernel contracts) — every [EXISTS] marker points to a verified repository artifact.
+- The spec preserves the frozen rules: buyer API is an adapter boundary (not a kernel); marketplace-neutral; no new kernel work required.
+- The [NEW] markers (idempotency, buyer-facing views, endpoints, architecture tests, lifecycle enforcement, failure projection, integration test) are the Phase 12B implementation gate.
+- Phase 11B remains accepted (713ee10). This document is the next frontier, specification-first, as directed.
