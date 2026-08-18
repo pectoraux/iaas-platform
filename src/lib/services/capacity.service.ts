@@ -424,41 +424,83 @@ export async function recordUsage(input: RecordUsageInput): Promise<{ usageId: s
  * then re-checks its status. This prevents two concurrent release calls from
  * both crediting the reservation's remaining amount.
  */
+/**
+ * Release a committed capacity: mark the commitment 'released' and return the
+ * committed amount to the reservation's remaining.
+ * This prevents stranded capacity on failed dispatches.
+ *
+ * CONCURRENCY-SAFE: locks the commitment FOR UPDATE inside the transaction,
+ * then re-checks its status. This prevents two concurrent release calls from
+ * both crediting the reservation's remaining amount.
+ *
+ * PHASE 12B SLICE 3 HARDENING: accepts an optional `tx` parameter. When
+ * provided, the release steps run on the caller's transaction (NO inner
+ * db.$transaction) — this enables atomic failure handling: the caller can
+ * fail an ExecutionAssignment and release its commitment in ONE transaction,
+ * eliminating the split-brain window where `assignment=failed` but
+ * `commitment=active` could persist if the process crashed between two
+ * separate transactions. When `tx` is omitted, the function manages its own
+ * transaction (backward compatible with existing VPP/Compute callers).
+ */
 export async function releaseCommitment(
   tenantId: string,
   sourceType: string,
   sourceId: string,
+  tx?: ExtendedTransactionClient,
 ): Promise<void> {
-  await db.$transaction(async (tx) => {
-    // Lock the commitment FOR UPDATE (concurrency-safe).
-    const commitments = await tx.$queryRaw<Array<{ id: string; status: string; reservationId: string; committedAmount: string }>>`
-      SELECT * FROM "CapacityCommitment"
-      WHERE "tenantId" = ${tenantId}
-        AND "sourceType" = ${sourceType}
-        AND "sourceId" = ${sourceId}
-      FOR UPDATE
-    `
-    const commitment = commitments[0]
-    if (!commitment) return
-    // Re-check status inside the lock (another caller may have already released/consumed).
-    if (commitment.status === 'released' || commitment.status === 'consumed') return
+  // If a transaction client is provided, run the release steps directly on it
+  // (atomic with the caller's transaction). Otherwise manage our own transaction.
+  if (tx) {
+    await releaseCommitmentInner(tx, tenantId, sourceType, sourceId)
+    return
+  }
+  await db.$transaction(async (innerTx) => {
+    await releaseCommitmentInner(innerTx, tenantId, sourceType, sourceId)
+  })
+}
 
-    // Lock the reservation FOR UPDATE.
-    await tx.$queryRaw`SELECT * FROM "CapacityReservation" WHERE id = ${commitment.reservationId} FOR UPDATE`
+/**
+ * The inner release logic, parameterized by the client (tx or db).
+ * Locks the commitment FOR UPDATE, re-checks status, locks the reservation
+ * FOR UPDATE, restores remainingAmount, marks the commitment 'released'.
+ *
+ * PURE with respect to transaction management: it only uses the provided
+ * client. The caller decides whether to wrap it in a transaction.
+ */
+async function releaseCommitmentInner(
+  client: ExtendedTransactionClient,
+  tenantId: string,
+  sourceType: string,
+  sourceId: string,
+): Promise<void> {
+  // Lock the commitment FOR UPDATE (concurrency-safe).
+  const commitments = await client.$queryRaw<Array<{ id: string; status: string; reservationId: string; committedAmount: string }>>`
+    SELECT * FROM "CapacityCommitment"
+    WHERE "tenantId" = ${tenantId}
+      AND "sourceType" = ${sourceType}
+      AND "sourceId" = ${sourceId}
+    FOR UPDATE
+  `
+  const commitment = commitments[0]
+  if (!commitment) return
+  // Re-check status inside the lock (another caller may have already released/consumed).
+  if (commitment.status === 'released' || commitment.status === 'consumed') return
 
-    const reservation = await tx.capacityReservation.findUnique({ where: { id: commitment.reservationId } })
-    if (!reservation) return
+  // Lock the reservation FOR UPDATE.
+  await client.$queryRaw`SELECT * FROM "CapacityReservation" WHERE id = ${commitment.reservationId} FOR UPDATE`
 
-    const newRemaining = new Prisma.Decimal(reservation.remainingAmount).plus(commitment.committedAmount)
-    await tx.capacityReservation.update({
-      where: { id: reservation.id },
-      data: { remainingAmount: newRemaining.toString() },
-    })
+  const reservation = await client.capacityReservation.findUnique({ where: { id: commitment.reservationId } })
+  if (!reservation) return
 
-    await tx.capacityCommitment.update({
-      where: { id: commitment.id },
-      data: { status: 'released' },
-    })
+  const newRemaining = new Prisma.Decimal(reservation.remainingAmount).plus(commitment.committedAmount)
+  await client.capacityReservation.update({
+    where: { id: reservation.id },
+    data: { remainingAmount: newRemaining.toString() },
+  })
+
+  await client.capacityCommitment.update({
+    where: { id: commitment.id },
+    data: { status: 'released' },
   })
 }
 

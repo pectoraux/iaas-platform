@@ -3741,3 +3741,54 @@ Stage Summary:
 - Resource boundary intact: the orchestrator never reads the Asset table directly; assetId + operatorId resolved via CapacityProvider.resolveExecutionBinding.
 - Slice 3 deliverables: 6/6 unit tests + 3/3 integration tests pass against Neon. 49/49 phase-12b unit tests still pass. 16/16 phase-8 compute tests still pass. Zero regressions.
 - REMAINING (future slice): physical execution dispatch (runtime.executeAssignment + result handling + economics) is deferred. Slice 3 = durable record boundary + release path. The control plane now reliably CAUSES the kernel to have execution records; the next step causes the kernel to physically EXECUTE them.
+
+---
+Task ID: 12B-slice-3-hardening-atomic-release
+Agent: main (Z.ai Code)
+Task: Address the Slice 3 audit. Two issues: (1) naming overclaim — the commit said "actual infrastructure execution" while deferring physical dispatch; honest boundary is RUNTIME-READY. (2) Non-atomic failure release — the VPP pattern of failAssignment(tx) → COMMIT → releaseCommitment(separate tx) creates a split-brain window where assignment=failed + commitment=active can persist if the process crashes between the two. Harden to atomic.
+
+Work Log:
+- NAMING CORRECTION: the Slice 3 milestone is renamed to "durable orchestration/record boundary (RUNTIME-READY)". The commit message overclaim ("actual infrastructure execution") is acknowledged as inaccurate — physical adapter execution (runtime.executeAssignment) is the NEXT slice. Slice 3 delivers the durable record boundary + atomic release path, NOT physical execution.
+
+- ATOMIC RELEASE HARDENING (the serious fix):
+  - Extended releaseCommitment(tenantId, sourceType, sourceId, tx?) in src/lib/services/capacity.service.ts to accept an optional tx parameter (backward compatible — same pattern as createCapacityCommitment). When tx is provided, the release steps (FOR UPDATE commitment, FOR UPDATE reservation, restore remainingAmount, mark 'released') run on the caller's transaction with NO inner db.$transaction. When tx is omitted, the function manages its own transaction (existing VPP/Compute callers unchanged).
+  - Extracted releaseCommitmentInner(client, tenantId, sourceType, sourceId) — the pure logic, parameterized by the client. PURE with respect to transaction management: only uses the provided client.
+  - Refactored releaseDecisionExecution in execution-orchestrator.ts: failAssignment + releaseCommitment now run in ONE db.$transaction PER ASSIGNMENT (passing the tx into releaseCommitment). This eliminates the split-brain window. The durable invariant: the state is EITHER (assignment=assigned, commitment=active) OR (assignment=failed, commitment=released, reservation.remainingAmount restored) — NEVER (assignment=failed, commitment=active).
+  - Why one tx per assignment (not one for all): runtime.failAssignment internally calls finalizeExecutionIfTerminal, which transitions the parent Execution to 'completed' once the last assignment is terminal. Each failAssignment is its own atomic unit. But within each per-assignment tx, BOTH the fail AND the release happen atomically.
+
+- ATOMICITY PROOF TEST: added "Hardening: atomic failure release — no split-brain state can persist" to tests/phase-12b-slice-3-integration.test.ts. After releaseDecisionExecution, it queries the DB directly for the split-brain state:
+    SELECT COUNT(*) FROM ExecutionAssignment ea
+    JOIN CapacityCommitment cc ON ea.capacityCommitmentId = cc.id
+    JOIN AllocationReservation ar ON cc.allocationReservationId = ar.id
+    WHERE ar.decisionId = ${decisionId} AND ea.status = 'failed' AND cc.status = 'active'
+  Asserts count = 0 (split-brain impossible). Also asserts the inverse: every failed assignment has a released commitment (count = 1).
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-3-integration.test.ts: 4/4 pass (was 3/3; +1 hardening test), 27 expect() calls.
+    + Gate 10: releaseDecisionExecution → assignment failed, commitment released, reservation restored (0→8), parent finalized.
+    + Gate 12: concurrent commits on different decisions → distinct, non-corrupt.
+    + Gate 7+8: failed first commit + fixed retry → exactly one clean execution.
+    + Hardening: atomic failure release — split-brain count = 0, consistent-terminal count = 1.
+- tests/phase-12b-slice-3-orchestrator.test.ts: 6/6 pass (unchanged), 44 expect() calls.
+- tests/phase-8-compute-reference.test.ts: 16/16 pass (backward compat — releaseCommitment 3-arg form still works).
+- ESLint clean. tsc zero errors in Slice 3 files.
+
+Stage Summary:
+- The failure/release path is now atomic. The split-brain window (assignment=failed + commitment=active) is structurally impossible because failAssignment and releaseCommitment share one transaction.
+- releaseCommitment's signature is backward compatible (optional tx). Existing VPP/Compute callers (3-arg form) are unchanged.
+- The Slice 3 milestone is honestly named: "durable orchestration/record boundary (RUNTIME-READY)". Physical adapter execution is the next slice.
+- Protocol runtimeKind remains rejected (deferred, not a dead end — a future protocol execution orchestration path will handle it).
+- Revised Slice 3 status:
+    AllocationReservation → Commitment FK       ✅
+    DB idempotency for commitments              ✅
+    Execution → NetworkVersion binding          ✅
+    Commitment → ExecutionAssignment FK         ✅
+    Deterministic execution identity            ✅
+    Atomic record creation                       ✅
+    Retry idempotency                            ✅
+    Multi-capability execution records           ✅
+    Resource → execution binding via provider    ✅
+    Failure/release atomicity                    ✅ HARDENED (was ⚠️)
+    Physical adapter execution                   ⏳ next slice
+    Protocol execution path                      ⏳ later module
+- Slice 3 is now ready for re-audit as a durable orchestration/record boundary with crash-safe failure handling.

@@ -430,14 +430,18 @@ export async function commitDecisionToExecution(
  * execution later failed, so the commitments must be released to restore the
  * reservations' remainingAmount.
  *
- * For each assignment:
- *   1. Inside a transaction: runtime.failAssignment(tx, ...) — marks the
- *      assignment 'failed' and atomically finalizes the parent Execution if
- *      all assignments are terminal.
- *   2. OUTSIDE the transaction: releaseCommitment(tenantId, sourceType,
- *      sourceId) — restores the reservation's remainingAmount. This follows
- *      the existing VPP/Compute pattern (releaseCommitment manages its own
- *      transaction and does not accept a tx parameter).
+ * PHASE 12B SLICE 3 HARDENING — ATOMIC FAILURE RELEASE:
+ * For each assignment, failAssignment + releaseCommitment happen in ONE
+ * transaction. This eliminates the split-brain window where
+ * `assignment=failed` but `commitment=active` could persist if the process
+ * crashed between two separate transactions (the old VPP pattern). The
+ * durable invariant is: the state is EITHER (assignment=assigned,
+ * commitment=active) OR (assignment=failed, commitment=released,
+ * reservation.remainingAmount restored) — NEVER the split-brain state.
+ *
+ * releaseCommitment now accepts an optional `tx` parameter; when provided, it
+ * runs its FOR UPDATE + restore + status-update steps on the caller's
+ * transaction instead of managing its own.
  *
  * This is idempotent: releasing an already-released commitment is a no-op
  * (releaseCommitment checks status inside its FOR UPDATE lock). Failing an
@@ -503,7 +507,23 @@ export async function releaseDecisionExecution(
     include: { capacityCommitments: true },
   })
 
-  // For each assignment: fail it (in a tx) then release its commitment (outside).
+  // PHASE 12B SLICE 3 HARDENING: failAssignment + releaseCommitment happen
+  // in ONE transaction PER ASSIGNMENT. This eliminates the split-brain window
+  // where `assignment=failed` but `commitment=active` could persist if the
+  // process crashed between two separate transactions (the old VPP pattern).
+  //
+  // We cannot put ALL assignments in a single transaction because
+  // runtime.failAssignment internally calls finalizeExecutionIfTerminal, which
+  // transitions the parent Execution to 'completed' once the last assignment is
+  // terminal — and the runtime's CAS logic expects each failAssignment to be
+  // its own atomic unit. So: one transaction per assignment, but within that
+  // transaction BOTH the fail AND the release happen atomically.
+  //
+  // The durable invariant: after releaseDecisionExecution returns (or after any
+  // individual per-assignment transaction commits), the state is EITHER:
+  //   - assignment=assigned, commitment=active (tx hasn't run yet), OR
+  //   - assignment=failed, commitment=released, reservation.remainingAmount restored (tx committed)
+  // NEVER: assignment=failed + commitment=active (the split-brain state).
   for (const ar of allocReservations) {
     const commitment = ar.capacityCommitments[0]
     if (!commitment) continue
@@ -513,21 +533,25 @@ export async function releaseDecisionExecution(
     )
     if (!assignment) continue
 
-    // 1. Fail the assignment inside a transaction.
+    const commitmentSourceId = `${decisionId}:${ar.id}`
+
     await db.$transaction(async (tx) => {
+      // 1. Fail the assignment (transitions → 'failed', finalizes parent if terminal).
       await runtime.failAssignment(
         tx,
         tenantId,
         assignment.id,
         execution.id,
       )
+      // 2. Release the commitment IN THE SAME TRANSACTION — restores the
+      //    reservation's remainingAmount. Now atomic with the fail above.
+      await releaseCommitment(
+        tenantId,
+        COMMITMENT_SOURCE_TYPE,
+        commitmentSourceId,
+        tx as unknown as ExtendedTransactionClient,
+      )
     }, { timeout: 30000 })
-
-    // 2. Release the commitment OUTSIDE the transaction (releaseCommitment
-    //    manages its own transaction; it does not accept a tx parameter).
-    //    Deterministic sourceId = `${decisionId}:${allocationReservationId}`.
-    const commitmentSourceId = `${decisionId}:${ar.id}`
-    await releaseCommitment(tenantId, COMMITMENT_SOURCE_TYPE, commitmentSourceId)
   }
 
   // The parent Execution is finalized by the last failAssignment call

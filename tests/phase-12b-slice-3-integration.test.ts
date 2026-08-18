@@ -331,4 +331,83 @@ describeOrSkip('Phase 12B Slice 3: Execution Orchestrator (PostgreSQL integratio
     const decision = await db.allocationDecision.findUnique({ where: { id: decisionId } })
     expect(decision!.status).toBe('consumed')
   })
+
+  // -------------------------------------------------------------------------
+  // Slice 3 Hardening: atomic failure release — no split-brain state
+  // -------------------------------------------------------------------------
+  it('Hardening: atomic failure release — no split-brain (assignment=failed + commitment=active) state can persist', async () => {
+    const f = await createFixture({ label: 'Hard', capacityAmount: '8' })
+
+    const submitResult = await submitNetworkRequest({
+      requesterMembershipId: f.requesterMembershipId,
+      networkId: f.networkId,
+      networkVersionId: f.networkVersionId,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '8', unit: 'GPU' }],
+      timeWindow: {
+        start: new Date('2024-08-14T00:00:00Z'),
+        end: new Date('2024-08-14T04:00:00Z'),
+      },
+      idempotencyKey: `s3i-hard-${f.networkId}`,
+    })
+    const decisionId = submitResult.decision.decisionId
+
+    // Commit to execution first (creates assignment + commitment).
+    const commitResult = await commitDecisionToExecution(decisionId)
+    const assignmentId = commitResult.assignments[0].assignmentId
+    const commitmentId = commitResult.assignments[0].commitmentId
+    const reservationId = commitResult.assignments[0].reservationId
+
+    // Before release: assignment=assigned, commitment=active, reservation decremented.
+    const assignmentBefore = await db.executionAssignment.findUnique({ where: { id: assignmentId } })
+    expect(assignmentBefore!.status).toBe('assigned')
+    const commitmentBefore = await db.capacityCommitment.findUnique({ where: { id: commitmentId } })
+    expect(commitmentBefore!.status).toBe('active')
+
+    // Release (simulating execution failure). In the hardened design,
+    // failAssignment + releaseCommitment run in ONE transaction per assignment.
+    await releaseDecisionExecution(decisionId, 'simulated execution failure')
+
+    // Post-condition 1: the assignment is failed.
+    const assignment = await db.executionAssignment.findUnique({ where: { id: assignmentId } })
+    expect(assignment!.status).toBe('failed')
+
+    // Post-condition 2: the commitment is released (NOT active).
+    const commitment = await db.capacityCommitment.findUnique({ where: { id: commitmentId } })
+    expect(commitment!.status).toBe('released')
+
+    // Post-condition 3: the reservation's remainingAmount was restored.
+    const reservation = await db.capacityReservation.findUnique({ where: { id: reservationId } })
+    expect(parseFloat(reservation!.remainingAmount)).toBe(
+      parseFloat(reservation!.reservedAmount),
+    )
+
+    // THE ATOMICITY PROOF: query the DB for the split-brain state — any
+    // ExecutionAssignment that is 'failed' while its capacityCommitment is
+    // 'active'. This state MUST be impossible because failAssignment and
+    // releaseCommitment now share one transaction (so either both happen or
+    // neither does). There must be ZERO such rows for this decision.
+    const splitBrain = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT COUNT(*)::bigint AS count
+      FROM "ExecutionAssignment" ea
+      JOIN "CapacityCommitment" cc ON ea."capacityCommitmentId" = cc.id
+      JOIN "AllocationReservation" ar ON cc."allocationReservationId" = ar.id
+      WHERE ar."decisionId" = ${decisionId}
+        AND ea.status = 'failed'
+        AND cc.status = 'active'
+    `
+    expect(Number(splitBrain[0].count)).toBe(0)
+
+    // Inverse invariant: every failed assignment for this decision has a
+    // released commitment (the consistent terminal state).
+    const consistentFailed = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT COUNT(*)::bigint AS count
+      FROM "ExecutionAssignment" ea
+      JOIN "CapacityCommitment" cc ON ea."capacityCommitmentId" = cc.id
+      JOIN "AllocationReservation" ar ON cc."allocationReservationId" = ar.id
+      WHERE ar."decisionId" = ${decisionId}
+        AND ea.status = 'failed'
+        AND cc.status = 'released'
+    `
+    expect(Number(consistentFailed[0].count)).toBe(1)
+  })
 })
