@@ -3089,3 +3089,29 @@ Stage Summary:
 - Grounded in the existing substrate (45 models, 28 services, 40+ API routes, kernel contracts, Phase 11B reconciliation).
 - Defines the phase roadmap (12A-12F) that makes "launch a network = launch a cloud platform" tangible by Phase 12F.
 - Phase 11B remains accepted (713ee10). This document is the next frontier, specification-first, as directed.
+
+---
+Task ID: 12A-revised
+Agent: main (Z.ai Code)
+Task: Apply the ten load-bearing corrections from the user's audit of 876a8fa to the Phase 12A Universal Network Control Plane Specification.
+
+Work Log:
+- Accepted all ten corrections. They are architecturally significant, especially #1 (multi-network resource) and #4 (multi-dimensional commitments).
+- Correction 1 (multi-network resource, BIGGEST): rewrote §4. The original put networkId on the resource identity (one resource → one network), conflicting with the existing AssetNetworkAssignment multi-network model. FIX: introduced ResourceIdentity (global, no networkId) + NetworkResourceMembership (per-network binding, generalizes AssetNetworkAssignment). A resource can now participate in multiple networks. Added §4.5 (multi-network sharing invariant) and §4.6 (resource withdrawal safety invariant).
+- Correction 2 (Asset not replaced): added §2.1 backward-compatible migration invariant. Existing VPP/Compute resources must continue to resolve through the same operational identity. Asset becomes one concrete resourceKind, not a replacement.
+- Correction 3 (roles separated from membership): rewrote §5. Introduced ParticipantIdentity (global) + ParticipantMembership (per-network) + ParticipantRole (per-membership, independently lifecycle-managed). A participant can hold multiple roles with independent statuses (e.g., Provider active + Consumer suspended).
+- Correction 4 (scheduler): added §6.6 AllocationDecision as a first-class control-plane concept. Capacity → Allocation → Reservation → Commitment → Assignment → Execution. The scheduler is what makes the network a coordinator, not just a registry. Added scheduler correctness invariant (concurrent requests cannot oversubscribe).
+- Correction 5 (multi-dimensional commitments): added §6.7 ServiceCommitment + CapabilityConstraint. Scalar capacity remains the kernel primitive; multi-dimensional service commitments (bandwidth + latency + availability) are composed from multiple constraints. Each constraint has its own verificationMethod. Don't pretend scalar CapacityResource can represent an SLA.
+- Correction 6 (ProtocolResourceAdapter): rewrote §7.8. Blockchain multi-node transport does NOT plug into InfrastructureAdapter (which is physical: discover/getCapabilities/readTelemetry/execute/health). Introduced ResourceAdapter → InfrastructureAdapter | ProtocolResourceAdapter. ProtocolResourceAdapter is a [NEW] contract for protocol-kind resources (peer discovery, message propagation, vote emission, block propagation).
+- Correction 7 (precise rule): rewrote §2. The control plane MAY introduce generic control-plane objects (NetworkResource, Participant, AllocationDecision, NetworkLaunch); it may NOT introduce vertical-specific kernel primitives. NetworkResource/Participant live in the control plane, above the frozen kernel, not in the kernel.
+- Correction 8 (NetworkLaunch): added §6.8 NetworkLaunch as a first-class atomic control-plane operation. Draft → validate → compile → materialize → publish → ACTIVE, or stays draft. No half-launched networks. Added atomicity invariant.
+- Correction 9 (strengthened criteria): expanded §12 from 9 to 19 completeness criteria. Added: network launch atomicity, multi-network resource sharing, resource withdrawal safety, scheduler correctness, policy compilation, resource lifecycle isolation, network isolation, vertical portability, multi-dimensional service commitment, ProtocolResourceAdapter.
+- Correction 10 (stale HEAD): fixed the Repo HEAD from fc531b0 to 876a8fa.
+- Updated §13 summary to reflect the revised model (ResourceIdentity + NetworkResourceMembership, ParticipantIdentity + ParticipantMembership + ParticipantRole, AllocationDecision, ServiceCommitment, NetworkLaunch, ProtocolResourceAdapter, 19 criteria).
+- VERIFICATION: eslint clean. Dev server HTTP 200. No code changed (specification only).
+
+Stage Summary:
+- All ten corrections applied to docs/phase-12a-universal-network-control-plane-specification.md.
+- The spec now correctly: supports multi-network resource sharing (ResourceIdentity + NetworkResourceMembership), separates participant roles from membership, treats scheduling as first-class (AllocationDecision), defines multi-dimensional commitments (ServiceCommitment), uses ProtocolResourceAdapter for blockchain, places control-plane objects above the frozen kernel, makes NetworkLaunch atomic, and has 19 strengthened completeness criteria.
+- The spec is grounded in the existing repository (every [EXISTS] marker verified; the multi-network model generalizes the existing AssetNetworkAssignment pattern).
+- Phase 11B remains accepted (713ee10). This revised spec is the next audit target.

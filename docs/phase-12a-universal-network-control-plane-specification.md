@@ -7,8 +7,8 @@
 | Predecessor | Phase 11B (accepted at `713ee10`) |
 | Supersedes | `docs/phase-12a-buyer-capability-protocol-specification.md` (`fc531b0`) — too narrow |
 | Implementation gate | Phase 12B |
-| Status | **Draft for audit** |
-| Repo HEAD at authoring | `fc531b0` (`main`) |
+| Status | **Draft for audit (revised)** |
+| Repo HEAD at authoring | `876a8fa` (`main`) |
 
 > **Supersedes the buyer-protocol spec.** The earlier `fc531b0` document
 > defined a buyer-facing API surface. On review, that framing is too narrow:
@@ -119,7 +119,29 @@ phases prove it across verticals.
 
 ## 2. The non-negotiable rule (thesis preservation)
 
-> **A new vertical must NOT require new kernel primitives.**
+> **A new vertical must NOT require new vertical-specific kernel primitives.**
+
+**Precise rule (revised):**
+
+> The **control plane** may introduce new **generic** control-plane objects
+> (`NetworkResource`, `Participant`, `NetworkResourceMembership`,
+> `NetworkLaunch`, `AllocationDecision`). It may NOT introduce
+> **vertical-specific** kernel primitives (`StorageService`,
+> `WirelessService`, etc.).
+
+The layering is:
+
+```
+Network Control Plane   ← may add generic control-plane objects
+        ↓
+Kernel Contracts        ← frozen (NetworkRuntime, ProtocolRuntime, HybridRuntime,
+        ↓                 executor, consensus, economic pipeline — Phase 11B accepted)
+Runtime / Adapter boundaries
+```
+
+`NetworkResource` and `Participant` live in the **control plane**, above the
+frozen kernel. They are generic (not vertical-specific), so they do not
+violate the rule.
 
 A new vertical should primarily require:
 
@@ -143,9 +165,11 @@ kernel. That would destroy the thesis.
 The universal pattern is:
 
 ```
-Universal Network Kernel
+Universal Network Kernel (frozen)
         ↓
-Network Configuration
+Network Control Plane (generic: Resource, Participant, Membership, Launch, Scheduler)
+        ↓
+Network Configuration (per-vertical: template + policies)
         ↓
 Resource + Capability model
         ↓
@@ -155,6 +179,24 @@ Vertical adapter/policy packages
 Every vertical (Energy, Compute, Storage, Wireless, Telecom/Edge, Construction,
 Industrial, Blockchain) is a **network configuration** running on the same
 operating system, not a separate product.
+
+### 2.1 Backward-compatible migration invariant
+
+> Existing VPP and Compute resources must continue to resolve through the
+> same operational resource identity after `NetworkResource` is introduced.
+
+Phase 12B must NOT break:
+- VPP assignments (VppDispatch → ExecutionAssignment).
+- Compute adapters (SimulatedComputeAdapter).
+- Device relationships (Asset → Device).
+- Existing events (Event → assetId).
+- Capacity resources (CapacityResource → assetId).
+- Execution assignments (ExecutionAssignment → assetId).
+
+The migration generalizes `Asset` into a `NetworkResource` kind; it does not
+replace `Asset` with a different identity. The existing `Asset` becomes one
+concrete `resourceKind`. This is the pattern that "generalizes what already
+works instead of breaking it."
 
 ---
 
@@ -189,7 +231,7 @@ within that bundle.
 
 ---
 
-## 4. The missing abstraction: NetworkResource
+## 4. The missing abstraction: ResourceIdentity + NetworkResourceMembership
 
 The current `Asset` model is too infrastructure-oriented to be the ultimate
 abstraction. Today:
@@ -201,38 +243,54 @@ Asset → AssetNetworkAssignment → Capability → CapacityResource
 This works for DERs and compute, but doesn't generalize to storage nodes,
 network links, industrial equipment, human work units, or protocol nodes.
 
-### 4.1 NetworkResource (the universal abstraction)
+### 4.1 The multi-network resource model (revised — the biggest correction)
 
-**`[NEW]`** The spec introduces `NetworkResource` as the universal resource
-abstraction. An `Asset` becomes one *kind* of resource.
+The original draft of this spec put `networkId` directly on the resource
+identity, scoping a resource to exactly one network. That conflicts with the
+existing `AssetNetworkAssignment` model, which explicitly supports the same
+asset being assigned to multiple networks. A GPU cluster, a fiber link, or a
+battery may participate in several networks simultaneously.
+
+**The correct abstraction is:**
+
+```
+ResourceIdentity (global, one per physical/logical resource)
+      ↓
+NetworkResourceMembership (per-network — one resource, many memberships)
+      ↓
+Network
+```
+
+This preserves the existing `Asset` + `AssetNetworkAssignment` architecture
+while generalizing it. Phase 12B generalizes what already works; it does not
+break it.
+
+### 4.2 ResourceIdentity (the universal resource identity)
+
+**`[NEW]`** The global resource identity. An `Asset` becomes one concrete
+kind of `ResourceIdentity`.
 
 ```typescript
-interface NetworkResource {
-  resourceId        // content-addressed or operational UUID
-  networkId         // the network this resource belongs to
-  participantId     // the participant that controls/contributes it
+interface ResourceIdentity {
+  resourceId          // global identity (one per physical/logical resource)
+  controllerId        // the participant that controls/contributes it
 
-  resourceKind      // physical | compute | storage | connectivity |
-                    // industrial | human | protocol | ...
+  resourceKind        // physical | compute | storage | connectivity |
+                      // industrial | human | protocol | ...
 
-  lifecycleStatus   // registering → active → suspended → decommissioned
+  lifecycleStatus     // registering → active → suspended → decommissioned
 
-  capabilities[]    // what this resource can DO
-  capacity[]        // how MUCH of each capability
-
-  location?         // geographic/topological
-  topology?         // network position (links, edges)
-  availability?     // time windows
-
-  controlMode       // how execution is commanded (adapter selection)
-  verificationProfile // how evidence is verified
-
-  metadata          // vertical-specific, opaque to the kernel
+  location?           // geographic/topological (global, not per-network)
+  metadata            // vertical-specific, opaque to the kernel
 }
 ```
 
+**Key point:** `ResourceIdentity` has NO `networkId`. It is a global thing
+that a participant makes available. Network membership is a separate
+relationship (§4.3).
+
 **Kinds** (NOT separate kernel models — just a discriminator on
-`NetworkResource`):
+`ResourceIdentity`):
 
 | Kind | Example resources | Existing mapping |
 |---|---|---|
@@ -244,12 +302,41 @@ interface NetworkResource {
 | `human` | crew, inspection team, operator | `[NEW]` adapter |
 | `protocol` | validator node, sequencer, RPC node | `[NEW]` adapter |
 
-The kernel does NOT have seven different resource models. It has ONE
-`NetworkResource` with a `resourceKind` discriminator. Each kind's
-specifics live in its adapter + capability definitions + verification
-policy, not in the kernel.
+The control plane does NOT have seven different resource models. It has ONE
+`ResourceIdentity` with a `resourceKind` discriminator. Each kind's specifics
+live in its adapter + capability definitions + verification policy.
 
-### 4.2 The separation: Participant vs. Resource
+### 4.3 NetworkResourceMembership (the per-network binding)
+
+**`[NEW]`** A resource's membership in a specific network. This is the
+generalization of `AssetNetworkAssignment`. A resource can have multiple
+memberships (one per network it participates in).
+
+```typescript
+interface NetworkResourceMembership {
+  membershipId        // per-network membership identity
+  resourceId          // FK to ResourceIdentity
+  networkId           // the network this membership is in
+
+  // Per-network bindings (these can differ across networks):
+  capabilities[]      // what this resource can DO in THIS network
+  verifiedCapacity[]  // how MUCH (verified per-network)
+  controlMode         // adapter selection for THIS network
+  verificationProfile // how evidence is verified in THIS network
+  availability?       // time windows for THIS network
+
+  membershipStatus    // registering → active → suspended → withdrawn
+}
+```
+
+**Why per-network bindings:** a GPU cluster might offer `gpu_compute` in
+Network A but `ai_inference` in Network B, with different verified capacities
+and different verification profiles. The resource identity is the same; the
+network membership differs. This mirrors the existing
+`AssetNetworkAssignment` pattern where the same asset has different
+capability bindings per network.
+
+### 4.4 The separation: Participant vs. Resource
 
 > **Participant = who controls/contributes. Resource = what the participant
 > makes available.**
@@ -257,47 +344,71 @@ policy, not in the kernel.
 This separation is critical for blockchain, construction, and industrial
 networks, where the distinction between "who" and "what" is load-bearing.
 
+### 4.5 Multi-network resource sharing invariant
+
+> A single `ResourceIdentity` may participate in multiple networks via
+> separate `NetworkResourceMembership` records. Suspending or withdrawing a
+> resource from Network A must NOT affect its membership in Network B.
+
+This is the multi-network resource sharing guarantee. It is the generalization
+of the existing `AssetNetworkAssignment` multi-network pattern.
+
+### 4.6 Resource withdrawal safety invariant
+
+> Removing or suspending a resource from a network cannot invalidate
+> historical executions, contributions, or settlements in that network.
+
+Historical records reference the resource identity at the time of execution.
+Withdrawal changes future availability, not past records. This mirrors the
+kernel's existing write-once discipline (Phase 5.2).
+
 ---
 
-## 5. The participant model
+## 5. The participant model (revised — roles separated from membership)
 
 Participants are first-class network entities, not merely "operators." A
-network contains participants with roles:
+network contains participants with roles.
 
-### 5.1 Participant
+**Correction from the original draft:** `roles[]` and membership state
+represent different concepts and must be separated. A participant can hold
+multiple roles simultaneously (e.g., Provider + Validator), and a participant
+can change roles without creating a new participant identity. The original
+draft conflated these into one model; the revised model separates them.
 
-**`[NEW]`** A participant is a network-scoped identity with one or more
-roles.
+### 5.1 ParticipantIdentity (global)
+
+**`[NEW]`** The global participant identity (one per real-world org/principal).
+Maps to the existing `Organization` model.
 
 ```typescript
-interface Participant {
-  participantId     // network-scoped identity
-  networkId         // the network this participant belongs to
+interface ParticipantIdentity {
+  participantId     // global identity (one per org/principal)
   organizationId    // the real-world org (maps to existing Organization)
-  roles[]           // provider | consumer | verifier | validator | orchestrator | observer
-  membershipStatus // pending → active → suspended → revoked
+  metadata
+}
+```
+
+**Key point:** `ParticipantIdentity` has NO `networkId`. A participant joins
+networks via `ParticipantMembership` (§5.2). One participant can be a member
+of multiple networks.
+
+### 5.2 ParticipantMembership (per-network)
+
+**`[NEW]`** A participant's membership in a specific network. This is the
+network-scoped relationship.
+
+```typescript
+interface ParticipantMembership {
+  membershipId      // per-network membership identity
+  participantId     // FK to ParticipantIdentity
+  networkId         // the network this membership is in
+  membershipStatus  // pending → active → suspended → revoked
   joinedAt
   metadata
 }
 ```
 
-### 5.2 Roles
-
-| Role | Responsibility | Existing mapping |
-|---|---|---|
-| `provider` | Owns resources, commits capacity | `Operator` (generalized) |
-| `consumer` | Requests capability execution, receives contributions, settles | `PlatformUser` (buyer role, generalized) |
-| `verifier` | Verifies execution evidence | `VerificationService` (existing) |
-| `validator` | Participates in consensus (protocol/hybrid networks) | `ValidatorRegistry` (existing) |
-| `orchestrator` | Schedules/allocation authority for the network | `[NEW]` — the network scheduler role |
-| `observer` | Read-only access (auditors, regulators) | `[NEW]` — read-only role |
-
-One organization may hold multiple roles. The kernel does not prescribe the
-mapping; the network's policy bundle defines role requirements.
-
-### 5.3 Membership
-
-**`[NEW]`** Network membership is a first-class lifecycle:
+**Lifecycle:**
 
 ```
 pending → active → suspended → revoked
@@ -311,8 +422,58 @@ pending → active → suspended → revoked
   failure, etc.).
 - `revoked`: permanently removed (terminal).
 
-This is network-scoped identity, not platform-level auth. A participant in
-Network A has no standing in Network B unless they join it.
+### 5.3 ParticipantRole (per-membership, independently lifecycle-managed)
+
+**`[NEW]`** A role held by a participant within a specific network membership.
+Separate from the membership so roles can change independently.
+
+```typescript
+interface ParticipantRole {
+  roleAssignmentId   // unique per role assignment
+  membershipId       // FK to ParticipantMembership
+  role               // provider | consumer | verifier | validator | orchestrator | observer
+  roleStatus         // active | suspended
+  assignedAt
+  revokedAt?
+}
+```
+
+**Why separate:** a participant in a network might be:
+
+```
+Provider       active
+Validator      active
+Consumer       suspended
+Observer       active
+```
+
+Each role has its own status. A participant can be suspended as a consumer
+(e.g., payment failure) while remaining an active provider. Roles can be
+added/revoked without creating a new participant identity or membership.
+
+### 5.4 Roles
+
+| Role | Responsibility | Existing mapping |
+|---|---|---|
+| `provider` | Owns resources, commits capacity | `Operator` (generalized) |
+| `consumer` | Requests capability execution, receives contributions, settles | `PlatformUser` (buyer role, generalized) |
+| `verifier` | Verifies execution evidence | `VerificationService` (existing) |
+| `validator` | Participates in consensus (protocol/hybrid networks) | `ValidatorRegistry` (existing) |
+| `orchestrator` | Schedules/allocation authority for the network | `[NEW]` — the network scheduler role |
+| `observer` | Read-only access (auditors, regulators) | `[NEW]` — read-only role |
+
+One organization may hold multiple roles across networks (and multiple roles
+within one network via separate `ParticipantRole` records). The control plane
+does not prescribe the mapping; the network's policy bundle defines role
+requirements.
+
+### 5.5 Network isolation invariant
+
+> Participant/resource state from Network A cannot leak into Network B.
+
+A participant's membership, roles, resource bindings, and execution history
+in Network A are scoped to Network A. Joining Network B is a separate
+membership. This is the network isolation guarantee.
 
 ---
 
@@ -354,10 +515,10 @@ The key invariant: **the policy bundle is immutable once published.** A
 new policy = a new `NetworkVersion`. This is the existing immutability
 invariant, generalized.
 
-### 6.2 NetworkResource
+### 6.2 ResourceIdentity + NetworkResourceMembership
 
-**`[NEW]`** (see §4.1). The universal resource abstraction. Generalizes
-`Asset` + `AssetNetworkAssignment`.
+**`[NEW]`** (see §4). The universal resource identity + per-network membership,
+generalizing `Asset` + `AssetNetworkAssignment`.
 
 **Lifecycle:**
 
@@ -450,6 +611,189 @@ For hybrid networks, this includes the Phase 11B reconciliation substrate:
 `PhysicalExecutionEvidence` → `ReconciliationAttempt` → `ProtocolOutcome`.
 
 The spec does NOT modify this pipeline. It is frozen (Phase 11B accepted).
+
+### 6.6 Scheduler and AllocationDecision (revised — first-class control-plane concept)
+
+The original draft listed scheduling as a policy field inside the versioned
+bundle. That is insufficient. A network like AWS is valuable because the
+control plane doesn't merely store resources — it **decides placement and
+allocation**.
+
+**`[NEW]`** The universal network OS needs a semantic distinction between:
+
+```
+Capacity (what exists)
+    ↓
+Allocation (a scheduling decision about who gets what)
+    ↓
+Reservation / Commitment (the booked capacity)
+    ↓
+Assignment (the execution binding)
+    ↓
+Execution
+```
+
+**`[NEW]`** `AllocationDecision` — the output of the scheduler:
+
+```typescript
+interface AllocationDecision {
+  decisionId         // content-addressed or UUID
+  networkId          // the network this decision is in
+  requestId          // the consumer request that triggered scheduling
+  candidateResources[] // the resources the scheduler considered
+  selectedMembershipId // the chosen resource's network membership
+  allocatedCapacity  // how much of which capability
+  allocationWindow   // time window
+  priority?          // from the scheduling policy
+  fairnessScore?     // from the scheduling policy
+  decidedAt
+  expiresAt          // the decision must be acted on before this or it lapses
+}
+```
+
+**Flow:**
+
+```
+Consumer Request
+    ↓
+Scheduler (applies schedulingPolicy from NetworkVersion)
+    ↓
+Candidate Resources (filtered by capability, capacity, availability)
+    ↓
+AllocationDecision (the scheduler's choice)
+    ↓
+Reservation / Commitment (created from the decision)
+    ↓
+ExecutionAssignment (the kernel's assignment)
+```
+
+**Why first-class:** without an explicit `AllocationDecision`, "launching a
+network" still means registering resources, not actually operating a network.
+The scheduler is what makes the network a coordinator, not just a registry.
+
+**Scheduler correctness invariant:**
+
+> Concurrent requests cannot oversubscribe a resource or violate network
+> policy. The scheduler must produce `AllocationDecision`s that respect
+> capacity limits atomically (using the same OCC/unique-constraint discipline
+> as the Phase 11B reconciliation substrate).
+
+### 6.7 ServiceCommitment (multi-dimensional capability constraints)
+
+The original draft said the existing scalar `Capability.fieldsJson` plus
+policy are sufficient for multi-dimensional commitments (e.g., Telecom/Edge:
+bandwidth + latency + availability). That is **not proven**.
+
+The existing capacity model is fundamentally scalar:
+
+```
+physicalCapacity, unit, reservedAmount, committedAmount, remainingAmount
+```
+
+This works for `100 TB`, `16 GPU`, `1 Gbps`, `500 kW` — single dimensions.
+It does NOT directly represent:
+
+```
+500 Mbps
+AND <20 ms latency
+AND 99.9% availability
+AND 4 hours duration
+```
+
+These are different dimensions with partly different semantics (a latency
+SLA is not a capacity quantity).
+
+**`[NEW]`** The spec defines:
+
+> **Scalar capacity remains the kernel primitive. Multi-dimensional service
+> commitments are composed from multiple capability constraints.**
+
+```typescript
+interface ServiceCommitment {
+  commitmentId
+  networkId
+  constraints[]     // multiple CapabilityConstraint entries
+  durationWindow    // time window
+  status            // active → fulfilled | violated | expired
+}
+
+interface CapabilityConstraint {
+  constraintId
+  commitmentId      // FK to ServiceCommitment
+  capabilityType    // bandwidth | latency | availability | ...
+  operator          // >= | <= | ==
+  threshold         // the SLA value
+  unit              // Mbps | ms | % | ...
+  verificationMethod // how this constraint is verified
+}
+```
+
+**Example:**
+
+```
+ServiceCommitment
+ ├── bandwidth >= 500 Mbps    (verified via throughput measurement)
+ ├── latency <= 20 ms        (verified via latency probing)
+ ├── availability >= 99.9%   (verified via uptime measurement)
+ └── duration = 4h           (the commitment window)
+```
+
+This preserves kernel neutrality (the scalar `CapacityResource`/`CapacityCommitment`
+models are unchanged) without pretending a scalar capacity record can represent
+an SLA. Multi-dimensional commitments are a control-plane composition over
+scalar capabilities.
+
+**Verification:** each constraint has its own `verificationMethod`. The
+overall `ServiceCommitment` is `fulfilled` only if ALL constraints are
+verified. This is critical for Telecom/Edge, Construction (quality
+requirements), and Industrial (multi-parameter SLAs).
+
+### 6.8 NetworkLaunch (first-class atomic control-plane operation)
+
+**`[NEW]`** The original draft's completeness criteria did not include launch
+atomicity. If the AWS analogy is serious, the network launch operation must
+be atomic — no half-launched networks.
+
+```
+Draft configuration
+    ↓
+validate (all policies are well-formed)
+    ↓
+compile policy bundle (produce the NetworkVersion's configurationJson)
+    ↓
+materialize capabilities/policies (create the Capability records, RewardRules, etc.)
+    ↓
+publish NetworkVersion (immutable)
+    ↓
+initialize control-plane state (the network is ACTIVE)
+```
+
+**`[NEW]`** `NetworkLaunch` — the atomic control-plane operation:
+
+```typescript
+interface NetworkLaunch {
+  launchId            // UUID
+  networkId           // the network being launched
+  draftConfig         // the draft configuration (pre-validation)
+  validationStatus    // pending → valid | invalid
+  compiledBundle      // the compiled NetworkVersion configurationJson
+  launchStatus        // drafting → validating → compiling → materializing → published → active | failed
+  startedAt
+  publishedAt?        // when NetworkVersion was published
+  activatedAt?        // when the network became ACTIVE
+  failureReason?      // if failed, why
+}
+```
+
+**Atomicity invariant:**
+
+> The launch either succeeds as a valid network environment (ACTIVE) or
+> remains a draft. A network cannot become ACTIVE with incomplete
+> policy/runtime/resource configuration.
+
+If any step fails (e.g., reward policy is invalid), the entire launch fails
+and the network stays in `draft` status. No partial networks. This is central
+to the "launch a platform on AWS" objective.
 
 ---
 
@@ -582,7 +926,7 @@ Network: "Industrial Asset Network"
 
 **No kernel change.**
 
-### 7.8 Blockchain — `[NEW]` network config, `[NEW]` adapter
+### 7.8 Blockchain — `[NEW]` network config, `[NEW]` adapter (revised — ProtocolResourceAdapter, not InfrastructureAdapter)
 
 ```
 Network: "Validator Network"
@@ -601,10 +945,43 @@ blockchain kernel. The repository already has protocol runtime selection
 and consensus/finality primitives (Phase 9C) + the reconciliation substrate
 (Phase 11B).
 
+**Adapter boundary correction (Defect from audit):** the original draft said
+blockchain multi-node transport "plugs in via the protocol resource adapter."
+That terminology is too close to `InfrastructureAdapter`. The existing
+`InfrastructureAdapter` contract is explicitly about physical resources:
+
+```
+discover, getCapabilities, readTelemetry, execute, health
+```
+
+A blockchain validator network needs different operations:
+
+```
+peer discovery, message propagation, proposal reception,
+vote emission, block propagation, validator membership,
+state synchronization
+```
+
+Those are NOT `InfrastructureAdapter.execute()` operations.
+
+**The correct architectural target:**
+
+```
+ResourceAdapter (generic control-plane contract)
+        ├── InfrastructureAdapter (physical resources — [EXISTS])
+        └── ProtocolResourceAdapter (protocol nodes — [NEW])
+```
+
+`ProtocolResourceAdapter` is a `[NEW]` adapter contract for protocol-kind
+resources. It is NOT an `InfrastructureAdapter` specialization. The control
+plane selects the adapter based on `resourceKind`: physical/compute/storage/
+connectivity/industrial/human → `InfrastructureAdapter`; protocol →
+`ProtocolResourceAdapter`.
+
 What remains later (Phase 12E) is a **true multi-node network layer**: peer
 discovery, node-to-node transport, validator membership, distributed
 consensus, block propagation. That is a network-transport concern, not a
-kernel concern — it plugs in via the protocol resource adapter.
+kernel concern — it plugs in via `ProtocolResourceAdapter`.
 
 ---
 
@@ -781,14 +1158,16 @@ this spec.
 
 ---
 
-## 12. Completeness criteria for Phase 12B
+## 12. Completeness criteria for Phase 12B (strengthened)
 
 Phase 12B (implementation) is complete when:
 
-1. **`[NEW]`** `NetworkResource` model exists, generalizing `Asset` with a
-   `resourceKind` discriminator (no seven separate models).
-2. **`[NEW]`** `Participant` model exists with role-based membership
-   (provider, consumer, verifier, validator, orchestrator, observer).
+1. **`[NEW]`** `ResourceIdentity` + `NetworkResourceMembership` models exist,
+   generalizing `Asset` + `AssetNetworkAssignment` with a `resourceKind`
+   discriminator (no seven separate models). A resource can participate in
+   multiple networks.
+2. **`[NEW]`** `ParticipantIdentity` + `ParticipantMembership` +
+   `ParticipantRole` models exist (roles separated from membership, per §5).
 3. **`[NEW]`** Control-plane API: launch network, register resource, reserve,
    commit, assign, execute, query — all translating to kernel operations
    WITHOUT bypassing the runtime.
@@ -808,39 +1187,80 @@ Phase 12B (implementation) is complete when:
 9. **`[NEW]`** A network-portability proof: at least two verticals (e.g.,
    Energy + Compute, both already implemented) run on the control plane
    with only adapter/policy differences, no kernel changes.
+10. **`[NEW]`** **Network launch atomicity:** a network cannot become ACTIVE
+    with incomplete policy/runtime/resource configuration. The `NetworkLaunch`
+    operation is atomic (§6.8).
+11. **`[NEW]`** **Multi-network resource sharing:** a single
+    `ResourceIdentity` participates in multiple networks via separate
+    `NetworkResourceMembership` records. Verified by test.
+12. **`[NEW]`** **Resource withdrawal safety:** removing/suspending a
+    resource from a network cannot invalidate historical executions or
+    contributions. Verified by test.
+13. **`[NEW]`** **Scheduler correctness:** concurrent requests cannot
+    oversubscribe a resource or violate network policy. The `AllocationDecision`
+    respects capacity limits atomically (§6.6).
+14. **`[NEW]`** **Policy compilation:** an immutable `NetworkVersion` produces
+    a validated, executable policy bundle. Invalid policy bundles fail launch.
+15. **`[NEW]`** **Resource lifecycle isolation:** suspending a resource in
+    Network A does NOT automatically suspend it in Network B. Verified by test.
+16. **`[NEW]`** **Network isolation:** participant/resource state from
+    Network A cannot leak into Network B. Verified by test.
+17. **`[NEW]`** **Vertical portability:** a new network can be created from
+    a configuration package (template + policies) without modifying the
+    generic runtime code.
+18. **`[NEW]`** **Multi-dimensional service commitment:** a `ServiceCommitment`
+    with multiple `CapabilityConstraint`s (e.g., bandwidth + latency +
+    availability) is verified correctly — fulfilled only if ALL constraints
+    are met (§6.7).
+19. **`[NEW]`** **ProtocolResourceAdapter:** a `[NEW]` adapter contract for
+    protocol-kind resources, separate from `InfrastructureAdapter` (§7.8).
+    Verified by architecture test that protocol-kind resources resolve to
+    `ProtocolResourceAdapter`, not `InfrastructureAdapter`.
 
 ---
 
-## 13. Summary
+## 13. Summary (revised)
 
 ```
 Phase 11B (713ee10): runtime + reconciliation substrate ✅ accepted
     ↓
-Phase 12A (this document): universal network control plane specification
+Phase 12A (this document, revised): universal network control plane specification
     ↓
     - Thesis: a network is a programmable infrastructure environment
-    - Rule: a new vertical must NOT require new kernel primitives
+    - Rule: control plane may add generic objects; may NOT add vertical-specific
+      kernel primitives
     - Architecture: Network → Participants → Resources → Capabilities →
-      Capacity → Reservation → Commitment → Assignment → Execution →
-      Evidence → Verification → Contribution → Reward → Settlement
-    - NetworkResource generalizes Asset (one model, resourceKind discriminator)
-    - Participant model (roles, membership lifecycle)
+      Capacity → Allocation → Reservation → Commitment → Assignment →
+      Execution → Evidence → Verification → Contribution → Reward → Settlement
+    - ResourceIdentity + NetworkResourceMembership (multi-network, generalizes
+      Asset + AssetNetworkAssignment)
+    - ParticipantIdentity + ParticipantMembership + ParticipantRole (roles
+      separated from membership)
+    - AllocationDecision (first-class scheduler output)
+    - ServiceCommitment (multi-dimensional capability constraints)
+    - NetworkLaunch (atomic control-plane operation)
+    - ProtocolResourceAdapter (separate from InfrastructureAdapter)
     - Every vertical is a network configuration, not a product
     - Marketplace-neutral, payment-rail-neutral
     ↓
-Phase 12B: implement the control plane (9 completeness criteria)
+Phase 12B: implement the control plane (19 completeness criteria)
 Phase 12C: prove physical verticals (Energy, Compute, Storage, Wireless)
 Phase 12D: prove service networks (Telecom/Edge, Construction, Industrial)
-Phase 12E: protocol/blockchain networks (ProtocolRuntime + multi-node transport)
+Phase 12E: protocol/blockchain networks (ProtocolRuntime + ProtocolResourceAdapter + multi-node transport)
 Phase 12F: network launch experience ("launch a platform on AWS")
 ```
 
 The next audit target is this document. It should be reviewed for:
-- Does the `NetworkResource` abstraction generalize `Asset` without losing
-  the existing VPP/Compute functionality?
-- Is the participant model complete enough for the verticals listed (§7)?
-- Is the "no vertical-specific kernel services" rule (§2) strong enough to
-  prevent the thesis from being destroyed?
-- Are the completeness criteria (§12) sufficient to gate Phase 12B?
-- Does the phase roadmap (§10) make the "launch a network = launch a cloud
-  platform" experience tangible by Phase 12F?
+- Does the `ResourceIdentity` + `NetworkResourceMembership` abstraction
+  correctly generalize `Asset` + `AssetNetworkAssignment` while preserving
+  multi-network resource sharing?
+- Is the participant model (with roles separated from membership) complete
+  enough for the verticals listed (§7)?
+- Is the "no vertical-specific kernel services" rule (§2) precise enough
+  (control plane may add generic objects; may not add vertical-specific
+  kernel primitives)?
+- Are the 19 completeness criteria (§12) sufficient to gate Phase 12B,
+  including launch atomicity, multi-network sharing, scheduler correctness,
+  and multi-dimensional commitments?
+- Does the `ProtocolResourceAdapter` vs `InfrastructureAdapter` split (§7.8)
+  correctly avoid smuggling blockchain semantics into the physical adapter?
