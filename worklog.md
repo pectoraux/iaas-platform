@@ -3293,3 +3293,21 @@ Stage Summary:
 - The evaluator purity contract is frozen: same inputs → same result, no hidden state.
 - 34/34 tests pass. 122/122 total. eslint clean. tsc clean. Dev server HTTP 200.
 - Slice 1 is now ready for the final audit. Next: Slice 2 (PostgreSQL persistence).
+
+---
+Task ID: 12B-slice-1-fix-7
+Agent: main (Z.ai Code)
+Task: Fix the cross-runtime determinism defect from the audit of 67814a7: localeCompare() used for protocol-grade deterministic ordering. Replace with locale-independent canonical comparator.
+
+Work Log:
+- Added compareCanonicalStrings(a, b) to types.ts — a locale-independent comparator using simple code-unit comparison (< / >), NOT localeCompare(). Documented why: localeCompare() is locale/ICU-sensitive and can produce different ordering on different runtimes, breaking the cross-runtime determinism guarantee.
+- Replaced ALL 11 localeCompare() calls in types.ts and scheduler.ts with compareCanonicalStrings. Affected: constraint IDs, capability types, service types, capacity source IDs, units, remaining amounts, membership IDs, allocated capacity sorting, candidate eligibility sorting.
+- Exported compareCanonicalStrings from index.ts.
+- Verified: zero localeCompare calls remain in control-plane code (only in the docstring that says NOT to use it).
+- VERIFICATION: tsc zero errors. eslint clean. 34/34 phase-12b tests pass. 122/122 total. Dev server HTTP 200.
+
+Stage Summary:
+- The scheduler is now locale-independent: same bytes → same ordering → same canonical JSON → same snapshot hash → same decisionId, regardless of machine locale.
+- All protocol-relevant sorting uses compareCanonicalStrings (simple < / > comparison), not localeCompare().
+- 34/34 tests pass. 122/122 total. eslint clean. tsc clean. Dev server HTTP 200.
+- Slice 1 is now ready for the final audit. The scheduler's reproducibility is cross-runtime safe.

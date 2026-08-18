@@ -47,6 +47,7 @@ import {
   assertNetworkScopeIntegrity,
   computeDecisionSnapshotHash,
   DefaultConstraintEvaluator,
+  compareCanonicalStrings,
 } from './types'
 
 /**
@@ -239,7 +240,7 @@ export function schedule(input: SchedulerInput): SchedulerResult {
   }
 
   // 4. Sort deterministically (by membershipId — stable, no non-determinism).
-  eligible.sort((a, b) => a.membershipId.localeCompare(b.membershipId))
+  eligible.sort((a, b) => compareCanonicalStrings(a.membershipId, b.membershipId))
 
   // 5. Select the first eligible candidate.
   const selected = eligible[0]
@@ -345,7 +346,7 @@ function computeDecisionId(input: {
     selectedMembershipId: input.selectedMembershipId,
     allocatedCapacity: input.allocatedCapacity
       .map((c) => ({ ...c }))
-      .sort((a, b) => a.capabilityType.localeCompare(b.capabilityType)),
+      .sort((a, b) => compareCanonicalStrings(a.capabilityType, b.capabilityType)),
     allocationWindow: {
       start: input.allocationWindow.start.toISOString(),
       end: input.allocationWindow.end.toISOString(),

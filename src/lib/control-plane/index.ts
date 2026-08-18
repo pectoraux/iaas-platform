@@ -36,6 +36,7 @@ export {
   computeDecisionSnapshotHash,
   createNetworkRequest,
   DefaultConstraintEvaluator,
+  compareCanonicalStrings,
 } from './types'
 
 export { schedule, SCHEDULER_VERSION } from './scheduler'

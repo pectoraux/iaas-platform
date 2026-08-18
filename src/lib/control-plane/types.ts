@@ -396,7 +396,7 @@ export function computeDecisionSnapshotHash(snapshot: {
         unit: cc.unit,
         capacitySourceId: cc.capacitySourceId,
       }
-    }).sort((a, b) => a.constraintId.localeCompare(b.constraintId)),
+    }).sort((a, b) => compareCanonicalStrings(a.constraintId, b.constraintId)),
     timeWindow: {
       start: snapshot.request.timeWindow.start.toISOString(),
       end: snapshot.request.timeWindow.end.toISOString(),
@@ -422,12 +422,12 @@ export function computeDecisionSnapshotHash(snapshot: {
           resourceId: m.resourceId,
           capabilities: [...m.capabilities].sort(),
           verifiedCapacity: m.verifiedCapacity.map((c) => ({ ...c })).sort((a, b) =>
-            a.capabilityType.localeCompare(b.capabilityType),
+            compareCanonicalStrings(a.capabilityType, b.capabilityType),
           ),
           membershipStatus: m.membershipStatus,
           remainingCapacity: (snapshot.capacityStateByMembership.get(m.membershipId) ?? [])
             .map((c) => ({ ...c }))
-            .sort((a, b) => a.capabilityType.localeCompare(b.capabilityType)),
+            .sort((a, b) => compareCanonicalStrings(a.capabilityType, b.capabilityType)),
           availability: m.availability
             ? {
                 start: m.availability.start.toISOString(),
@@ -440,7 +440,7 @@ export function computeDecisionSnapshotHash(snapshot: {
           observations: observations
             ? Array.from(observations.observations.entries())
                 .map(([serviceType, val]) => ({ serviceType, value: val.value, unit: val.unit }))
-                .sort((a, b) => a.serviceType.localeCompare(b.serviceType))
+                .sort((a, b) => compareCanonicalStrings(a.serviceType, b.serviceType))
             : [],
           // PHASE 12B FIX: include capacity sources in the canonical hash.
           // capacitySources are an authoritative scheduling input (the evaluator
@@ -455,14 +455,14 @@ export function computeDecisionSnapshotHash(snapshot: {
               unit: s.unit,
             }))
             .sort((a, b) => {
-              if (a.sourceId !== b.sourceId) return a.sourceId.localeCompare(b.sourceId)
-              if (a.capabilityType !== b.capabilityType) return a.capabilityType.localeCompare(b.capabilityType)
-              if (a.unit !== b.unit) return a.unit.localeCompare(b.unit)
-              return a.remainingAmount.localeCompare(b.remainingAmount)
+              if (a.sourceId !== b.sourceId) return compareCanonicalStrings(a.sourceId, b.sourceId)
+              if (a.capabilityType !== b.capabilityType) return compareCanonicalStrings(a.capabilityType, b.capabilityType)
+              if (a.unit !== b.unit) return compareCanonicalStrings(a.unit, b.unit)
+              return compareCanonicalStrings(a.remainingAmount, b.remainingAmount)
             }),
         }
       })
-      .sort((a, b) => a.membershipId.localeCompare(b.membershipId)),
+      .sort((a, b) => compareCanonicalStrings(a.membershipId, b.membershipId)),
   })
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
 }
@@ -672,6 +672,24 @@ function evaluateConstraint(
 // ---------------------------------------------------------------------------
 // Canonical serialization (for deterministic hashing)
 // ---------------------------------------------------------------------------
+
+/**
+ * Locale-independent canonical string comparator.
+ *
+ * Uses simple code-unit comparison (`<` / `>`), NOT `localeCompare()`.
+ * `localeCompare()` is locale/ICU-sensitive and can produce different ordering
+ * on different runtimes, which breaks the cross-runtime determinism guarantee.
+ *
+ * For a protocol identity primitive whose contract is "same inputs → same
+ * result across independent executions," this is the correct comparator.
+ *
+ * PURE: same inputs → same result, regardless of machine locale.
+ */
+export function compareCanonicalStrings(a: string, b: string): number {
+  if (a < b) return -1
+  if (a > b) return 1
+  return 0
+}
 
 function canonicalize(value: unknown): unknown {
   if (value === null || typeof value !== 'object') {
