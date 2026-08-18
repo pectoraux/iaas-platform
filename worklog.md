@@ -3621,3 +3621,49 @@ Work Log:
 - Test C (different concurrent, 16 GPU capacity, 2x8 GPU requests): FAIL. Only 1 of 2 succeeds (should be 2).
 - The issue appears to be related to how the capacity service's FOR UPDATE lock interacts with the db.$transaction in the control-plane service. The capacity reservation is created inside the transaction, but the getTotalReserved function doesn't find it after the transaction commits.
 - HONEST STATUS: Test A proves idempotency under concurrent load. Tests B and C need further investigation — the capacity handoff appears to have a transaction visibility issue.
+
+---
+Task ID: 12B-slice-2-concurrency-v3-isolated
+Agent: main (Z.ai Code)
+Task: Fix the fixture contamination in tests/phase-12b-concurrency.test.ts. The transaction propagation was correct; the real problem was that Tests A/B/C shared a single network and each added another resource to it, so by Test B the deterministic scheduler saw TWO candidates (Test A's exhausted 8-GPU resource + Test B's 10-GPU resource) and could select the exhausted one — producing "available 0" instead of "available 2". Replace with per-test isolated topologies (own tenant/network/version/membership/resource) so the scheduler sees EXACTLY ONE candidate.
+
+Work Log:
+- Root cause confirmed by reading service.ts lines 467-476: submitNetworkRequest loads ALL NetworkResourceMembership rows WHERE networkId = input.networkId, then passes them as candidateMemberships to the pure scheduler. With a shared network, Test B's scheduler saw both Test A's resource and Test B's resource. The deterministic scheduler could select Test A's resource (already fully reserved → InsufficientCapacityError "available 0"), while the test observed Test B's resource (reserved 0). This exactly matched the reported symptoms.
+- Transaction propagation verified correct: service.ts line 616-628 passes `tx` into provider.createReservation({...tx}); capacity-provider.ts line 134 passes `input.tx` into createCapacityReservation(..., input.tx); capacity.service.ts line 117 uses that tx client for FOR UPDATE (line 134), the overlap query (line 159), and the reservation insert (line 180). No change to production code needed.
+- Rewrote tests/phase-12b-concurrency.test.ts with a createConcurrencyFixture() helper that provisions a COMPLETELY FRESH topology per test:
+    Tenant → Network + published NetworkVersion → ParticipantIdentity + ParticipantMembership (active) + ParticipantRole (consumer) → Operator → Asset → AssetNetworkAssignment (verifiedQuantity) → CapacityResource (via ensureCapacityResource) → ResourceIdentity (metadata.assetId) → NetworkResourceMembership (active).
+  Each fixture uses a unique timestamp+random stamp on the slug to avoid @@unique([tenantId, slug]) collisions on Neon re-runs.
+- Removed the shared beforeAll + shared module-level tenantId/networkId/requesterMembershipId. Each test calls createConcurrencyFixture({label, capacityAmount}) at its start.
+- Added resolveSelectedCapacitySource(decisionId, networkId, capabilityType) helper that walks AllocationDecision.selectedMembershipId → NetworkResourceMembership → ResourceIdentity → metadataJson.assetId → CapacityResource → sum(active CapacityReservation.reservedAmount). This makes assertions resilient to future scheduler changes: we assert against whatever the scheduler actually selected, not the fixture directly.
+- For each single-candidate test, also asserted decision.selectedMembershipId === fixture.membershipId (the selected resource IS the provisioned one).
+
+Test results:
+- Test A (8 GPU + identical concurrent 8-GPU, same idempotency key): PASS.
+    1 NetworkRequest, 1 AllocationDecision, 1 AllocationReservation, 1 CapacityReservation.
+    selectedMembershipId === provisioned membershipId. 8 reserved, 0 remaining.
+    The prisma:error log for tx.networkRequest.upsert() unique constraint is EXPECTED — both calls compute the same deterministic requestId; one wins the insert, the loser's upsert hits the unique constraint and its transaction rolls back cleanly. This is the idempotent-convergence path.
+- Test B (10 GPU + two different 8-GPU concurrent, different idempotency keys): PASS.
+    1 fulfilled, 1 rejected (InsufficientCapacityError or clean Error).
+    1 NetworkRequest, 1 AllocationDecision, 1 AllocationReservation, 1 CapacityReservation.
+    8 reserved, 2 remaining, 10 physical. NOT 16. Never oversubscribed.
+- Test C (16 GPU + 8+8 concurrent, different idempotency keys): PASS.
+    2 fulfilled, 0 rejected. Distinct decisionIds.
+    2 NetworkRequests, 2 AllocationDecisions, 2 AllocationReservations, 2 CapacityReservations.
+    16 reserved, 0 remaining. Both selected the single provisioned candidate.
+
+Verification:
+- Neon PostgreSQL: 3/3 pass (63 expect() calls, ~73s total). DATABASE_URL=postgresql://...@neon.tech/neondb?sslmode=require.
+- Local SQLite: 3 skip (isPostgres guard), 0 fail.
+- phase-12b-control-plane.test.ts: 49/49 pass.
+- ESLint: clean.
+- tsc: only pre-existing errors (bun:test module resolution + unrelated vpp/portfolio test files); zero new errors in phase-12b-concurrency.test.ts.
+- Pre-existing failures (27 in portfolio-risk/optimizer/commitment test files) confirmed present on fac5b17 WITHOUT my change — unrelated to the control plane.
+
+Stage Summary:
+- The user's diagnosis was correct: the transaction propagation, CapacityProvider boundary, and FOR UPDATE capacity arbitration were all working as designed. The test was accidentally creating a multi-resource network while assuming it was testing a single-resource network.
+- With isolated topologies, Test B produces 8 reserved / 2 remaining and Test C produces 16 / 0 — exactly the evidence requested for Slice 2 closure.
+- Production code unchanged. Test-only correction, as directed.
+- Acceptance Gates 2 and 3 are now genuinely satisfied:
+    Gate 2: concurrent identical requests create exactly one reservation (Test A).
+    Gate 3: concurrent different requests cannot oversubscribe capacity (Test B: 8+8 > 10 → one fails, 8 reserved, never 16).
+- Slice 2 is ready for closure.
