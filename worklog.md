@@ -3273,3 +3273,23 @@ Stage Summary:
 - capacitySourceId is enforced: a constraint targeting source B evaluates B's capacity, not A's.
 - Single truth channel for capacity: remainingCapacity (for allocation) and capacitySources (for constraint eligibility) are both authoritative capacity state — no competing observation-based capacity.
 - 30/30 tests pass. 118/118 total. eslint clean. tsc clean. Dev server HTTP 200.
+
+---
+Task ID: 12B-slice-1-fix-6
+Agent: main (Z.ai Code)
+Task: Fix the final reproducibility defect from the audit of 48acc5c: capacity-source state missing from decisionSnapshotHash. Also add evaluator purity contract.
+
+Work Log:
+- Defect 1 (capacity-source state in hash): computeDecisionSnapshotHash now accepts capacitySources (Map<membershipId, CapacitySourceSnapshot[]>) and includes each candidate's capacity sources in the canonical hash, sorted by (sourceId, capabilityType, unit, remainingAmount). If a source's remaining amount changes (e.g., pool-B: 2→1 GPU), the hash changes — even if the aggregate remainingCapacity is unchanged (10 GPU both cases). Test: "decisionSnapshotHash changes when a targeted capacity source's remaining amount changes" — same aggregate, different source-specific amounts, different hash.
+- Defect 2 (evaluator purity contract): added PURITY CONTRACT documentation to the ConstraintEvaluator interface: evaluateService and evaluateCapacity MUST be pure (same constraint + same snapshot + same evaluatorVersion → same result). An evaluator MUST NOT consult hidden external state. Added 3 tests: evaluateService purity (same inputs → same result), evaluateCapacity purity (same inputs → same result), evaluateCapacity enforces capacitySourceId (wrong source is rejected).
+- Updated scheduler to pass capacitySources to computeDecisionSnapshotHash.
+- Fixed evaluator version in test calls (v2 → v3).
+- VERIFICATION: tsc zero errors. eslint clean. 34/34 phase-12b tests pass (was 30; added 4). 122/122 total. Dev server HTTP 200.
+
+Stage Summary:
+- The scheduler's canonical snapshot is now COMPLETE:
+  NetworkVersion + NetworkRequest (incl priority + full constraints) + ALL candidate resource/capacity/observation/capacity-source state + ALL authorizing membership states + schedulerVersion + evaluatorVersion.
+- Every authoritative input that can affect eligibility and selection is in the hash.
+- The evaluator purity contract is frozen: same inputs → same result, no hidden state.
+- 34/34 tests pass. 122/122 total. eslint clean. tsc clean. Dev server HTTP 200.
+- Slice 1 is now ready for the final audit. Next: Slice 2 (PostgreSQL persistence).

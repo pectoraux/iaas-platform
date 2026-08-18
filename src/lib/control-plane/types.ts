@@ -358,6 +358,7 @@ export function computeDecisionSnapshotHash(snapshot: {
   capacityStateByMembership: Map<string, CapacityEntry[]>
   authorizingMemberships: Map<string, ParticipantMembership>
   observationSnapshots?: Map<string, ConstraintObservationSnapshot>
+  capacitySources?: Map<string, CapacitySourceSnapshot[]>
   schedulerVersion: string
   evaluatorVersion: string
 }): string {
@@ -435,12 +436,30 @@ export function computeDecisionSnapshotHash(snapshot: {
             : null,
           authorizingMembershipStatus: authorizing?.membershipStatus ?? 'missing',
           // The observation snapshot for THIS membership — the full
-          // authoritative observation state used for constraint evaluation.
+          // authoritative observation state used for ServiceConstraint evaluation.
           observations: observations
             ? Array.from(observations.observations.entries())
                 .map(([serviceType, val]) => ({ serviceType, value: val.value, unit: val.unit }))
                 .sort((a, b) => a.serviceType.localeCompare(b.serviceType))
             : [],
+          // PHASE 12B FIX: include capacity sources in the canonical hash.
+          // capacitySources are an authoritative scheduling input (the evaluator
+          // uses them for CapacityConstraint evaluation). If a source's
+          // remaining amount changes, the hash must change — even if the
+          // aggregate remainingCapacity is unchanged.
+          capacitySources: (snapshot.capacitySources?.get(m.membershipId) ?? [])
+            .map((s) => ({
+              sourceId: s.sourceId,
+              capabilityType: s.capabilityType,
+              remainingAmount: s.remainingAmount,
+              unit: s.unit,
+            }))
+            .sort((a, b) => {
+              if (a.sourceId !== b.sourceId) return a.sourceId.localeCompare(b.sourceId)
+              if (a.capabilityType !== b.capabilityType) return a.capabilityType.localeCompare(b.capabilityType)
+              if (a.unit !== b.unit) return a.unit.localeCompare(b.unit)
+              return a.remainingAmount.localeCompare(b.remainingAmount)
+            }),
         }
       })
       .sort((a, b) => a.membershipId.localeCompare(b.membershipId)),
@@ -508,6 +527,15 @@ export interface CapacitySourceSnapshot {
  * for capacity. Now CapacityConstraint evaluation uses the authoritative
  * capacity state (remainingCapacity) with source identity enforcement, while
  * ServiceConstraint evaluation uses observation snapshots.
+ *
+ * PURITY CONTRACT (frozen):
+ *   evaluateService and evaluateCapacity MUST be pure functions:
+ *     same constraint + same snapshot + same evaluatorVersion → same result
+ *   An evaluator MUST NOT consult hidden external state. All inputs that can
+ *   affect the result must be passed explicitly (via the snapshot parameters)
+ *   and included in the decisionSnapshotHash. The evaluatorVersion is the
+ *   reproducibility anchor: if the evaluator's logic changes, the version
+ *   MUST change, which changes the hash and the decisionId.
  */
 export interface ConstraintEvaluator {
   /** The evaluator version — recorded in the AllocationDecision for reproducibility. */

@@ -264,6 +264,7 @@ export function schedule(input: SchedulerInput): SchedulerResult {
     capacityStateByMembership: input.remainingCapacity,
     authorizingMemberships: input.authorizingMemberships,
     observationSnapshots: input.observationSnapshots,
+    capacitySources: input.capacitySources,
     schedulerVersion: SCHEDULER_VERSION,
     evaluatorVersion: evaluator.evaluatorVersion,
   })

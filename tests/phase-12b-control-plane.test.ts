@@ -23,6 +23,7 @@ import {
   NetworkScopeIntegrityError,
   computeDecisionSnapshotHash,
   createNetworkRequest,
+  DefaultConstraintEvaluator,
 } from '../src/lib/control-plane'
 import type {
   ParticipantMembership,
@@ -990,9 +991,149 @@ describe('Phase 12B defect 3 fix: authorizing membership lifecycle integrity', (
         capacityStateByMembership: remaining,
         authorizingMemberships: new Map([['pm-provider-a', makeParticipantMembership('pm-provider-a', NETWORK_A, 'suspended')]]),
         schedulerVersion: 'deterministic-v1',
-        evaluatorVersion: 'default-evaluator-v2',
+        evaluatorVersion: 'default-evaluator-v3',
       })
       expect(hash1).not.toBe(hash2)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Capacity-source state in snapshot hash + evaluator purity
+// ---------------------------------------------------------------------------
+
+describe('Phase 12B: capacity-source state in snapshot hash', () => {
+  it('decisionSnapshotHash changes when a targeted capacity source\'s remaining amount changes', () => {
+    // Same aggregate remainingCapacity, but different source-specific amount.
+    // This proves the hash includes capacitySources, not just remainingCapacity.
+    const request = createNetworkRequest({
+      requesterMembershipId: 'pm-consumer-a',
+      networkId: NETWORK_A,
+      capabilityRequirements: [{ capabilityType: 'compute', amount: '4', unit: 'GPU' }],
+      timeWindow: { start: new Date('2024-06-01T00:00:00Z'), end: new Date('2024-06-01T04:00:00Z') },
+      idempotencyKey: 'key-1',
+    })
+    const candidate = makeMembership('rm-gpu-1', NETWORK_A, ['compute'], [{ capabilityType: 'compute', amount: '10', unit: 'GPU' }])
+
+    // Source B has 2 GPU in snapshot 1.
+    const sourcesB2 = new Map<string, import('../src/lib/control-plane').CapacitySourceSnapshot[]>([
+      ['rm-gpu-1', [
+        { sourceId: 'pool-A', capabilityType: 'compute', remainingAmount: '8', unit: 'GPU' },
+        { sourceId: 'pool-B', capabilityType: 'compute', remainingAmount: '2', unit: 'GPU' },
+      ]],
+    ])
+
+    // Source B has 1 GPU in snapshot 2 (same aggregate = 10, different source).
+    const sourcesB1 = new Map<string, import('../src/lib/control-plane').CapacitySourceSnapshot[]>([
+      ['rm-gpu-1', [
+        { sourceId: 'pool-A', capabilityType: 'compute', remainingAmount: '9', unit: 'GPU' },
+        { sourceId: 'pool-B', capabilityType: 'compute', remainingAmount: '1', unit: 'GPU' },
+      ]],
+    ])
+
+    const remaining = new Map([['rm-gpu-1', [{ capabilityType: 'compute', amount: '10', unit: 'GPU' }]]])
+
+    const hash1 = computeDecisionSnapshotHash({
+      networkVersionId: VERSION_1,
+      request,
+      candidateMemberships: [candidate],
+      capacityStateByMembership: remaining,
+      authorizingMemberships: new Map(),
+      capacitySources: sourcesB2,
+      schedulerVersion: 'test-v1',
+      evaluatorVersion: 'test-ev-v1',
+    })
+
+    const hash2 = computeDecisionSnapshotHash({
+      networkVersionId: VERSION_1,
+      request,
+      candidateMemberships: [candidate],
+      capacityStateByMembership: remaining,
+      authorizingMemberships: new Map(),
+      capacitySources: sourcesB1,
+      schedulerVersion: 'test-v1',
+      evaluatorVersion: 'test-ev-v1',
+    })
+
+    // Same aggregate remaining capacity (10 GPU), but source B changed from 2→1.
+    // The hash MUST differ.
+    expect(hash1).not.toBe(hash2)
+  })
+})
+
+describe('Phase 12B: evaluator purity contract', () => {
+  it('evaluateService is pure — same inputs → same result', () => {
+    const evaluator = new DefaultConstraintEvaluator()
+    const constraint: ServiceConstraint = {
+      constraintId: 'c-latency',
+      kind: 'service',
+      serviceType: 'latency',
+      operator: '<=',
+      threshold: '20',
+      unit: 'ms',
+      slaPolicyRef: 'sla-latency-v1',
+      verificationMethod: 'latency_probing',
+      status: 'pending',
+    }
+    const snapshot: ConstraintObservationSnapshot = {
+      membershipId: 'rm-1',
+      observations: new Map([['latency', { value: '14', unit: 'ms' }]]),
+    }
+
+    const result1 = evaluator.evaluateService(constraint, snapshot)
+    const result2 = evaluator.evaluateService(constraint, snapshot)
+
+    expect(result1).toBe(true)
+    expect(result2).toBe(true)
+    expect(result1).toBe(result2) // same inputs → same result
+  })
+
+  it('evaluateCapacity is pure — same inputs → same result', () => {
+    const evaluator = new DefaultConstraintEvaluator()
+    const constraint = {
+      constraintId: 'c-gpu',
+      kind: 'capacity' as const,
+      capabilityType: 'compute',
+      operator: '>=' as const,
+      threshold: '4',
+      unit: 'GPU',
+      capacitySourceId: 'pool-A',
+      verificationMethod: 'capacity_check',
+      status: 'pending' as const,
+    }
+    const sources = [
+      { sourceId: 'pool-A', capabilityType: 'compute', remainingAmount: '8', unit: 'GPU' },
+      { sourceId: 'pool-B', capabilityType: 'compute', remainingAmount: '2', unit: 'GPU' },
+    ]
+
+    const result1 = evaluator.evaluateCapacity(constraint, sources)
+    const result2 = evaluator.evaluateCapacity(constraint, sources)
+
+    expect(result1).toBe(true)
+    expect(result2).toBe(true)
+    expect(result1).toBe(result2) // same inputs → same result
+  })
+
+  it('evaluateCapacity enforces capacitySourceId — wrong source is rejected', () => {
+    const evaluator = new DefaultConstraintEvaluator()
+    const constraint = {
+      constraintId: 'c-gpu-b',
+      kind: 'capacity' as const,
+      capabilityType: 'compute',
+      operator: '>=' as const,
+      threshold: '4',
+      unit: 'GPU',
+      capacitySourceId: 'pool-B', // targets source B (2 GPU)
+      verificationMethod: 'capacity_check',
+      status: 'pending' as const,
+    }
+    const sources = [
+      { sourceId: 'pool-A', capabilityType: 'compute', remainingAmount: '8', unit: 'GPU' },
+      { sourceId: 'pool-B', capabilityType: 'compute', remainingAmount: '2', unit: 'GPU' },
+    ]
+
+    // pool-B has 2 GPU, threshold is >= 4 → NOT satisfied.
+    const result = evaluator.evaluateCapacity(constraint, sources)
+    expect(result).toBe(false)
   })
 })
