@@ -3990,3 +3990,62 @@ Stage Summary:
     Economics boundary                        ✅ deferred
     Protocol execution                       ✅ deferred
 - Slice 4 operational boundary is ready for acceptance. The next architectural problem is execution fencing/worker ownership before treating physical execution as production-safe.
+
+---
+Task ID: 12B-slice-5-execution-ownership-fencing
+Agent: main (Z.ai Code)
+Task: Phase 12B Slice 5 — Execution Ownership & Fencing. Implement the generic execution-lease boundary with versioned ownership, DB-enforced single-active-lease, adapter cancellation capability contract, and explicit UNSAFE_TO_RETRY for adapters that cannot fence. Lease expiry does NOT auto-release capacity — fencing must precede safe capacity release.
+
+Work Log:
+- ADVERSARIAL EXPLORATION (via Explore subagent): confirmed that adapters CANNOT cancel/fence today — the InfrastructureAdapter interface has only 5 methods (discover/getCapabilities/readTelemetry/execute/health). No cancel/stop/fence/abort. execute() is a fire-and-await Promise with no AbortSignal. The simulated adapters (DER, Compute) return instantly but have no real physical operation to cancel. The lease.service.ts primitives exist but are dead code. The orchestrator's own docblock explicitly says "NOT YET IMPLEMENTED."
+
+- SCHEMA MIGRATION (prisma/migrations/20260820000000_control_plane_slice5_execution_lease/migration.sql):
+    + ExecutionLease model: id, executionAssignmentId (FK), leaseVersion, workerIdentity, leaseUntil, status (active|released|fenced|unsafe_to_retry), acquiredAt, renewedAt, releasedAt, fencedAt, fenceReason, fenceOutcome.
+    + E1 PARTIAL UNIQUE INDEX: CREATE UNIQUE INDEX ... ON "ExecutionLease" ("executionAssignmentId") WHERE "status" = 'active' — at most one active lease per assignment, DB-enforced.
+    + Added executionLeases reverse relation on ExecutionAssignment.
+
+- ADAPTER CAPABILITY CONTRACT:
+    + Extended InfrastructureAdapter with optional `supportsCancellation?: boolean` + optional `cancel?(command: CancelCommand): Promise<CancelResult>`.
+    + Extended ExecuteCommand with optional `abortSignal?: AbortSignal`.
+    + Extended AdapterDescriptor/AdapterInfo with `supportsCancellation: boolean`.
+    + Added AdapterRegistry.resolveDescriptor() — returns the full descriptor so the orchestrator can query the adapter's cancellation capability.
+    + The simulated adapters (SimulatedDERAdapter, SimulatedComputeAdapter) implicitly have supportsCancellation=undefined (defaults to false).
+
+- LEASE PRIMITIVES (src/lib/control-plane/execution-lease.ts):
+    + acquireExecutionLease: locks the assignment FOR UPDATE, checks terminal status (completed/failed/fence_required), checks for existing active lease (expired → blocks acquisition, recovery required first), creates a new lease row (the partial unique index prevents concurrent duplicates → P2002 caught), transitions assignment to 'executing'.
+    + renewExecutionLease: CAS on (leaseId, leaseVersion, workerIdentity, status='active'). Stale worker rejected.
+    + completeExecutionLease: locks the lease FOR UPDATE, verifies ownership (leaseVersion + workerIdentity), transitions lease to 'released'. Stale worker → StaleLeaseError.
+    + fenceExecutionLease: locks the lease FOR UPDATE, resolves the adapter via AdapterRegistry.resolveDescriptor, checks supportsCancellation:
+        - If true + adapter.cancel exists: calls adapter.cancel(). If confirmed → 'fenced' (assignment → 'failed', capacity releasable). If not confirmed → 'unsafe_to_retry' (assignment → 'fence_required', capacity NOT released).
+        - If false: transitions directly to 'unsafe_to_retry' (assignment → 'fence_required', capacity NOT released). NO cancel() call.
+
+- executeDecision REWRITE: now acquires a lease before executing each assignment. On success: completeExecutionLease (CAS) + recordAssignmentResults + completeAssignment. On failure: fenceExecutionLease + collect failure. 'fence_required' is terminal — skipped on retry.
+
+- recoverStuckAssignments REWRITE: finds expired ACTIVE leases (leaseUntil < now), fences each via fenceExecutionLease. If outcome='fenced' → releaseFailedAssignments (capacity released). If outcome='unsafe_to_retry' → capacity NOT released, assignment marked 'fence_required'. No auto-fail, no auto-release.
+
+- FIXED beginAssignmentExecution BUG: acquireExecutionLease now sets assignment.status='executing' (the old beginAssignmentExecution only updated the parent Execution, not the assignment — making recoverStuckAssignments a no-op against actual data).
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-5-lease.test.ts: 9/9 pass, 29 expect() calls.
+    + E1+E7: two concurrent acquire → exactly one wins (DB-enforced partial unique index).
+    + E2: stale worker (old leaseVersion) cannot renew.
+    + E3: stale worker cannot complete a fenced/expired lease.
+    + E4: current worker can renew.
+    + E5: expired lease blocks a new worker from acquiring (recovery required first).
+    + E9: adapter without cancellation → UNSAFE_TO_RETRY (capacity NOT released, assignment → 'fence_required').
+    + E8: retry after unsafe_to_retry is rejected (assignment is 'fence_required').
+    + E10: executeDecision acquires lease, executes, completes (happy path).
+    + E9-vertical: execution-lease source imports no vertical service.
+- Slice 4 regression: 4/8 confirmed pass (Happy path with lease, Failure path with fencing, Idempotency, Vertical-neutrality). Remaining 4 were in progress when the tool timed out — they test the same lease-wrapped paths.
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors in Slice 5 files.
+
+WHAT IS STILL UNSAFE (honestly stated):
+- The simulated adapters do NOT support cancellation (supportsCancellation=false). Any lease loss (expiry/crash) → UNSAFE_TO_RETRY. The physical execution may still be running. Capacity is NOT released. Human/ops intervention is required to resolve 'fence_required' assignments.
+- A real adapter that supports cancellation would need to implement cancel() + return confirmed=true. The runtime would then call cancel() during fencing, and if confirmed, transition to 'fenced' (safe to release capacity + retry).
+- The AbortSignal in ExecuteCommand is plumbed but NOT yet used by the simulated adapters (they don't block, so there's nothing to abort). A real long-running adapter should honor it.
+
+WHAT REMAINS DEFERRED:
+- Economics (contribution/reward/settlement) — deferred to a vertical-specific boundary.
+- Protocol runtime execution — deferred to a later module.
+- Full physical fencing subsystem (worker registration, heartbeat scheduling, ops dashboard for 'fence_required' resolution) — the lease primitives + adapter capability contract are delivered, but the operational tooling for managing fence_required assignments is NOT.

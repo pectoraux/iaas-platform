@@ -97,6 +97,16 @@ import { resolveRuntime, validateRuntimeKind, type RuntimeKind } from '@/lib/ker
 import { createDefaultCapacityProviderRegistry } from './capacity-provider'
 import type { CapacityProviderRegistry } from './capacity-provider'
 import { createCapacityCommitment, releaseCommitment } from '@/lib/services/capacity.service'
+import { randomUUID } from 'crypto'
+import {
+  acquireExecutionLease,
+  renewExecutionLease,
+  completeExecutionLease,
+  fenceExecutionLease,
+  DEFAULT_LEASE_MS,
+  StaleLeaseError,
+  type ExecutionLeaseRecord,
+} from './execution-lease'
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -797,9 +807,11 @@ export class ExecutionFailedError extends OrchestratorError {
  */
 export async function executeDecision(
   decisionId: string,
-  opts?: { providerRegistry?: CapacityProviderRegistry },
+  opts?: { providerRegistry?: CapacityProviderRegistry; workerIdentity?: string; leaseMs?: number },
 ): Promise<ExecuteDecisionResult> {
   const providerRegistry = opts?.providerRegistry ?? createDefaultCapacityProviderRegistry()
+  const workerIdentity = opts?.workerIdentity ?? `worker-${randomUUID()}`
+  const leaseMs = opts?.leaseMs ?? DEFAULT_LEASE_MS
 
   // --- Load the execution + assignments for this decision ---
   const execution = await db.execution.findUnique({
@@ -869,7 +881,13 @@ export async function executeDecision(
 
   for (const assignment of execution.assignments) {
     // Skip already-terminal assignments (idempotent re-execution).
-    if (assignment.status === 'completed' || assignment.status === 'failed') {
+    // Slice 5: 'fence_required' is also terminal — cannot re-execute until
+    // human/ops intervention resolves the unsafe state.
+    if (
+      assignment.status === 'completed' ||
+      assignment.status === 'failed' ||
+      assignment.status === 'fence_required'
+    ) {
       results.push({
         assignmentId: assignment.id,
         capabilityType: assignment.capabilityType,
@@ -890,7 +908,37 @@ export async function executeDecision(
       tx: db as unknown as ExtendedTransactionClient,
     })
 
+    // --- Slice 5: ACQUIRE THE EXECUTION LEASE (E1, E3) ---
+    // The lease is the fencing token. Without it, we cannot execute.
+    // If another worker holds an active lease, or the previous lease is
+    // expired-but-unfenced (unsafe_to_retry), acquisition fails.
+    const acquireResult = await acquireExecutionLease({
+      executionAssignmentId: assignment.id,
+      workerIdentity,
+      leaseMs,
+    })
+
+    if (!acquireResult.acquired) {
+      // Could not acquire — another worker owns it, or recovery is needed.
+      failures.push({
+        assignmentId: assignment.id,
+        capabilityType: assignment.capabilityType,
+        error: `could not acquire execution lease: ${acquireResult.reason}`,
+      })
+      results.push({
+        assignmentId: assignment.id,
+        capabilityType: assignment.capabilityType,
+        unit: assignment.assignedUnit,
+        assignedAmount: assignment.assignedQuantity,
+        status: 'failed',
+      })
+      continue
+    }
+
+    const lease = acquireResult.lease!
+
     // 1. beginAssignmentExecution (parent → 'executing').
+    // The acquireExecutionLease call already set the assignment to 'executing'.
     await db.$transaction(async (tx) => {
       await runtime.beginAssignmentExecution(tx, execution.id, assignment.id)
     }, { timeout: 30000 })
@@ -914,10 +962,22 @@ export async function executeDecision(
         ),
       })
     } catch (err) {
+      // Adapter threw — fence the lease + release capacity.
+      const errMsg = err instanceof Error ? err.message : String(err)
+      await fenceExecutionLease({
+        leaseId: lease.id,
+        leaseVersion: lease.leaseVersion,
+        reason: `adapter threw: ${errMsg}`,
+        adapterSelection: {
+          assetId: execInput.assetId,
+          assetType: execInput.assetType,
+          capabilityType: assignment.capabilityType,
+        },
+      })
       failures.push({
         assignmentId: assignment.id,
         capabilityType: assignment.capabilityType,
-        error: err instanceof Error ? err.message : String(err),
+        error: errMsg,
       })
       results.push({
         assignmentId: assignment.id,
@@ -930,10 +990,22 @@ export async function executeDecision(
     }
 
     if (!executeResult.success) {
+      // Adapter returned failure — fence the lease + release capacity.
+      const errMsg = executeResult.error ?? 'adapter returned success=false'
+      await fenceExecutionLease({
+        leaseId: lease.id,
+        leaseVersion: lease.leaseVersion,
+        reason: `adapter failure: ${errMsg}`,
+        adapterSelection: {
+          assetId: execInput.assetId,
+          assetType: execInput.assetType,
+          capabilityType: assignment.capabilityType,
+        },
+      })
       failures.push({
         assignmentId: assignment.id,
         capabilityType: assignment.capabilityType,
-        error: executeResult.error ?? 'adapter returned success=false',
+        error: errMsg,
       })
       results.push({
         assignmentId: assignment.id,
@@ -945,16 +1017,27 @@ export async function executeDecision(
       continue
     }
 
-    // 3. Success: record results + complete the assignment (operational completion).
+    // 3. Success: complete the lease (CAS on leaseId + leaseVersion),
+    //    record results, complete the assignment.
     await db.$transaction(async (tx) => {
+      // Complete the lease first (CAS — stale worker rejected).
+      const leaseResult = await completeExecutionLease({
+        leaseId: lease.id,
+        leaseVersion: lease.leaseVersion,
+        workerIdentity,
+        tx: tx as unknown as ExtendedTransactionClient,
+      })
+      if (!leaseResult.completed) {
+        throw new StaleLeaseError(
+          `could not complete lease ${lease.id}: ${leaseResult.reason}`,
+        )
+      }
+
       await runtime.recordAssignmentResults(tx, assignment.id, {
         actualQuantity: executeResult.actualQuantity,
         actualUnit: executeResult.actualUnit,
         verifiedQuantity: executeResult.actualQuantity,
         verifiedUnit: executeResult.actualUnit,
-        // eventId is intentionally NOT set here — the telemetry→event→verify
-        // path is deferred to a vertical-specific boundary (requires a
-        // device-side signature). Operational completion records actuals only.
       })
       await runtime.completeAssignment(tx, tenantId, assignment.id, execution.id)
     }, { timeout: 30000 })
@@ -1131,7 +1214,7 @@ export async function recoverStuckAssignments(
     )
   }
 
-  // Resolve the runtime.
+  // Load the decision to resolve the resource membership (for adapter selection).
   const decision = await db.allocationDecision.findUnique({
     where: { id: decisionId },
     include: { request: true },
@@ -1157,53 +1240,84 @@ export async function recoverStuckAssignments(
     throw new ProtocolRuntimeNotSupportedError(networkVersion.id)
   }
 
-  const runtime = resolveRuntime(runtimeKind)
+  // Load the resource membership for adapter resolution.
+  const membership = await db.networkResourceMembership.findUnique({
+    where: { id: decision.selectedMembershipId },
+    include: { resource: true },
+  })
+  if (!membership) {
+    throw new OrchestratorError(
+      `Selected NetworkResourceMembership not found.`,
+    )
+  }
 
-  const now = Date.now()
+  const provider = providerRegistry.resolve(membership.resource.resourceKind)
+  const now = new Date()
   const recovered: RecoveredAssignment[] = []
 
-  for (const assignment of execution.assignments) {
-    if (assignment.status !== 'executing') {
-      continue // only 'executing' assignments can be stuck
-    }
+  // Find all ACTIVE leases for this decision's assignments that have EXPIRED.
+  // (status='active' AND leaseUntil < now)
+  const expiredLeases = await db.executionLease.findMany({
+    where: {
+      status: 'active',
+      leaseUntil: { lt: now },
+      executionAssignment: { executionId: execution.id },
+    },
+  })
 
-    // Check if the assignment's createdAt is older than the lease.
-    // (createdAt is set when the assignment was created by
-    // commitDecisionToExecution. The execution lease starts from
-    // beginAssignmentExecution, but we use createdAt as a conservative
-    // upper bound — if the assignment has been alive longer than the lease,
-    // it's definitely stuck.)
-    const assignmentAge = now - assignment.createdAt.getTime()
-    if (assignmentAge < leaseMs) {
-      continue // not stuck yet — within the lease window
-    }
-
-    // Mark the assignment as 'failed' via the runtime's failAssignment CAS.
-    // This transitions it to terminal 'failed', so a retry of executeDecision
-    // will skip it (not re-execute the physical resource).
-    await db.$transaction(async (tx) => {
-      await runtime.failAssignment(
-        tx,
-        tenantId,
-        assignment.id,
-        execution.id,
-      )
-    }, { timeout: 30000 })
-
-    recovered.push({
-      assignmentId: assignment.id,
-      executionId: execution.id,
-      recovered: true,
-      reason: `assignment was 'executing' for ${Math.round(assignmentAge / 1000)}s (lease=${Math.round(leaseMs / 1000)}s) — assumed crashed`,
+  for (const lease of expiredLeases) {
+    // Resolve the execution input to get the adapter selection for fencing.
+    const execInput = await provider.resolveExecutionInput({
+      resourceId: membership.resourceId,
+      tx: db as unknown as ExtendedTransactionClient,
     })
+
+    // Resolve the assignment to get its capabilityType.
+    const assignment = execution.assignments.find(
+      (a) => a.id === lease.executionAssignmentId,
+    )
+    if (!assignment) continue
+
+    // FENCE the lease. This calls adapter.cancel() if the adapter supports
+    // cancellation, or marks it 'unsafe_to_retry' if it does NOT.
+    // CRITICAL: fence() does NOT release capacity for 'unsafe_to_retry'
+    // outcomes. Capacity is only released after a confirmed fence.
+    const fenceResult = await fenceExecutionLease({
+      leaseId: lease.id,
+      leaseVersion: lease.leaseVersion,
+      reason: `lease expired (leaseUntil=${lease.leaseUntil.toISOString()}, now=${now.toISOString()})`,
+      adapterSelection: {
+        assetId: execInput.assetId,
+        assetType: execInput.assetType,
+        capabilityType: assignment.capabilityType,
+      },
+    })
+
+    if (fenceResult.outcome === 'fenced') {
+      // Safe to release capacity — the adapter confirmed cancellation.
+      await releaseFailedAssignments(
+        decisionId,
+        [assignment.id],
+        `lease ${lease.id} fenced (cancellation confirmed)`,
+      )
+      recovered.push({
+        assignmentId: assignment.id,
+        executionId: execution.id,
+        recovered: true,
+        reason: `lease ${lease.id} expired + fenced (cancellation confirmed); capacity released`,
+      })
+    } else {
+      // unsafe_to_retry — physical execution may still be running.
+      // Do NOT release capacity. Do NOT mark the assignment as re-executable.
+      // The assignment is now 'fence_required' — human/ops intervention needed.
+      recovered.push({
+        assignmentId: assignment.id,
+        executionId: execution.id,
+        recovered: false,
+        reason: `lease ${lease.id} expired + UNSAFE_TO_RETRY (adapter does not support cancellation; physical execution may still be running); capacity NOT released; assignment marked 'fence_required'`,
+      })
+    }
   }
 
-  // If any assignments were recovered, release their capacity atomically.
-  if (recovered.length > 0) {
-    const recoveredIds = recovered.map((r) => r.assignmentId)
-    await releaseFailedAssignments(decisionId, recoveredIds, 'crash recovery: stuck executing')
-  }
-
-  void providerRegistry // kept for API consistency; not used in recovery itself
   return recovered
 }

@@ -78,6 +78,8 @@ export interface AdapterInfo {
   adapterType: string
   supportedAssetTypes: readonly string[]
   supportedCapabilities: readonly string[]
+  /** Phase 12B Slice 5: whether this adapter can cancel/fence a running execution. */
+  readonly supportsCancellation: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +335,44 @@ export class AdapterRegistry {
     return adapter
   }
 
+  /**
+   * Phase 12B Slice 5: resolve the full AdapterDescriptor (not just the
+   * adapter instance) for a selection. The orchestrator uses this to query
+   * whether the resolved adapter supports cancellation/fencing.
+   */
+  resolveDescriptor(selection: AdapterSelection): AdapterDescriptor {
+    const { assetType, adapterType, capabilityType } = selection
+    const candidates = this.assetTypeIndex.get(assetType)
+    if (!candidates || candidates.size === 0) {
+      throw new Error(
+        `No adapter registered for asset type '${assetType}'.`,
+      )
+    }
+    let resolvedAdapterType: string
+    if (adapterType) {
+      if (!candidates.has(adapterType)) {
+        throw new Error(
+          `Adapter '${adapterType}' does not support asset type '${assetType}'.`,
+        )
+      }
+      resolvedAdapterType = adapterType
+    } else {
+      if (candidates.size > 1) {
+        throw new Error(
+          `Ambiguous adapter resolution for asset type '${assetType}'.`,
+        )
+      }
+      resolvedAdapterType = candidates.values().next().value!
+    }
+    const descriptor = this.adaptersByType.get(resolvedAdapterType)!
+    if (capabilityType && !descriptor.supportedCapabilities.includes(capabilityType)) {
+      throw new Error(
+        `Adapter '${resolvedAdapterType}' does not support capability '${capabilityType}'.`,
+      )
+    }
+    return descriptor
+  }
+
   // -------------------------------------------------------------------------
   // P7.4 — Capability-aware queries
   // -------------------------------------------------------------------------
@@ -401,6 +441,7 @@ export class AdapterRegistry {
         adapterType,
         supportedAssetTypes: Object.freeze([...desc.supportedAssetTypes]),
         supportedCapabilities: Object.freeze([...desc.supportedCapabilities]),
+        supportsCancellation: desc.adapter.supportsCancellation ?? false,
       })
     }
     return result

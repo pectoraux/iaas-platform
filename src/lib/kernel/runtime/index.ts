@@ -47,3 +47,4 @@ export { runtimeRegistry }
 export type { NetworkRuntime, RuntimeKind, RuntimeExecuteInput, RuntimeExecuteResult } from './types'
 export { RUNTIME_KINDS, validateRuntimeKind, isRuntimeKind } from './types'
 export { resolveAdapter, adapterRegistry } from './adapter-registry'
+export type { AdapterDescriptor, AdapterInfo, AdapterSelection } from './adapter-registry'

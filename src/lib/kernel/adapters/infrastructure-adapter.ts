@@ -73,6 +73,14 @@ export interface ExecuteCommand {
   durationSeconds: number
   /** Optional parameters (e.g., discharge profile, ramp rate). */
   parameters?: Record<string, unknown>
+  /**
+   * Phase 12B Slice 5: an optional AbortSignal. If the adapter honors it,
+   * the runtime can cancel a running execution by calling abort()
+   * on the AbortController that produced this signal. Adapters that do NOT
+   * support cancellation (supportsCancellation=false in their descriptor)
+   * will ignore this field.
+   */
+  abortSignal?: AbortSignal
 }
 
 /**
@@ -103,6 +111,39 @@ export interface HealthStatus {
   diagnostics?: Record<string, unknown>
 }
 
+/**
+ * Phase 12B Slice 5: a command to cancel/fence a running execution.
+ *
+ * Sent to an adapter when the runtime determines a lease is lost and the
+ * physical operation must be stopped. The adapter should attempt to cancel
+ * the in-flight execution on the physical resource.
+ *
+ * If the adapter CANNOT cancel (supportsCancellation=false), the runtime
+ * does NOT send this command — instead it marks the lease
+ * 'unsafe_to_retry' and requires human/ops intervention.
+ */
+export interface CancelCommand {
+  assetId: string
+  /** The capability that was being executed. */
+  capabilityType: string
+  /** The lease ID that authorized the execution (for logging/correlation). */
+  leaseId: string
+  /** The reason for cancellation (e.g., 'lease expired', 'process crash'). */
+  reason: string
+}
+
+/**
+ * Phase 12B Slice 5: the result of a cancel/fence attempt.
+ */
+export interface CancelResult {
+  assetId: string
+  /** Whether the cancellation was confirmed. If false, the physical operation
+   * may still be running — the lease must be marked 'unsafe_to_retry'. */
+  confirmed: boolean
+  /** Optional diagnostic info. */
+  diagnostics?: Record<string, unknown>
+}
+
 // ---------------------------------------------------------------------------
 // Interface
 // ---------------------------------------------------------------------------
@@ -124,6 +165,19 @@ export interface InfrastructureAdapter {
   readonly adapterType: string
 
   /**
+   * Phase 12B Slice 5: whether this adapter supports cancellation/fencing of
+   * a running execution. If false, the runtime will NOT call cancel() and
+   * will mark lost leases as 'unsafe_to_retry' (physical execution may still
+   * be running; retry is NOT authorized without human/ops intervention).
+   *
+   * Simulated adapters return false (they execute synchronously and have no
+   * real physical operation to cancel). Real adapters that can cancel
+   * (e.g., a Tesla API with a stop-charging endpoint) should return true and
+   * implement cancel().
+   */
+  readonly supportsCancellation?: boolean
+
+  /**
    * Discover available assets on the physical network.
    * Used for auto-registration (future).
    */
@@ -142,6 +196,10 @@ export interface InfrastructureAdapter {
   /**
    * Execute a command on an asset.
    * Returns the actual output + telemetry payload.
+   *
+   * Phase 12B Slice 5: if the adapter supports cancellation (supportsCancellation=true),
+   * the runtime will pass an AbortSignal in command.abortSignal. The adapter
+   * should periodically check signal.aborted and stop the physical operation.
    */
   execute(command: ExecuteCommand): Promise<ExecuteResult>
 
@@ -149,4 +207,20 @@ export interface InfrastructureAdapter {
    * Check asset health.
    */
   health(assetId: string): Promise<HealthStatus>
+
+  /**
+   * Phase 12B Slice 5: cancel/fence a running execution.
+   *
+   * Called by the runtime when a lease is lost (expired) and the adapter
+   * supports cancellation. The adapter should attempt to stop the in-flight
+   * physical operation on the resource.
+   *
+   * If the adapter returns confirmed=false, the physical operation may still
+   * be running — the lease must be marked 'unsafe_to_retry'.
+   *
+   * If the adapter does NOT support cancellation (supportsCancellation=false),
+   * this method will NOT be called. The runtime marks the lease
+   * 'unsafe_to_retry' directly.
+   */
+  cancel?(command: CancelCommand): Promise<CancelResult>
 }

@@ -1447,6 +1447,9 @@ model ExecutionAssignment {
   asset      Asset      @relation(fields: [assetId], references: [id], onDelete: Cascade)
   operator   Operator   @relation(fields: [operatorId], references: [id], onDelete: Cascade)
   vppDispatchAssignment VppDispatchAssignment?  // VPP-4.1: reverse relation (1:1)
+  // Phase 12B Slice 5: the execution leases for this assignment (one active
+  // at a time — enforced by the partial unique index on ExecutionLease).
+  executionLeases ExecutionLease[]
 
   // Phase 12B Slice 3: DB-level "one assignment per commitment" (the VPP 1:1
   // pattern, now enforced structurally). Nullable capacityCommitmentId rows
@@ -1458,6 +1461,55 @@ model ExecutionAssignment {
   @@index([executionId])
   @@index([assetId])
   @@index([status])
+}
+
+/// Phase 12B Slice 5: ExecutionLease — ownership of a physical execution
+/// attempt. At most one ACTIVE lease per ExecutionAssignment (DB-enforced via
+/// a partial unique index on (executionAssignmentId) WHERE status='active').
+///
+/// The lease is the fencing token: a worker must hold the current lease to
+/// execute/complete. A stale worker (wrong leaseVersion) is rejected by the
+/// CAS in renew/complete/fence.
+///
+/// STATE MACHINE:
+///   ACQUIRE → active (workerIdentity set, leaseUntil set)
+///     ├─ renew → active (leaseUntil extended, leaseVersion unchanged)
+///     ├─ complete → released (assignment completed, capacity consumed)
+///     ├─ fence (adapter supportsCancellation=true) → fenced (assignment failed, capacity released)
+///     └─ fence (adapter supportsCancellation=false) → unsafe_to_retry
+///         (assignment marked fence_required, capacity NOT released — human/ops intervention)
+///
+/// CRITICAL: lease expiry does NOT auto-transition. An expired lease is
+/// detected by recovery, which then decides: fence (if adapter can cancel) or
+/// unsafe_to_retry (if it cannot). Expiry is evidence recovery is needed,
+/// NOT proof that physical execution stopped.
+model ExecutionLease {
+  id                      String   @id @default(cuid())
+  executionAssignmentId   String
+  leaseVersion            Int      // monotonic per assignment; increments on each new attempt
+  workerIdentity          String   // the dispatcher/worker that acquired this lease
+  leaseUntil              DateTime // when the lease expires (if not renewed)
+  status                  String   @default("active") // active | released | fenced | unsafe_to_retry
+  acquiredAt              DateTime @default(now())
+  renewedAt               DateTime?
+  releasedAt              DateTime?
+  fencedAt                DateTime?
+  fenceReason             String?
+  // The fence outcome: 'fenced' (cancellation confirmed, safe to retry) or
+  // 'unsafe_to_retry' (adapter cannot cancel, physical execution may still
+  // be running — retry is NOT authorized).
+  fenceOutcome            String?
+
+  executionAssignment     ExecutionAssignment @relation(fields: [executionAssignmentId], references: [id], onDelete: Cascade)
+
+  // E1 — SINGLE ACTIVE OWNER: at most one active lease per assignment.
+  // PostgreSQL partial unique index (defined in the migration) enforces this
+  // at the DB level — two concurrent acquireExecutionLease calls cannot both
+  // create an active lease for the same assignment.
+  @@index([executionAssignmentId])
+  @@index([status])
+  @@index([leaseUntil])
+  @@index([workerIdentity])
 }
 
 // -----------------------------------------------------------------------------
