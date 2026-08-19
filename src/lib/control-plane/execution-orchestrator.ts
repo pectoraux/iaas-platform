@@ -582,25 +582,39 @@ export async function releaseFailedAssignments(
     const commitmentSourceId = `${decisionId}:${entry.allocationReservationId}`
 
     await db.$transaction(async (tx) => {
-      // Re-read the assignment's CURRENT status inside the transaction. The
-      // status may have changed between the initial load (outside the tx) and
-      // now (e.g., a concurrent executeDecision completed it). We must not
-      // release a completed assignment's commitment.
-      const current = await tx.executionAssignment.findUnique({
-        where: { id: assignment.id },
-        select: { id: true, status: true },
-      })
+      // PHASE 12B SLICE 4.2 — LOCKED STATUS CHECK (concurrency-safe):
+      // SELECT ... FOR UPDATE locks the assignment row for the duration of
+      // this transaction. A concurrent completeAssignment (which does
+      // tx.executionAssignment.update) will BLOCK until this tx commits, so it
+      // cannot slip in between the status read and the releaseCommitment call.
+      //
+      // Without this lock, the race was:
+      //   Tx A (release): SELECT status='assigned'
+      //   Tx B (complete): UPDATE status='completed'; COMMIT
+      //   Tx A: failAssignment (CAS no-op on 'completed')
+      //   Tx A: releaseCommitment → RELEASES the completed assignment's commitment
+      //
+      // With the lock, Tx B blocks at its UPDATE until Tx A commits, so the
+      // status read is consistent with the failAssignment + releaseCommitment.
+      const locked = await tx.$queryRaw<Array<{ id: string; status: string }>>`
+        SELECT id, status FROM "ExecutionAssignment"
+        WHERE id = ${assignment.id}
+        FOR UPDATE
+      `
 
-      if (!current) {
+      if (locked.length === 0) {
         // Assignment was deleted (shouldn't happen — FK cascade would take the
         // commitment too). Skip.
         return
       }
 
+      const currentStatus = locked[0].status
+
       // COMPLETED-ASSIGNMENT PROTECTION: a completed assignment's commitment
       // must NEVER be released through this path. Operational completion is
       // irreversible — the capacity was legitimately used. Skip the release.
-      if (current.status === 'completed') {
+      // This check is now concurrency-safe because the row is locked.
+      if (currentStatus === 'completed') {
         skipped.push({
           assignmentId: assignment.id,
           reason: `assignment is 'completed' — operational completion is irreversible; its commitment is not released`,
@@ -610,7 +624,8 @@ export async function releaseFailedAssignments(
 
       // 1. Fail the assignment (transitions → 'failed', finalizes parent if terminal).
       //    CAS: if already 'failed', this is a no-op. If 'assigned' or 'executing',
-      //    it transitions to 'failed'.
+      //    it transitions to 'failed'. The row is still locked from the FOR UPDATE
+      //    above, so no concurrent transition can interfere.
       await runtime.failAssignment(
         tx,
         tenantId,
@@ -620,7 +635,8 @@ export async function releaseFailedAssignments(
 
       // 2. Release the commitment IN THE SAME TRANSACTION — restores the
       //    reservation's remainingAmount. Atomic with the fail above.
-      //    GUARANTEED: the assignment is NOT 'completed' (we checked above).
+      //    GUARANTEED: the assignment is NOT 'completed' (we checked above,
+      //    and the FOR UPDATE lock prevented any concurrent completion).
       await releaseCommitment(
         tenantId,
         COMMITMENT_SOURCE_TYPE,

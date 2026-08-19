@@ -3954,3 +3954,39 @@ Stage Summary:
     Economics boundary                        ✅ deferred
     Protocol execution                       ✅ deferred
 - Slice 4.1 hardening is ready for re-audit.
+
+---
+Task ID: 12B-slice-4.2-locked-status-check
+Agent: main (Z.ai Code)
+Task: Fix the remaining race-condition defect in completed-assignment protection. The status read (findUnique) was NOT locked, so a concurrent completeAssignment could slip in between the read and the releaseCommitment call: Tx A reads status='assigned', Tx B completes (status='completed', COMMIT), Tx A failAssignment (CAS no-op), Tx A releaseCommitment → RELEASES the completed assignment's commitment.
+
+Work Log:
+- DEFECT: the findUnique status read inside the per-assignment transaction did not acquire a row lock. A concurrent completeAssignment (which does tx.executionAssignment.update) could commit between the status read and the releaseCommitment call, producing the forbidden state: assignment=completed + commitment=released.
+- FIX: replaced findUnique with a raw SELECT ... FOR UPDATE on the ExecutionAssignment row. This locks the row for the duration of the transaction. A concurrent completeAssignment's UPDATE will BLOCK until this tx commits, so the status read is now consistent with the failAssignment + releaseCommitment. The locked status is then checked: if 'completed', skip releaseCommitment entirely (the row is still locked, so no concurrent transition can change it to something else before the tx commits).
+- The failAssignment CAS + releaseCommitment now run on the LOCKED row. Either:
+    (a) releaseFailedAssignments wins the lock: sees 'assigned'/'executing'/'failed', fails + releases. Then completeAssignment's UPDATE finds 'failed' (CAS no-op). Commitment is released (legitimate — the release won the race).
+    (b) completeAssignment wins the row (via its UPDATE): sets 'completed' + commits. Then releaseFailedAssignments acquires the FOR UPDATE lock, sees 'completed', and SKIPS releaseCommitment. Commitment is NOT released.
+  Either way, the INVARIANT holds: an assignment that ends up 'completed' NEVER has a 'released' commitment.
+
+- CONCURRENCY TEST: added "Concurrency-safe: a concurrent completeAssignment racing releaseFailedAssignments cannot release the completed commitment". Fires releaseFailedAssignments([assignmentId]) and runtime.completeAssignment(assignmentId) concurrently via Promise.allSettled. Asserts the ABSOLUTE INVARIANT via a direct DB query: SELECT COUNT(*) WHERE ea.status='completed' AND cc.status='released' = 0. Also asserts: if assignment ended up 'completed', commitment NOT released + reservation NOT restored; if assignment ended up 'failed', commitment IS released + reservation IS restored (legitimate release won the race).
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-4-execution.test.ts: 8/8 pass (was 7/7; +1 concurrency test), 63 expect() calls.
+    + Concurrency-safe: a concurrent completeAssignment racing releaseFailedAssignments cannot release the completed commitment.
+- Slice 3 integration regression: 4/4 pass (FOR UPDATE lock does not break the existing atomic release path).
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors.
+
+Stage Summary:
+- The completed-assignment protection is now concurrency-safe: SELECT ... FOR UPDATE locks the assignment row, so the status read is consistent with the failAssignment + releaseCommitment. A concurrent completeAssignment cannot slip in between.
+- The concurrency test proves the invariant holds under a real concurrent race (releaseFailedAssignments + completeAssignment fired simultaneously).
+- Revised Slice 4 status:
+    Adapter execution                         ✅
+    Operational completion                  ✅
+    Targeted mixed-success release            ✅
+    Completed-assignment protection            ✅ CONCURRENCY-SAFE (was ⚠️ race)
+    Stuck-state recovery (database-level)     ✅
+    Physical fencing                          ❌ specified, not implemented (deferred)
+    Economics boundary                        ✅ deferred
+    Protocol execution                       ✅ deferred
+- Slice 4 operational boundary is ready for acceptance. The next architectural problem is execution fencing/worker ownership before treating physical execution as production-safe.

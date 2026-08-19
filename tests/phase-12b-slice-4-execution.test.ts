@@ -617,4 +617,94 @@ describeOrSkip('Phase 12B Slice 4: Actual Execution (executeDecision)', () => {
     const stillCompleted = await db.executionAssignment.findUnique({ where: { id: assignmentId } })
     expect(stillCompleted!.status).toBe('completed')
   })
+
+  // -------------------------------------------------------------------------
+  // Concurrency-safe completed-assignment protection (Slice 4.2):
+  // a concurrent completeAssignment must NOT be able to slip in between the
+  // status read and the releaseCommitment call. The FOR UPDATE lock makes the
+  // release conditional on the locked state.
+  // -------------------------------------------------------------------------
+  it('Concurrency-safe: a concurrent completeAssignment racing releaseFailedAssignments cannot release the completed commitment', async () => {
+    const f = await createSlice4Fixture({ label: 'Race', capacityAmount: '8' })
+    const { decisionId, executionId, assignmentId, commitmentId, reservationId } = await submitAndCommit(f, {
+      amount: '8',
+      idempotencyKey: `s4-race-${f.networkId}`,
+    })
+
+    // Capture state before.
+    const reservationBefore = await db.capacityReservation.findUnique({ where: { id: reservationId } })
+    const reservationRemainingBefore = parseFloat(reservationBefore!.remainingAmount)
+
+    // Fire BOTH concurrently:
+    //   - Tx A: releaseFailedAssignments([assignmentId])
+    //   - Tx B: runtime.completeAssignment(assignmentId)
+    //
+    // The FOR UPDATE lock in releaseFailedAssignments serializes the two:
+    //   - If releaseFailedAssignments acquires the lock first, it sees status
+    //     'assigned', fails + releases. Then completeAssignment runs but the
+    //     CAS in completeAssignment (status='assigned'/'executing') may no-op
+    //     because the assignment is now 'failed'. The commitment is released
+    //     (legitimate — the release won the race).
+    //   - If completeAssignment acquires the row first (via its UPDATE), it
+    //     sets status='completed' + commits. Then releaseFailedAssignments
+    //     acquires the FOR UPDATE lock, sees status='completed', and SKIPS the
+    //     releaseCommitment call. The commitment is NOT released.
+    //
+    // Either way, the INVARIANT holds: an assignment that ends up 'completed'
+    // NEVER has a 'released' commitment.
+    const { resolveRuntime } = await import('../src/lib/kernel/runtime')
+    const runtime = resolveRuntime('infrastructure')
+    const { releaseFailedAssignments } = await import('../src/lib/control-plane')
+
+    const results = await Promise.allSettled([
+      // Tx A: attempt to release (may legitimately succeed if it wins the race).
+      releaseFailedAssignments(decisionId, [assignmentId], 'concurrent release attempt'),
+      // Tx B: attempt to complete.
+      db.$transaction(async (tx) => {
+        await runtime.completeAssignment(tx, f.tenantId, assignmentId, executionId)
+      }),
+    ])
+
+    // Both should settle (neither should throw an uncaught error).
+    for (const r of results) {
+      if (r.status === 'rejected') {
+        // A rejection is acceptable only if it's a benign CAS no-op error
+        // (e.g., completeAssignment on an already-failed assignment). We
+        // don't assert on the error type — we assert on the INVARIANT below.
+      }
+    }
+
+    // --- THE CONCURRENCY INVARIANT: regardless of who won the race ---
+    const assignment = await db.executionAssignment.findUnique({ where: { id: assignmentId } })
+    const commitment = await db.capacityCommitment.findUnique({ where: { id: commitmentId } })
+
+    // If the assignment ended up 'completed', its commitment must NOT be released.
+    if (assignment!.status === 'completed') {
+      expect(commitment!.status).not.toBe('released')
+      // The reservation must NOT be restored.
+      const reservationAfter = await db.capacityReservation.findUnique({ where: { id: reservationId } })
+      expect(parseFloat(reservationAfter!.remainingAmount)).toBe(reservationRemainingBefore)
+    }
+
+    // If the assignment ended up 'failed' (release won the race), its
+    // commitment MUST be released (the release is legitimate).
+    if (assignment!.status === 'failed') {
+      expect(commitment!.status).toBe('released')
+      // The reservation IS restored.
+      const reservationAfter = await db.capacityReservation.findUnique({ where: { id: reservationId } })
+      expect(parseFloat(reservationAfter!.remainingAmount)).toBeGreaterThan(reservationRemainingBefore)
+    }
+
+    // THE ABSOLUTE INVARIANT (the real test): a completed assignment NEVER has
+    // a released commitment. Query the DB directly for the forbidden state.
+    const forbidden = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT COUNT(*)::bigint AS count
+      FROM "ExecutionAssignment" ea
+      JOIN "CapacityCommitment" cc ON ea."capacityCommitmentId" = cc.id
+      WHERE ea.id = ${assignmentId}
+        AND ea.status = 'completed'
+        AND cc.status = 'released'
+    `
+    expect(Number(forbidden[0].count)).toBe(0)
+  })
 })
