@@ -563,6 +563,18 @@ export async function releaseFailedAssignments(
   // ATOMIC PER-ASSIGNMENT: failAssignment + releaseCommitment in ONE transaction.
   // Only the FAILED assignments are touched — successful assignments' commitments
   // are NOT in targetCommitmentIds, so they are never released.
+  //
+  // PHASE 12B SLICE 4.1 HARDENING — COMPLETED-ASSIGNMENT PROTECTION:
+  // failAssignment is a CAS no-op on a 'completed' assignment (operational
+  // completion is irreversible). But releaseCommitment is NOT a no-op — it
+  // would release the commitment regardless of the assignment's status. So we
+  // MUST inspect the assignment's current status INSIDE the transaction (after
+  // acquiring the row implicitly via the update attempt) and SKIP the
+  // releaseCommitment call entirely for 'completed' assignments. Without this
+  // guard, a caller passing a completed assignment ID would release its
+  // commitment — recreating the exact invariant violation we fixed.
+  const skipped: { assignmentId: string; reason: string }[] = []
+
   for (const assignment of targetAssignments) {
     const entry = commitmentByAssignmentId.get(assignment.id)
     if (!entry) continue // no commitment linked (shouldn't happen, but defensive)
@@ -570,17 +582,45 @@ export async function releaseFailedAssignments(
     const commitmentSourceId = `${decisionId}:${entry.allocationReservationId}`
 
     await db.$transaction(async (tx) => {
+      // Re-read the assignment's CURRENT status inside the transaction. The
+      // status may have changed between the initial load (outside the tx) and
+      // now (e.g., a concurrent executeDecision completed it). We must not
+      // release a completed assignment's commitment.
+      const current = await tx.executionAssignment.findUnique({
+        where: { id: assignment.id },
+        select: { id: true, status: true },
+      })
+
+      if (!current) {
+        // Assignment was deleted (shouldn't happen — FK cascade would take the
+        // commitment too). Skip.
+        return
+      }
+
+      // COMPLETED-ASSIGNMENT PROTECTION: a completed assignment's commitment
+      // must NEVER be released through this path. Operational completion is
+      // irreversible — the capacity was legitimately used. Skip the release.
+      if (current.status === 'completed') {
+        skipped.push({
+          assignmentId: assignment.id,
+          reason: `assignment is 'completed' — operational completion is irreversible; its commitment is not released`,
+        })
+        return
+      }
+
       // 1. Fail the assignment (transitions → 'failed', finalizes parent if terminal).
-      //    CAS: if the assignment is already 'completed', this is a no-op — it
-      //    CANNOT fail a completed assignment (operational completion is irreversible).
+      //    CAS: if already 'failed', this is a no-op. If 'assigned' or 'executing',
+      //    it transitions to 'failed'.
       await runtime.failAssignment(
         tx,
         tenantId,
         assignment.id,
         execution.id,
       )
+
       // 2. Release the commitment IN THE SAME TRANSACTION — restores the
       //    reservation's remainingAmount. Atomic with the fail above.
+      //    GUARANTEED: the assignment is NOT 'completed' (we checked above).
       await releaseCommitment(
         tenantId,
         COMMITMENT_SOURCE_TYPE,
@@ -588,6 +628,17 @@ export async function releaseFailedAssignments(
         tx as unknown as ExtendedTransactionClient,
       )
     }, { timeout: 30000 })
+  }
+
+  // If any assignments were skipped because they were already completed, log
+  // them. This is a defensive boundary — the caller should not pass completed
+  // IDs, but if they do, we must not release their commitments.
+  if (skipped.length > 0) {
+    // Intentionally not throwing — the caller's intent (release the FAILED
+    // assignments) is still honored for the non-completed IDs. The skipped
+    // completed assignments are simply left untouched. This is the safer
+    // default: a caller mistake should not corrupt a completed assignment.
+    void skipped
   }
 
   void reason // reason is recorded via the ExecutionFailedError thrown by the caller
@@ -939,20 +990,53 @@ export async function executeDecision(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 12B Slice 4: Crash/retry contract — recoverStuckAssignments
+// Phase 12B Slice 4: Stuck-state recovery — recoverStuckAssignments
+// (NOT a crash proof — see EXECUTION_LEASE_MS docblock for the fencing
+// contract that is NOT YET IMPLEMENTED.)
 // ---------------------------------------------------------------------------
 
 /**
  * The lease duration (in milliseconds) after which an assignment stuck in
- * 'executing' is considered crashed. The physical adapter execution itself is
- * expected to complete in seconds-to-minutes; if an assignment has been
- * 'executing' for longer than this, the process likely died after
- * beginAssignmentExecution but before recordAssignmentResults/completeAssignment.
+ * 'executing' is considered STUCK (not necessarily crashed — see the fencing
+ * contract below).
  *
- * A retry of executeDecision will NOT re-execute a stuck assignment: this
- * function marks it 'failed' (via the runtime's failAssignment CAS), so the
- * retry skips it as terminal. The caller can then release its capacity via
- * releaseFailedAssignments.
+ * ⚠️  NOT PRODUCTION-SAFE FOR PHYSICAL EXECUTION ⚠️
+ *
+ * This timeout is a STUCK-STATE RECOVERY mechanism, NOT a crash proof. It
+ * cannot prove that the physical operation did not continue. There is a
+ * fundamental race:
+ *
+ *   t0  adapter begins physical operation
+ *   t1  process loses connection / pauses
+ *   t2  lease expires
+ *   t3  recoverStuckAssignments marks assignment failed
+ *   t4  capacity is released
+ *   t5  another request allocates the same resource
+ *   t6  the old physical operation is still running → DOUBLE EXECUTION
+ *
+ * This mechanism prevents the DATABASE-LEVEL double-execution (executeDecision
+ * won't call runtime.executeAssignment again for a terminal assignment), but it
+ * does NOT prevent the PHYSICAL-LEVEL double-execution (the adapter's
+ * execute() call may still be running on the resource).
+ *
+ * The REAL fencing contract (NOT YET IMPLEMENTED) requires:
+ *   ExecutionAssignment.executionLeaseId  — a unique lease token per execution attempt
+ *   ExecutionAssignment.leaseVersion     — incremented on each renewal/transfer
+ *   ExecutionAssignment.leaseUntil       — the lease expiry timestamp
+ *   ExecutionAssignment.workerIdentity    — the dispatcher/worker that owns the lease
+ *
+ * And the adapter/runtime boundary must support:
+ *   start execution → lease ownership acquired
+ *   heartbeat / renew → lease extended (leaseVersion unchanged)
+ *   complete OR cancel/fence → lease released OR fenced (leaseVersion bumped)
+ *
+ * A recovery process must establish: "the previous execution owner no longer
+ * owns the execution lease, AND the runtime/adapter has been fenced or
+ * cancellation has been confirmed" — NOT merely "the lease expired."
+ *
+ * For physical infrastructure (batteries, GPUs, industrial robots), that
+ * distinction is crucial. Until the fencing subsystem exists, this recovery
+ * is explicitly labeled NON-PRODUCTION-SAFE for physical execution.
  */
 export const EXECUTION_LEASE_MS = 5 * 60 * 1000 // 5 minutes
 
@@ -964,24 +1048,43 @@ export interface RecoveredAssignment {
 }
 
 /**
- * Recover assignments stuck in 'executing' state.
+ * Recover assignments stuck in 'executing' state (STUCK-STATE RECOVERY).
  *
- * Phase 12B Slice 4 CRASH/RETRY CONTRACT:
- * After a process crash, an assignment may be durable-stuck in 'executing':
+ * ⚠️  NOT PRODUCTION-SAFE — see EXECUTION_LEASE_MS docblock. This is a
+ * stuck-state recovery mechanism, NOT a crash proof. It cannot prevent
+ * physical double-execution if the old adapter call is still running.
+ *
+ * After a process crash (or a long pause), an assignment may be durable-stuck
+ * in 'executing':
  *   beginAssignmentExecution → EXECUTING
- *   (process dies here)
+ *   (process dies / pauses here)
  *   recordAssignmentResults never runs
  *   completeAssignment never runs
  *
  * A naive retry of executeDecision would re-execute the physical resource
  * (beginAssignmentExecution is a CAS no-op on 'executing', then
- * runtime.executeAssignment runs AGAIN). This function prevents that by marking
- * assignments whose 'executing' state is older than EXECUTION_LEASE_MS as
- * 'failed' via the runtime's failAssignment CAS.
+ * runtime.executeAssignment runs AGAIN — DOUBLE PHYSICAL EXECUTION). This
+ * function prevents the DATABASE-LEVEL re-execution by marking assignments
+ * whose 'executing' state is older than EXECUTION_LEASE_MS as 'failed' via
+ * the runtime's failAssignment CAS. After recovery, executeDecision skips the
+ * recovered assignment (it is now terminal 'failed').
  *
- * After recovery, a retry of executeDecision skips the recovered assignment
- * (it is now terminal 'failed'), and the caller can release its capacity via
- * releaseFailedAssignments.
+ * It also releases the recovered assignments' capacity via
+ * releaseFailedAssignments. The completed-assignment protection in
+ * releaseFailedAssignments ensures a completed assignment is never released
+ * (even if its ID is passed here by mistake).
+ *
+ * WHAT THIS DOES NOT DO:
+ *   - It does not fence the old adapter call. The physical operation may
+ *     still be running on the resource.
+ *   - It does not prevent the resource from being reallocated to a new request
+ *     while the old physical operation is still active.
+ *   - It does not prove the process crashed — it only proves the assignment
+ *     has been 'executing' longer than the lease.
+ *
+ * The real fencing contract (execution lease ownership + renewal +
+ * cancellation/fencing) is specified in the EXECUTION_LEASE_MS docblock above
+ * but NOT YET IMPLEMENTED.
  *
  * @param decisionId — the decision whose execution may have stuck assignments
  * @param leaseMs — the lease duration (default EXECUTION_LEASE_MS)

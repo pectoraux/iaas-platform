@@ -3912,3 +3912,45 @@ Stage Summary:
     Economics boundary                       ✅ deferred intentionally
     Protocol execution                       ✅ deferred intentionally
 - Slice 4 is ready for re-audit.
+
+---
+Task ID: 12B-slice-4.1-completed-protection
+Agent: main (Z.ai Code)
+Task: Fix the Slice 4 re-audit defects: (1) releaseFailedAssignments can still release a completed assignment's commitment because failAssignment is a no-op on 'completed' but releaseCommitment runs unconditionally afterward; (2) the lease-based timeout is labeled "crash/retry proof" but it is only stuck-state recovery — physical double-execution is still possible.
+
+Work Log:
+- DEFECT 1 (completed-assignment protection): failAssignment is a CAS no-op on 'completed' (operational completion is irreversible). But releaseCommitment is NOT a no-op — it releases the commitment regardless of the assignment's status. So the sequence: releaseFailedAssignments([completedId]) → failAssignment (no-op) → releaseCommitment (RELEASES IT) recreated the exact invariant violation the mixed-success fix was supposed to prevent.
+- FIX 1: inside the per-assignment transaction, AFTER loading the assignment's current status (re-read inside the tx for correctness against concurrent state changes), explicitly guard: if current.status === 'completed', SKIP the releaseCommitment call entirely (return early from the tx callback). The commitment + reservation are left untouched. The assignment is NOT failed (it stays completed). This is the completed-assignment protection.
+- FIX 1 (design choice): intentionally NOT throwing on a completed ID — the caller's intent (release the FAILED assignments) is still honored for non-completed IDs. The skipped completed assignments are simply left untouched. This is the safer default: a caller mistake should not corrupt a completed assignment.
+- REGRESSION TEST: added "Completed-assignment protection: releaseFailedAssignments([completedId]) leaves the commitment + reservation untouched". Marks an assignment as 'completed' via runtime.completeAssignment, then calls releaseFailedAssignments([assignmentId]). Asserts: commitment status UNCHANGED (not 'released'), reservation remainingAmount UNCHANGED (not restored), assignment still 'completed'.
+
+- DEFECT 2 (crash/retry claim too strong): the lease-based timeout (EXECUTION_LEASE_MS) cannot prove the physical operation did not continue. There is a fundamental race: t0 adapter begins → t1 process loses connection → t2 lease expires → t3 recoverStuckAssignments marks failed → t4 capacity released → t5 another request allocates the same resource → t6 the old physical operation is still running → DOUBLE PHYSICAL EXECUTION. The mechanism prevents DATABASE-level double-execution (executeDecision skips terminal assignments) but NOT PHYSICAL-level double-execution.
+- FIX 2 (downgrade): renamed "crash/retry contract" → "stuck-state recovery". Added explicit ⚠️ NOT PRODUCTION-SAFE FOR PHYSICAL EXECUTION warning to EXECUTION_LEASE_MS + recoverStuckAssignments docblocks. The test was renamed "Stuck-state recovery: ... (database-level idempotency)" to reflect what it actually proves.
+- FIX 2 (fencing contract spec): documented the REAL fencing contract that is NOT YET IMPLEMENTED: ExecutionAssignment.executionLeaseId + leaseVersion + leaseUntil + workerIdentity, and the adapter/runtime boundary must support start execution → lease ownership → heartbeat/renew → complete OR cancel/fence. A recovery process must establish "the previous execution owner no longer owns the execution lease, AND the runtime/adapter has been fenced or cancellation has been confirmed" — NOT merely "the lease expired." For physical infrastructure (batteries, GPUs, industrial robots), that distinction is crucial. Until the fencing subsystem exists, this recovery is explicitly labeled NON-PRODUCTION-SAFE.
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-4-execution.test.ts: 7/7 pass (was 6/6; +1 completed-protection regression), 60 expect() calls.
+    + Happy path: adapter executes → completed + parent finalized.
+    + Failure path: adapter failure → ExecutionFailedError + atomic release (split-brain=0).
+    + Idempotency: re-executing completed decision returns same results.
+    + Vertical-neutrality: no vertical imports.
+    + Mixed-success: completed A NOT released when B fails (targeted release; completed+released count=0).
+    + Stuck-state recovery (renamed): stuck 'executing' recovered → not re-executed on retry (database-level idempotency, NOT physical fencing).
+    + Completed-assignment protection (NEW): releaseFailedAssignments([completedId]) → commitment + reservation UNCHANGED.
+- Slice 3 integration regression: 4/4 pass (delegation + hardening intact).
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors.
+
+Stage Summary:
+- The completed-assignment protection defect is fixed: releaseFailedAssignments inspects the assignment's status inside the transaction and skips releaseCommitment entirely for 'completed' assignments. A completed assignment's commitment can NEVER be released through this API.
+- The crash/retry claim is honestly downgraded to "stuck-state recovery" with an explicit NON-PRODUCTION-SAFE warning. The real fencing contract (execution lease ownership + renewal + cancellation/fencing) is specified but NOT YET IMPLEMENTED.
+- Revised Slice 4 status:
+    Adapter execution                         ✅
+    Operational completion                  ✅
+    Targeted mixed-success release            ✅
+    Completed-assignment protection            ✅ FIXED
+    Stuck-state recovery (database-level)     ✅ DELIVERED (honestly named)
+    Physical crash/fencing guarantee          ❌ SPECIFIED, NOT IMPLEMENTED
+    Economics boundary                        ✅ deferred
+    Protocol execution                       ✅ deferred
+- Slice 4.1 hardening is ready for re-audit.

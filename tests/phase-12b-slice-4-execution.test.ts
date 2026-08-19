@@ -513,9 +513,11 @@ describeOrSkip('Phase 12B Slice 4: Actual Execution (executeDecision)', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Crash/retry contract: stuck 'executing' assignment → recover → retry skips it
+  // Stuck-state recovery: a stuck 'executing' assignment is recovered + not re-executed on retry
+  // (NOT a crash proof — see EXECUTION_LEASE_MS docblock. This tests the
+  // database-level idempotency guard, NOT physical fencing.)
   // -------------------------------------------------------------------------
-  it('Crash/retry: a stuck "executing" assignment is recovered + not re-executed on retry', async () => {
+  it('Stuck-state recovery: a stuck "executing" assignment is recovered + not re-executed on retry (database-level idempotency)', async () => {
     const f = await createSlice4Fixture({ label: 'Crash', capacityAmount: '8' })
     const { decisionId, executionId, assignmentId } = await submitAndCommit(f, {
       amount: '8',
@@ -564,5 +566,55 @@ describeOrSkip('Phase 12B Slice 4: Actual Execution (executeDecision)', () => {
     // No NEW assignment was created (still exactly one assignment for this execution).
     const assignments = await db.executionAssignment.findMany({ where: { executionId } })
     expect(assignments.length).toBe(1)
+  })
+
+  // -------------------------------------------------------------------------
+  // Completed-assignment protection: releaseFailedAssignments must NOT release
+  // a completed assignment's commitment (Slice 4.1 hardening regression)
+  // -------------------------------------------------------------------------
+  it('Completed-assignment protection: releaseFailedAssignments([completedId]) leaves the commitment + reservation untouched', async () => {
+    const f = await createSlice4Fixture({ label: 'Protect', capacityAmount: '8' })
+    const { decisionId, executionId, assignmentId, commitmentId, reservationId } = await submitAndCommit(f, {
+      amount: '8',
+      idempotencyKey: `s4-protect-${f.networkId}`,
+    })
+
+    // Capture the commitment + reservation state BEFORE.
+    const commitmentBefore = await db.capacityCommitment.findUnique({ where: { id: commitmentId } })
+    const reservationBefore = await db.capacityReservation.findUnique({ where: { id: reservationId } })
+    const commitmentStatusBefore = commitmentBefore!.status
+    const reservationRemainingBefore = parseFloat(reservationBefore!.remainingAmount)
+
+    // Mark the assignment as 'completed' via the runtime (operational completion).
+    // This is the state that must be PROTECTED from releaseFailedAssignments.
+    const { resolveRuntime } = await import('../src/lib/kernel/runtime')
+    const runtime = resolveRuntime('infrastructure')
+    await db.$transaction(async (tx) => {
+      await runtime.completeAssignment(tx, f.tenantId, assignmentId, executionId)
+    })
+
+    // Verify the assignment is now completed.
+    const completed = await db.executionAssignment.findUnique({ where: { id: assignmentId } })
+    expect(completed!.status).toBe('completed')
+
+    // ATTEMPT TO RELEASE A COMPLETED ASSIGNMENT — this must be a NO-OP for the
+    // commitment + reservation. The Slice 4.1 hardening inspects the
+    // assignment's status inside the transaction and skips releaseCommitment
+    // entirely for 'completed' assignments.
+    const { releaseFailedAssignments } = await import('../src/lib/control-plane')
+    await releaseFailedAssignments(decisionId, [assignmentId], 'attempt to release a completed assignment (must be rejected)')
+
+    // THE REGRESSION ASSERTION: the commitment is UNCHANGED (not released).
+    const commitmentAfter = await db.capacityCommitment.findUnique({ where: { id: commitmentId } })
+    expect(commitmentAfter!.status).toBe(commitmentStatusBefore)
+    expect(commitmentAfter!.status).not.toBe('released')
+
+    // THE REGRESSION ASSERTION: the reservation is UNCHANGED (not restored).
+    const reservationAfter = await db.capacityReservation.findUnique({ where: { id: reservationId } })
+    expect(parseFloat(reservationAfter!.remainingAmount)).toBe(reservationRemainingBefore)
+
+    // The assignment is still 'completed' (not failed).
+    const stillCompleted = await db.executionAssignment.findUnique({ where: { id: assignmentId } })
+    expect(stillCompleted!.status).toBe('completed')
   })
 })
