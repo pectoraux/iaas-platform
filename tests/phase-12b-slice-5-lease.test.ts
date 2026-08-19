@@ -667,4 +667,91 @@ describeOrSkip('Phase 12B Slice 5: Execution Lease — PostgreSQL concurrency', 
     const stillFenceRequired = await db.executionAssignment.findUnique({ where: { id: assignmentId } })
     expect(stillFenceRequired!.status).toBe(ASSIGNMENT_STATUS.FENCE_REQUIRED)
   })
+
+  // E15 (Concurrency fix): ACTIVE→FENCING and acquire race — final state
+  // can NEVER contain A=FENCING + B=ACTIVE. The assignment-row FOR UPDATE
+  // lock serializes the two operations.
+  it('E15: ACTIVE→FENCING racing acquire → final state never has FENCING+ACTIVE (assignment-row lock serializes)', async () => {
+    const f = await createFixture('E15')
+    const { assignmentId } = await submitAndCommit(f, 'e15')
+
+    // Worker A acquires a lease.
+    const acquireA = await acquireExecutionLease({
+      executionAssignmentId: assignmentId,
+      workerIdentity: 'worker-A',
+    })
+    expect(acquireA.acquired).toBe(true)
+    const leaseA = acquireA.lease!
+
+    // Fire TWO concurrent operations on separate sessions:
+    //   Tx A: fenceExecutionLease (ACTIVE → FENCING → UNSAFE_TO_RETRY)
+    //   Tx B: acquireExecutionLease (tries to create a new ACTIVE lease)
+    //
+    // The assignment-row FOR UPDATE lock serializes them:
+    //   - If A's transitionLeaseToFencing acquires the lock first, it
+    //     transitions lease A to FENCING. Then B's acquireExecutionLease
+    //     blocks on the assignment lock until A's tx commits. After A
+    //     commits, B sees the FENCING lease and is rejected.
+    //   - If B's acquireExecutionLease acquires the lock first, it checks
+    //     for non-terminal leases, sees lease A (ACTIVE), and is rejected.
+    //     Then A's transitionLeaseToFencing acquires the lock + transitions
+    //     to FENCING.
+    //
+    // Either way, the final state NEVER has A=FENCING + B=ACTIVE.
+    const results = await Promise.allSettled([
+      // Tx A: fence the lease (ACTIVE → FENCING → UNSAFE_TO_RETRY, since
+      // the simulated adapter has supportsCancellation=false).
+      fenceExecutionLease({
+        leaseId: leaseA.id,
+        leaseVersion: leaseA.leaseVersion,
+        reason: 'concurrent fence vs acquire test',
+        adapterSelection: {
+          assetId: f.assetId,
+          assetType: 'compute_node',
+          capabilityType: 'gpu_compute',
+        },
+      }),
+      // Tx B: try to acquire a new lease.
+      acquireExecutionLease({
+        executionAssignmentId: assignmentId,
+        workerIdentity: 'worker-B',
+      }),
+    ])
+
+    // Both should settle (neither should throw an uncaught error).
+    const fenceResult = results[0]
+    const acquireResult = results[1]
+
+    // The fence should have completed (either fenced or unsafe_to_retry).
+    if (fenceResult.status === 'fulfilled') {
+      expect(['fenced', 'unsafe_to_retry']).toContain(fenceResult.value.outcome)
+    }
+
+    // The acquire should have been rejected (could not acquire).
+    if (acquireResult.status === 'fulfilled') {
+      // If acquire ran AFTER the fence committed, it sees the
+      // UNSAFE_TO_RETRY/FENCING lease and is rejected.
+      // If acquire ran BEFORE the fence (acquired the assignment lock first),
+      // it sees the ACTIVE lease A and is rejected.
+      expect(acquireResult.value.acquired).toBe(false)
+    }
+
+    // THE CRITICAL INVARIANT: query the DB for the forbidden state.
+    // There must NEVER be a FENCING lease + an ACTIVE lease for the same
+    // assignment.
+    const leases = await db.executionLease.findMany({
+      where: { executionAssignmentId: assignmentId },
+    })
+
+    const fencingLeases = leases.filter((l) => l.status === 'fencing')
+    const activeLeases = leases.filter((l) => l.status === 'active')
+
+    // At most one non-terminal lease (the invariant).
+    expect(fencingLeases.length + activeLeases.length).toBeLessThanOrEqual(1)
+
+    // Specifically: if there's a FENCING lease, there must be NO ACTIVE lease.
+    if (fencingLeases.length > 0) {
+      expect(activeLeases.length).toBe(0)
+    }
+  })
 })

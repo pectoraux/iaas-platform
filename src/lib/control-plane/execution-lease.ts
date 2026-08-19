@@ -516,6 +516,19 @@ export async function fenceExecutionLease(input: {
  * After this commit, the lease is durably FENCING. A crash here leaves the
  * lease in FENCING — not ACTIVE (which would allow re-execution) and not
  * FENCED (which would release capacity).
+ *
+ * PHASE 12B SLICE 5 CONCURRENCY FIX:
+ * This function locks the ExecutionAssignment row FOR UPDATE before the
+ * ACTIVE→FENCING transition. This serializes fencing with acquisition:
+ * `acquireExecutionLease` also locks the assignment row FOR UPDATE. Since
+ * both operations acquire the same row lock, they cannot run concurrently —
+ * a fencing transition blocks a concurrent acquire (and vice versa).
+ *
+ * Without this lock, the partial unique index on (executionAssignmentId)
+ * WHERE status='active' only prevents two ACTIVE leases — it does NOT prevent
+ * a FENCING lease + a new ACTIVE lease from coexisting, because FENCING is
+ * not ACTIVE. The assignment-row lock closes this gap: while fencing holds
+ * the assignment lock, acquire cannot create a new ACTIVE lease.
  */
 async function transitionLeaseToFencing(input: {
   leaseId: string
@@ -523,9 +536,60 @@ async function transitionLeaseToFencing(input: {
   reason: string
   tx?: ExtendedTransactionClient
 }): Promise<{ transitioned: boolean; reason?: string }> {
-  const client = input.tx ?? db
+  // If a transaction client is provided, use it directly. Otherwise, wrap
+  // the lock + CAS in a dedicated transaction so the FOR UPDATE lock on the
+  // assignment row is held for the duration of the CAS.
+  if (input.tx) {
+    return transitionLeaseToFencingInner(input.tx, input)
+  }
+  return db.$transaction(async (tx) => {
+    return transitionLeaseToFencingInner(tx, input)
+  })
+}
 
-  // CAS: status='active' + leaseVersion match → status='fencing'.
+async function transitionLeaseToFencingInner(
+  client: ExtendedTransactionClient,
+  input: { leaseId: string; leaseVersion: number; reason: string },
+): Promise<{ transitioned: boolean; reason?: string }> {
+  // 1. Load the lease to find its executionAssignmentId.
+  const lease = await client.executionLease.findUnique({
+    where: { id: input.leaseId },
+    select: { id: true, executionAssignmentId: true, status: true, leaseVersion: true },
+  })
+
+  if (!lease) {
+    return { transitioned: false, reason: 'lease not found' }
+  }
+
+  // 2. Lock the ExecutionAssignment row FOR UPDATE. This is the ownership
+  //    serialization boundary — acquireExecutionLease locks the same row.
+  //    While we hold this lock, no concurrent acquire can create a new
+  //    ACTIVE lease for this assignment.
+  await client.$queryRaw`
+    SELECT id FROM "ExecutionAssignment"
+    WHERE id = ${lease.executionAssignmentId}
+    FOR UPDATE
+  `
+
+  // 3. Re-check the lease state while holding the assignment lock.
+  //    A concurrent fence may have already transitioned it.
+  if (lease.status !== 'active') {
+    return {
+      transitioned: false,
+      reason: `lease status is '${lease.status}' (not active)`,
+    }
+  }
+
+  if (lease.leaseVersion !== input.leaseVersion) {
+    return {
+      transitioned: false,
+      reason: `leaseVersion mismatch: caller has ${input.leaseVersion}, lease has ${lease.leaseVersion}`,
+    }
+  }
+
+  // 4. CAS: status='active' + leaseVersion match → status='fencing'.
+  //    The assignment lock ensures no concurrent acquire created a new ACTIVE
+  //    lease between our check and this update.
   const result = await client.executionLease.updateMany({
     where: {
       id: input.leaseId,

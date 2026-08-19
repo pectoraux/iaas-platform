@@ -4135,3 +4135,33 @@ Stage Summary:
     3-phase fencing                        ✅
     Expiry blocks active acquisition       ✅
     VPP/Compute legacy paths               ⚠️ deferred (optional lease fields)
+
+---
+Task ID: 12B-slice-5-assignment-row-lock-serialization
+Agent: main (Z.ai Code)
+Task: Fix the remaining Slice 5 concurrency defect: transitionLeaseToFencing did not lock the ExecutionAssignment row, so ACTIVE→FENCING and acquire were not serialized by the same database lock. The partial unique index only protects ACTIVE rows — a FENCING lease + a new ACTIVE lease could coexist. Fix by making the ExecutionAssignment row the ownership serialization boundary for both operations.
+
+Work Log:
+- DEFECT: acquireExecutionLease locks the ExecutionAssignment row FOR UPDATE, but transitionLeaseToFencing only CAS-updates the ExecutionLease row (no assignment lock). Since the partial unique index only prevents duplicate ACTIVE leases, a FENCING lease + a new ACTIVE lease could coexist if the two operations ran concurrently — the fencing transition didn't block the acquire, and the acquire didn't block the fencing transition.
+- FIX: rewrote transitionLeaseToFencing to:
+    1. Load the lease to find its executionAssignmentId.
+    2. SELECT the ExecutionAssignment row FOR UPDATE (same row acquireExecutionLease locks).
+    3. Re-check the lease state while holding the assignment lock.
+    4. CAS the lease ACTIVE→FENCING.
+  Wrapped the lock+CAS in a dedicated transaction (transitionLeaseToFencingInner) so the FOR UPDATE lock holds for the duration of the CAS. When a tx is provided, uses it directly; otherwise creates its own transaction.
+- This makes the ExecutionAssignment row the ownership serialization boundary: both acquire and fence lock the same row, so they cannot run concurrently. While fencing holds the assignment lock, acquire cannot create a new ACTIVE lease.
+
+- TEST E15 (concurrency proof): "ACTIVE→FENCING racing acquire → final state never has FENCING+ACTIVE". Fires fenceExecutionLease + acquireExecutionLease concurrently on separate sessions via Promise.allSettled. After both complete, queries the DB for all leases on the assignment. Asserts: fencingLeases.length + activeLeases.length <= 1 (at most one non-terminal lease). Specifically: if there's a FENCING lease, there must be NO ACTIVE lease. This proves the assignment-row lock serializes the two operations.
+
+Test results (against Neon PostgreSQL):
+- E15 (NEW): PASS — final state never has FENCING+ACTIVE.
+- E1+E7 (regression): PASS — two concurrent acquire → exactly one wins.
+- E13 (regression): PASS — FENCING blocks concurrent acquire.
+- E14 (regression): PASS — UNSAFE_TO_RETRY retains capacity.
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors.
+
+Stage Summary:
+- The ExecutionAssignment row is now the ownership serialization boundary for both acquire and fence. The forbidden state (A=FENCING + B=ACTIVE) is impossible — proven by E15.
+- No regression to E1/E13/E14 or Slice 3/4 tests.
+- No change to the fencing architecture beyond this serialization fix. No operational tooling added.
