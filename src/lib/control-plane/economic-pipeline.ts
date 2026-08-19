@@ -420,6 +420,14 @@ export async function processEconomicPipeline(input: {
  * durable objects (event, attestation, contribution, reward, ledger posting,
  * settlement) and resumes from the first missing stage.
  *
+ * DURABLE-STATE HYDRATION (hardened):
+ * Before re-driving the pipeline, this function inspects PostgreSQL durable
+ * state and reconstructs the checkpoint from existing durable objects. The
+ * checkpoint is treated as CACHEABLE RECOVERY METADATA — the durable domain
+ * objects are the source of truth. If a durable object exists but the
+ * checkpoint forgot its ID, the ID is recovered. No replacement object is
+ * created merely because the checkpoint forgot its ID.
+ *
  * Idempotent: each downstream step uses the deterministic idempotency key from
  * the checkpoint, so retries converge. No duplicate economic outcomes.
  *
@@ -453,21 +461,14 @@ export async function reconcileEconomicPipeline(
     }
   }
 
-  // Inspect durable objects to determine the ACTUAL stage (the checkpoint's
-  // stage field is a hint; the existence of durable objects is the source of
-  // truth — exactly the VPP reconcileAssignment pattern, but generic).
-  //
-  // FIRST-STAGE RECOVERY: if eventId is missing from the checkpoint (e.g.,
-  // the pipeline crashed after ingestEvent created the Event but before the
-  // checkpoint recorded its Prisma id), find the Event by its deterministic
-  // identity: (tenantId, externalEventId = eventIdempotencyKey). This does
-  // NOT require the original signingKey — the Event was already ingested +
-  // signed during the first run. We only need the signingKey if we're
-  // RE-ingesting (which we won't — the Event already exists).
+  // --- DURABLE-STATE HYDRATION ---
+  // Inspect PostgreSQL durable state and reconstruct the checkpoint from
+  // existing durable objects. The checkpoint is derived/cacheable recovery
+  // metadata — the durable domain objects are the source of truth.
+  const updates: Record<string, string | null> = {}
 
-  // Load the event: by Prisma id if the checkpoint has it, otherwise by
-  // the deterministic (tenantId, externalEventId) identity.
-  let event: { id: string; payloadJson: string; capabilityType: string; occurredAt: Date; sequence: number | null; deviceId: string | null; attestations: Array<{ id: string }> } | null = null
+  // R1: Event — find by checkpoint ID, or by deterministic (tenantId, externalEventId).
+  let event: { id: string; status: string; payloadJson: string; capabilityType: string; occurredAt: Date; sequence: number | null; deviceId: string | null; attestations: Array<{ id: string }> } | null = null
   if (state.eventId) {
     event = await db.event.findUnique({
       where: { id: state.eventId },
@@ -475,7 +476,6 @@ export async function reconcileEconomicPipeline(
     })
   }
   if (!event) {
-    // First-stage recovery: find by deterministic identity.
     event = await db.event.findUnique({
       where: {
         tenantId_externalEventId: {
@@ -486,18 +486,105 @@ export async function reconcileEconomicPipeline(
       include: { attestations: true },
     })
     if (event) {
-      // Attach the rediscovered eventId to the checkpoint so future
-      // reconciliation calls don't need to re-discover it.
-      await db.economicPipelineState.update({
-        where: { executionAssignmentId },
-        data: { eventId: event.id },
-      })
+      updates.eventId = event.id
       state.eventId = event.id
     }
   }
 
-  // Load the assignment's actuals (recorded by recordAssignmentResults
-  // during operational completion — these are NOT vertical-specific).
+  // R2: Attestation — if the event exists + is verified, find the attestation.
+  if (event && event.attestations.length > 0 && !state.attestationId) {
+    const attestation = event.attestations[0]
+    updates.attestationId = attestation.id
+    state.attestationId = attestation.id
+  }
+
+  // R3: Contribution — find by checkpoint ID, or by deterministic (tenantId, idempotencyKey).
+  if (!state.contributionId) {
+    const contribution = await db.contribution.findUnique({
+      where: {
+        tenantId_idempotencyKey: {
+          tenantId: state.tenantId,
+          idempotencyKey: state.contributionIdempotencyKey,
+        },
+      },
+    })
+    if (contribution) {
+      updates.contributionId = contribution.id
+      state.contributionId = contribution.id
+    }
+  }
+
+  // R4: Reward — find by checkpoint ID, or by deterministic (tenantId, idempotencyKey).
+  if (!state.rewardId) {
+    const reward = await db.reward.findUnique({
+      where: {
+        tenantId_idempotencyKey: {
+          tenantId: state.tenantId,
+          idempotencyKey: state.rewardIdempotencyKey,
+        },
+      },
+    })
+    if (reward) {
+      updates.rewardId = reward.id
+      state.rewardId = reward.id
+    }
+  }
+
+  // R5: LedgerPosting — find by checkpoint ID, or by deterministic (tenantId, idempotencyKey).
+  if (!state.ledgerPostingId) {
+    const posting = await db.ledgerPosting.findUnique({
+      where: {
+        tenantId_idempotencyKey: {
+          tenantId: state.tenantId,
+          idempotencyKey: state.ledgerIdempotencyKey,
+        },
+      },
+    })
+    if (posting) {
+      updates.ledgerPostingId = posting.id
+      state.ledgerPostingId = posting.id
+    }
+  }
+
+  // R6: Settlement — find by checkpoint ID, or by the reward's 1:1 settlement.
+  if (!state.settlementId && state.rewardId) {
+    const settlement = await db.settlement.findUnique({
+      where: { rewardId: state.rewardId },
+    })
+    if (settlement) {
+      updates.settlementId = settlement.id
+      state.settlementId = settlement.id
+    }
+  }
+
+  // Persist any recovered IDs to the checkpoint.
+  if (Object.keys(updates).length > 0) {
+    await db.economicPipelineState.update({
+      where: { executionAssignmentId },
+      data: updates,
+    })
+  }
+
+  // --- Check for verification rejection (terminal negative state) ---
+  // If the event exists but is rejected, reconciliation must NOT create
+  // economic value. This is terminal — no contribution/reward/ledger/settlement.
+  if (event && event.status === 'rejected' && !state.attestationId) {
+    await db.economicPipelineState.update({
+      where: { executionAssignmentId },
+      data: {
+        stage: ECONOMIC_STAGE.RECONCILIATION_REQUIRED,
+        reconciliationReason: `Event ${event.id} was rejected by verification — no economic value can be created`,
+      },
+    })
+    return {
+      assignmentId: executionAssignmentId,
+      stage: ECONOMIC_STAGE.RECONCILIATION_REQUIRED,
+      eventId: state.eventId ?? undefined,
+      replayed: false,
+    }
+  }
+
+  // Load the assignment's actuals.
   const assignment = await db.executionAssignment.findUnique({
     where: { id: executionAssignmentId },
     select: { actualQuantity: true, actualUnit: true, capabilityType: true },
@@ -506,10 +593,6 @@ export async function reconcileEconomicPipeline(
   const actualUnit = assignment?.actualUnit ?? ''
   const capabilityType = event?.capabilityType ?? assignment?.capabilityType ?? ''
 
-  // If the event exists, load its telemetry payload (for re-processing
-  // if needed). If the event doesn't exist, we'll need the caller to
-  // provide the original telemetry input — but in most reconciliation
-  // scenarios, the event was already ingested before the crash.
   const telemetryPayload: Record<string, unknown> = event
     ? (JSON.parse(event.payloadJson as string) as Record<string, unknown>)
     : {}
@@ -524,7 +607,8 @@ export async function reconcileEconomicPipeline(
   const signingKey = ''
 
   // Re-drive the pipeline. processEconomicPipeline will skip completed stages
-  // (each stage checks if the durable object ID is already set).
+  // (each stage checks if the durable object ID is already set — which we
+  // just hydrated from durable state).
   return processEconomicPipeline({
     executionAssignmentId,
     telemetryPayload,

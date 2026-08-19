@@ -4299,3 +4299,50 @@ Test results (against Neon PostgreSQL):
     + F (vertical neutrality): no vertical imports. PASS.
 - phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
 - ESLint clean. tsc zero errors in Slice 6 files.
+
+---
+Task ID: 12B-slice-6-durable-reconciliation-hardening
+Agent: main (Z.ai Code)
+Task: Harden Slice 6 reconciliation to prove durable PostgreSQL crash-boundary correctness. The existing Test D simulated failure by deleting downstream objects and rebuilding them — it proved deterministic reconstruction after deletion, NOT the actual crash boundary (durable object committed + checkpoint ID lost → restart → reconciliation → same object reused, no duplicate). Implement true durable reconciliation + add crash-boundary tests R1-R6 + concurrent reconciliation test R7.
+
+Work Log:
+- AUDIT: inspected the current reconcileEconomicPipeline. It only hydrated the Event from durable state (by tenantId + externalEventId). It did NOT hydrate Attestation, Contribution, Reward, LedgerPosting, or Settlement from durable state. The processEconomicPipeline relied on service-level idempotency (createContribution etc. return existing objects by idempotencyKey) — which works but is fragile. The checkpoint's stage/IDs were treated as authoritative over durable domain objects.
+- FIX: rewrote reconcileEconomicPipeline to hydrate ALL durable objects from PostgreSQL before re-driving the pipeline:
+    R1: Event — find by checkpoint ID, or by (tenantId, externalEventId).
+    R2: Attestation — find from the Event's attestations relation.
+    R3: Contribution — find by (tenantId, idempotencyKey).
+    R4: Reward — find by (tenantId, idempotencyKey).
+    R5: LedgerPosting — find by (tenantId, idempotencyKey).
+    R6: Settlement — find by (rewardId) (1:1 unique).
+  All recovered IDs are persisted to the checkpoint in a single update. If the event is rejected, reconciliation fails closed (no economic value created).
+- INVARIANT: checkpoint = derived/cacheable recovery metadata. Durable domain objects = source of truth. Never create a replacement object merely because the checkpoint forgot its ID.
+- VERIFICATION REJECTION: if the event exists but is rejected, reconciliation marks the pipeline as reconciliation_required with the reason "Event was rejected by verification — no economic value can be created." No contribution/reward/ledger/settlement is created.
+- CRASH-BOUNDARY TESTS (R1-R7): each test constructs the exact post-crash database state (durable object exists + checkpoint ID null + other durable objects intact), then invokes reconcileEconomicPipeline:
+    R1: eventId NULL → existing Event reused (not re-ingested). PASS.
+    R2: attestationId NULL → existing Attestation reused. PASS.
+    R3: contributionId NULL → existing Contribution reused. PASS.
+    R4: rewardId NULL → existing Reward reused, no duplicate ledger posting. PASS.
+    R5: ledgerPostingId NULL → existing LedgerPosting reused, no double buyer debit. PASS.
+    R6: settlementId NULL → existing Settlement reused, no double payout. PASS.
+    R7: ALL downstream IDs cleared + two concurrent reconcileEconomicPipeline calls → exactly one contribution/reward/posting/settlement, no duplicates, no double debit. PASS.
+  Each test asserts: the SAME object ID is reused (not a new one), DB-level count is exactly one, and (for R4/R5) buyer funding is not consumed twice.
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-6-crash-boundary.test.ts: 7/7 pass (R1-R7), 40+ expect() calls.
+- tests/phase-12b-slice-6-economic.test.ts: 6/6 pass (existing A/B/C/D/E/F tests).
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors in Slice 6 files.
+
+FINAL ACCEPTANCE GATE STATUS:
+1. Verification rejection cannot create economic value. ✅ (Test C + rejection check in reconcileEconomicPipeline)
+2. Each durable economic stage survives checkpoint loss. ✅ (R1-R6)
+3. Reconciliation reuses durable objects instead of recreating them. ✅ (R1-R6 assert same ID reused)
+4. Reconciliation is safe across process restart. ✅ (reconcileEconomicPipeline depends only on PostgreSQL durable state, not in-memory variables or signingKey)
+5. Concurrent reconciliation produces exactly one economic outcome. ✅ (R7)
+6. No double funding debit. ✅ (R4, R5, R7 assert exactly one reward posting)
+7. No double ledger posting. ✅ (R5, R7)
+8. No double settlement/payout. ✅ (R6, R7)
+9. No vertical-specific imports. ✅ (Test F: static source check)
+10. All existing tests remain green. ✅ (49/49 + 16/16)
+
+PHASE 12B SLICE 6 — HARDENED / COMPLETE
