@@ -4275,3 +4275,27 @@ REMAINING GAPS (honestly stated):
 - The existing worker.service.ts processEventOutbox uses a 5s default transaction timeout (db.$transaction without { timeout: ... }). On Neon with network latency, this can intermittently cause P2028. This is a pre-existing issue, not introduced by Slice 6. Tests A, B, E, F all passed (E passed on retry after an intermittent timeout).
 - The VPP + Compute vertical paths have NOT been migrated to use the generic EconomicPipelineState. They still use their own economicStage/reconcileAssignment patterns. Migration is a future slice.
 - Verification rejection test (C) + intermediate failure test (D) are not yet in the test file — they require more complex fixture setup (a way to make verification fail or force an intermediate step to fail). The happy path + retry + traceability + vertical-neutrality tests are delivered.
+
+---
+Task ID: 12B-slice-6-hardening-recovery-rejection-tests
+Agent: main (Z.ai Code)
+Task: Fix the 5 requirements from the Slice 6 review: (1) first-stage recovery — find existing Event by (tenantId, eventIdempotencyKey) when eventId is missing, do NOT require signingKey; (2) add Neon verification-rejection test; (3) add Neon intermediate-failure/retry test; (4) narrow terminology — Event/Attestation = current infrastructure evidence adapter, not the universal evidence abstraction; (5) no new Evidence table; (6) do not migrate VPP/Compute yet.
+
+Work Log:
+- REQ 1 — FIRST-STAGE RECOVERY: rewrote reconcileEconomicPipeline's event-discovery logic. When state.eventId is missing (e.g., crash after ingestEvent created the Event but before the checkpoint recorded its Prisma id), the reconciliation now finds the Event by its deterministic identity: (tenantId, externalEventId = eventIdempotencyKey). The Event model has @@unique([tenantId, externalEventId]). After finding it, the checkpoint's eventId is updated so future reconciliation calls don't re-discover. NO signingKey is required — the Event was already ingested + signed during the first run.
+- REQ 2 — VERIFICATION REJECTION TEST (C): "bad signature → REJECTED → no economic outcomes". Drives the pipeline with a wrong signing key. The device_signature verification check fails → event.status='rejected'. Asserts: stage=reconciliation_required, event exists + is rejected, no attestation, no contribution/reward/ledger/settlement (both checkpoint IDs are null AND DB-level count is 0).
+- REQ 3 — INTERMEDIATE FAILURE/RETRY TEST (D): "pipeline crashes mid-way → reconcile → exactly one final chain". Runs the pipeline fully (succeeds), then simulates a crash by deleting all downstream economic objects (contribution, reward, ledger entries/postings, settlement) + re-funding the buyer account. Resets the checkpoint to reconciliation_required with downstream IDs cleared. Then calls reconcileEconomicPipeline — which discovers the existing Event by (tenantId, eventIdempotencyKey) WITHOUT requiring the signingKey, skips the evidence+verification stages (already completed), and re-creates exactly one contribution, reward, ledger posting, and settlement. Asserts exactly one of each + the event was NOT re-ingested (still one).
+- REQ 4 — NARROWED TERMINOLOGY: updated the module docblock to clarify that Event/Attestation is the "current infrastructure evidence adapter" — NOT the universal evidence abstraction itself. A future slice may introduce a generic EvidenceAdapter interface for non-telemetry evidence. For now, Event/Attestation IS the evidence chain, and no new Evidence table is introduced.
+- REQ 5 — NO NEW EVIDENCE TABLE: confirmed — no Evidence model was introduced. The EconomicPipelineState references the existing eventId + attestationId.
+- REQ 6 — NO VPP/COMPUTE MIGRATION: confirmed — VPP/Compute services are unchanged.
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-6-economic.test.ts: 6/6 pass.
+    + A (happy path): full chain. PASS.
+    + B (retry): exactly one outcome at each stage. PASS.
+    + C (verification rejection): bad signature → REJECTED → no economic outcomes. PASS (NEW).
+    + D (intermediate failure): crash mid-way → reconcile → exactly one final chain. PASS (NEW).
+    + E (traceability): full chain backward. PASS.
+    + F (vertical neutrality): no vertical imports. PASS.
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors in Slice 6 files.

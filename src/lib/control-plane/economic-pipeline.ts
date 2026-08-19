@@ -1,8 +1,18 @@
 // =============================================================================
 // Control Plane: Economic Pipeline Orchestrator (Phase 12B — Slice 6)
 // =============================================================================
-// The generic Evidence → Verification → Contribution → Reward → Ledger → Settlement
-// pipeline checkpoint + reconciliation layer.
+// The generic economic pipeline checkpoint + reconciliation layer.
+//
+// EVIDENCE ADAPTER (terminology — narrowed):
+//   The current evidence chain for infrastructure networks is:
+//     Event (device-signed telemetry) → VerificationResult → Attestation.
+//   This is the "current infrastructure evidence adapter" — NOT the universal
+//   evidence abstraction itself. A future slice may introduce a generic
+//   Evidence model that supports non-telemetry evidence (meter readings,
+//   protocol receipts, work completion reports, etc.) via a pluggable
+//   EvidenceAdapter interface. For now, Event/Attestation IS the evidence
+//   chain, and this orchestrator drives it without introducing a new
+//   Evidence table.
 //
 // This module does NOT introduce a new economic primitive. It orchestrates the
 // EXISTING generic primitives:
@@ -446,50 +456,72 @@ export async function reconcileEconomicPipeline(
   // Inspect durable objects to determine the ACTUAL stage (the checkpoint's
   // stage field is a hint; the existence of durable objects is the source of
   // truth — exactly the VPP reconcileAssignment pattern, but generic).
-
-  // The reconciliation re-runs processEconomicPipeline, which checks each
-  // durable object ID + skips completed stages. Because every step is
-  // idempotent (deterministic keys), this is safe — no duplicate outcomes.
   //
-  // The caller must provide the original telemetry input (we can't re-derive
-  // it from the checkpoint alone — it was a vertical-specific payload).
-  // For reconciliation, we load the original event's payload from the DB
-  // if it exists, so we can resume without the caller re-providing it.
+  // FIRST-STAGE RECOVERY: if eventId is missing from the checkpoint (e.g.,
+  // the pipeline crashed after ingestEvent created the Event but before the
+  // checkpoint recorded its Prisma id), find the Event by its deterministic
+  // identity: (tenantId, externalEventId = eventIdempotencyKey). This does
+  // NOT require the original signingKey — the Event was already ingested +
+  // signed during the first run. We only need the signingKey if we're
+  // RE-ingesting (which we won't — the Event already exists).
 
-  // Load the event if it exists (to get the telemetry payload for re-processing).
-  let telemetryPayload: Record<string, unknown> = {}
-  let actualQuantity = '0'
-  let actualUnit = ''
-  let deviceId = ''
-  let signingKey = ''
-  let capabilityType = ''
-  let timestamp = new Date().toISOString()
-  let sequence = 0
-
+  // Load the event: by Prisma id if the checkpoint has it, otherwise by
+  // the deterministic (tenantId, externalEventId) identity.
+  let event: { id: string; payloadJson: string; capabilityType: string; occurredAt: Date; sequence: number | null; deviceId: string | null; attestations: Array<{ id: string }> } | null = null
   if (state.eventId) {
-    const event = await db.event.findUnique({
+    event = await db.event.findUnique({
       where: { id: state.eventId },
-      include: { device: { include: { credential: true } }, attestations: true },
+      include: { attestations: true },
+    })
+  }
+  if (!event) {
+    // First-stage recovery: find by deterministic identity.
+    event = await db.event.findUnique({
+      where: {
+        tenantId_externalEventId: {
+          tenantId: state.tenantId,
+          externalEventId: state.eventIdempotencyKey,
+        },
+      },
+      include: { attestations: true },
     })
     if (event) {
-      telemetryPayload = JSON.parse(event.payloadJson as string) as Record<string, unknown>
-      // The actual quantity comes from the assignment's actualQuantity (recorded
-      // by recordAssignmentResults during operational completion).
-      const assignment = await db.executionAssignment.findUnique({
-        where: { id: executionAssignmentId },
-        select: { actualQuantity: true, actualUnit: true, capabilityType: true },
+      // Attach the rediscovered eventId to the checkpoint so future
+      // reconciliation calls don't need to re-discover it.
+      await db.economicPipelineState.update({
+        where: { executionAssignmentId },
+        data: { eventId: event.id },
       })
-      actualQuantity = assignment?.actualQuantity ?? '0'
-      actualUnit = assignment?.actualUnit ?? ''
-      capabilityType = event.capabilityType
-      timestamp = event.occurredAt.toISOString()
-      sequence = event.sequence ?? 0
-      // We can't recover the signingKey (it's a secret derived from the
-      // provisioningSecret, which is never stored). But we don't need it for
-      // reconciliation — the event is already ingested + signed. We only need
-      // it if we're re-ingesting (which we won't — the event already exists).
+      state.eventId = event.id
     }
   }
+
+  // Load the assignment's actuals (recorded by recordAssignmentResults
+  // during operational completion — these are NOT vertical-specific).
+  const assignment = await db.executionAssignment.findUnique({
+    where: { id: executionAssignmentId },
+    select: { actualQuantity: true, actualUnit: true, capabilityType: true },
+  })
+  const actualQuantity = assignment?.actualQuantity ?? '0'
+  const actualUnit = assignment?.actualUnit ?? ''
+  const capabilityType = event?.capabilityType ?? assignment?.capabilityType ?? ''
+
+  // If the event exists, load its telemetry payload (for re-processing
+  // if needed). If the event doesn't exist, we'll need the caller to
+  // provide the original telemetry input — but in most reconciliation
+  // scenarios, the event was already ingested before the crash.
+  const telemetryPayload: Record<string, unknown> = event
+    ? (JSON.parse(event.payloadJson as string) as Record<string, unknown>)
+    : {}
+  const timestamp = event?.occurredAt.toISOString() ?? new Date().toISOString()
+  const sequence = event?.sequence ?? 0
+  const deviceId = event?.deviceId ?? ''
+
+  // We do NOT need the signingKey for reconciliation. The event is already
+  // ingested + signed. processEconomicPipeline will skip the ingest stage
+  // (state.eventId is now set) and proceed directly to verification +
+  // downstream steps.
+  const signingKey = ''
 
   // Re-drive the pipeline. processEconomicPipeline will skip completed stages
   // (each stage checks if the durable object ID is already set).

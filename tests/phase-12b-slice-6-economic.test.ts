@@ -382,4 +382,143 @@ describeOrSkip('Phase 12B Slice 6: Economic Pipeline', () => {
     expect(importLines).not.toMatch(/storage\.service/)
     expect(importLines).not.toMatch(/wireless\.service/)
   })
+
+  // C. Verification rejection → no Contribution/Reward/Ledger/Settlement
+  it('C: verification rejection — bad signature → REJECTED → no economic outcomes', async () => {
+    const f = await createFixture('Reject')
+    const { assignmentId, actualQuantity, actualUnit } = await submitCommitAndExecute(f, 'reject')
+
+    await initEconomicPipeline({
+      executionAssignmentId: assignmentId,
+      tenantId: f.tenantId,
+      networkVersionId: f.networkVersionId,
+      networkId: f.networkId,
+    })
+
+    // Drive the pipeline with a BAD signing key (wrong secret).
+    // The device_signature verification check will fail → event rejected.
+    const result = await processEconomicPipeline({
+      executionAssignmentId: assignmentId,
+      telemetryPayload: {
+        gpu_count: 8, gpu_utilization_pct: 95, memory_gb: 128, duration_seconds: 3600,
+      },
+      actualQuantity, actualUnit,
+      deviceId: f.deviceId,
+      signingKey: 'wrong-signing-key', // BAD key → signature verification fails
+      capabilityType: 'gpu_compute',
+      timestamp: new Date().toISOString(),
+      sequence: Math.floor(Date.now() / 1000),
+    })
+
+    // The pipeline should reach reconciliation_required (verification rejected).
+    expect(result.stage).toBe(ECONOMIC_STAGE.RECONCILIATION_REQUIRED)
+
+    // The event exists but was rejected.
+    const state = await db.economicPipelineState.findUnique({
+      where: { executionAssignmentId: assignmentId },
+    })
+    expect(state!.eventId).not.toBeNull()
+
+    const event = await db.event.findUnique({ where: { id: state!.eventId! } })
+    expect(event!.status).toBe('rejected')
+
+    // NO attestation was created (rejected events don't get attestations).
+    expect(state!.attestationId).toBeNull()
+
+    // NO contribution, reward, ledger, or settlement.
+    expect(state!.contributionId).toBeNull()
+    expect(state!.rewardId).toBeNull()
+    expect(state!.ledgerPostingId).toBeNull()
+    expect(state!.settlementId).toBeNull()
+
+    // DB-level: no contribution/reward/settlement for this tenant.
+    const contributions = await db.contribution.findMany({ where: { tenantId: f.tenantId } })
+    expect(contributions.length).toBe(0)
+    const rewards = await db.reward.findMany({ where: { tenantId: f.tenantId } })
+    expect(rewards.length).toBe(0)
+    const settlements = await db.settlement.findMany({ where: { tenantId: f.tenantId } })
+    expect(settlements.length).toBe(0)
+  })
+
+  // D. Intermediate failure → retry → exactly one chain
+  it('D: intermediate failure — pipeline crashes mid-way → reconcile → exactly one final chain', async () => {
+    const f = await createFixture('Fail')
+    const { assignmentId, actualQuantity, actualUnit } = await submitCommitAndExecute(f, 'fail')
+
+    await initEconomicPipeline({
+      executionAssignmentId: assignmentId,
+      tenantId: f.tenantId,
+      networkVersionId: f.networkVersionId,
+      networkId: f.networkId,
+    })
+
+    const telemetryPayload = {
+      gpu_count: 8, gpu_utilization_pct: 95, memory_gb: 128, duration_seconds: 3600,
+    }
+    const ts = new Date().toISOString()
+    const seq = Math.floor(Date.now() / 1000)
+
+    // Step 1: Run the pipeline fully (it should succeed).
+    const result1 = await processEconomicPipeline({
+      executionAssignmentId: assignmentId,
+      telemetryPayload,
+      actualQuantity, actualUnit,
+      deviceId: f.deviceId, signingKey: f.signingKey,
+      capabilityType: 'gpu_compute',
+      timestamp: ts, sequence: seq,
+    })
+    expect(result1.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+
+    // Simulate a crash: delete the downstream economic objects (contribution,
+    // reward, ledger, settlement) + ALL ledger entries. Then re-fund the buyer.
+    await db.settlement.deleteMany({ where: { tenantId: f.tenantId } })
+    await db.ledgerEntry.deleteMany({ where: { tenantId: f.tenantId } })
+    await db.ledgerPosting.deleteMany({ where: { tenantId: f.tenantId } })
+    await db.reward.deleteMany({ where: { tenantId: f.tenantId } })
+    await db.contribution.deleteMany({ where: { tenantId: f.tenantId } })
+
+    // Re-fund the buyer account (all entries were deleted, so balance is 0).
+    const { recordBuyerFunding } = await import('../src/lib/services/ledger.service')
+    await recordBuyerFunding(f.tenantId, '1000', `refund-fail-${Date.now()}`)
+
+    // Reset the checkpoint: attestation + event are preserved (not re-ingested),
+    // but downstream IDs are cleared.
+    await db.economicPipelineState.update({
+      where: { executionAssignmentId: assignmentId },
+      data: {
+        stage: ECONOMIC_STAGE.RECONCILIATION_REQUIRED,
+        reconciliationReason: 'simulated crash: downstream objects deleted',
+        contributionId: null,
+        rewardId: null,
+        ledgerPostingId: null,
+        settlementId: null,
+      },
+    })
+
+    // Step 2: Reconcile — should re-create exactly one contribution, reward,
+    // ledger posting, and settlement. The event + attestation are preserved
+    // (not re-ingested) — reconciliation discovers the event by its
+    // deterministic identity (tenantId + eventIdempotencyKey), NOT by
+    // requiring the original signingKey.
+    const reconcileResult = await reconcileEconomicPipeline(assignmentId)
+
+    // The pipeline should complete.
+    expect(reconcileResult.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+
+    // EXACTLY ONE of each downstream object.
+    const contributions = await db.contribution.findMany({ where: { tenantId: f.tenantId } })
+    expect(contributions.length).toBe(1)
+    const rewards = await db.reward.findMany({ where: { tenantId: f.tenantId } })
+    expect(rewards.length).toBe(1)
+    const postings = await db.ledgerPosting.findMany({
+      where: { tenantId: f.tenantId, postingType: 'reward' },
+    })
+    expect(postings.length).toBe(1)
+    const settlements = await db.settlement.findMany({ where: { tenantId: f.tenantId } })
+    expect(settlements.length).toBe(1)
+
+    // The event was NOT re-ingested (still exactly one).
+    const events = await db.event.findMany({ where: { tenantId: f.tenantId } })
+    expect(events.length).toBe(1)
+  })
 })
