@@ -4199,3 +4199,33 @@ Stage Summary:
 - acquireExecutionLease now wraps its entire critical section in a transaction when no tx is provided. The FOR UPDATE lock holds until COMMIT, serializing acquire with fence.
 - The deterministic E16 test proves the lock is held (not just that a randomized race happened to produce a safe outcome).
 - Slice 5 is ready to freeze.
+
+---
+Task ID: 12B-slice-5-e16-proof-correction
+Agent: main (Z.ai Code)
+Task: Fix the E16 proof-defect (not a runtime defect). The old E16 manually locked the assignment row in a separate transaction, then called acquireExecutionLease — which proved PostgreSQL blocks a second transaction on the row, but did NOT distinguish the transaction-wrapped implementation from the old autocommit one (both would block on the SELECT). Replace with a deterministic test that pauses INSIDE the actual acquireExecutionLease critical section via a test-only afterAssignmentLock hook.
+
+Work Log:
+- Added test-only `afterAssignmentLock?: () => Promise<void>` hook to acquireExecutionLease input. Called AFTER the assignment FOR UPDATE lock is acquired but BEFORE the lease INSERT + assignment update. No effect on production behavior when omitted. Documented as TEST-ONLY.
+- Rewrote E16: "acquire holds assignment lock inside its critical section — concurrent acquire is blocked until first commits". The test:
+    1. Fires acquireA with afterAssignmentLock hook. acquireA locks the assignment FOR UPDATE (inside the db.$transaction wrapper), calls the hook, signals it's paused, waits on a release signal.
+    2. Waits for acquireA's "locked" signal (proves acquireA is INSIDE its critical section, holding the lock).
+    3. Fires acquireB (concurrent acquireExecutionLease, no hook).
+    4. Waits 500ms. Asserts acquireBCompleted === false (PROOF: acquireB is blocked on the assignment FOR UPDATE lock that acquireA holds).
+    5. Releases acquireA's barrier. acquireA's hook throws (test-controlled rollback), causing the transaction to ROLLBACK (no lease created, no assignment update). The lock is released on rollback.
+    6. acquireA's promise rejects with 'test-controlled rollback'.
+    7. acquireB now completes (lock released + no lease exists) and acquires the lease.
+  THE PROOF: acquireB was blocked for 500ms while acquireA held the assignment lock INSIDE its critical section (after the SELECT, before the INSERT). This distinguishes the transaction-wrapped implementation from the old autocommit one: if the lock were released after the SELECT (the old bug — using `db` instead of a transaction wrapper), acquireB would have completed immediately.
+
+- Production code unchanged (only the test-only hook was added, which is a no-op when omitted).
+
+Test results (against Neon PostgreSQL):
+- E16 (CORRECTED): PASS — acquire holds assignment lock inside its critical section (concurrent acquire blocked for 500ms, then completed after rollback).
+- E1+E7 (regression): PASS — two concurrent acquire → exactly one wins.
+- E15 (regression): PASS — ACTIVE→FENCING racing acquire → final state never has FENCING+ACTIVE.
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors.
+
+Stage Summary:
+- The E16 proof is now valid: it pauses INSIDE the actual acquireExecutionLease function (via the test-only afterAssignmentLock hook), not in a manually created transaction. This proves the transaction wrapper holds the FOR UPDATE lock across the critical section.
+- Slice 5 is ready to freeze.

@@ -163,6 +163,18 @@ export async function acquireExecutionLease(input: {
   workerIdentity: string
   leaseMs?: number
   tx?: ExtendedTransactionClient
+  /**
+   * TEST-ONLY HOOK (Phase 12B Slice 5 proof discipline):
+   * Called AFTER the assignment FOR UPDATE lock is acquired but BEFORE the
+   * lease INSERT + assignment update. This lets a deterministic test pause
+   * the actual acquireExecutionLease function inside its critical section —
+   * proving the lock is held across the critical section (not just during
+   * the SELECT).
+   *
+   * Production callers MUST NOT pass this hook. It has no effect on
+   * production behavior when omitted.
+   */
+  afterAssignmentLock?: () => Promise<void>
 }): Promise<AcquireLeaseResult> {
   // If a transaction client is provided, use it directly. Otherwise, wrap
   // the ENTIRE critical section in a dedicated transaction so the FOR UPDATE
@@ -196,6 +208,7 @@ async function acquireExecutionLeaseInner(
     executionAssignmentId: string
     workerIdentity: string
     leaseMs?: number
+    afterAssignmentLock?: () => Promise<void>
   },
 ): Promise<AcquireLeaseResult> {
   const leaseMs = input.leaseMs ?? DEFAULT_LEASE_MS
@@ -213,6 +226,16 @@ async function acquireExecutionLeaseInner(
   `
   if (locked.length === 0) {
     return { acquired: false, reason: 'assignment not found' }
+  }
+
+  // TEST-ONLY HOOK: pause inside the actual acquireExecutionLease critical
+  // section, AFTER the FOR UPDATE lock is acquired. This lets the E16 test
+  // prove that a concurrent transitionLeaseToFencing is BLOCKED while
+  // acquire holds the assignment lock across its critical section. If the
+  // lock were released after the SELECT (the old bug), the concurrent fence
+  // would proceed immediately.
+  if (input.afterAssignmentLock) {
+    await input.afterAssignmentLock()
   }
 
   const assignmentStatus = locked[0].status

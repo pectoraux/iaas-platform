@@ -755,83 +755,91 @@ describeOrSkip('Phase 12B Slice 5: Execution Lease — PostgreSQL concurrency', 
     }
   })
 
-  // E16 (Deterministic interleaving): acquire holds the assignment lock
-  // across its entire critical section — a concurrent acquire CANNOT proceed
-  // until the first acquire commits. This proves the transaction-scope fix:
-  // the FOR UPDATE lock is not released after the SELECT (because the whole
-  // operation is wrapped in a transaction).
-  it('E16: acquire holds assignment lock across critical section — concurrent acquire blocks until first commits', async () => {
+  // E16 (Deterministic proof — corrected): pauses INSIDE the actual
+  // acquireExecutionLease critical section (via the test-only afterAssignmentLock
+  // hook), then proves a concurrent acquireExecutionLease is BLOCKED. This
+  // distinguishes the transaction-wrapped implementation from the old autocommit
+  // implementation: if the lock were released after the SELECT (the old bug),
+  // the concurrent acquire would proceed immediately.
+  it('E16: acquire holds assignment lock inside its critical section — concurrent acquire is blocked until first commits', async () => {
     const f = await createFixture('E16')
     const { assignmentId } = await submitAndCommit(f, 'e16')
 
-    // Step 1: Open a transaction (Tx A) and manually acquire the assignment
-    // lock FOR UPDATE — simulating acquireExecutionLease holding the lock
-    // during its critical section. We hold this lock open via a deferred
-    // Promise until we explicitly release it.
-    let releaseTxA!: () => void
-    const txAReady = new Promise<void>((resolve) => {
-      // txAReady resolves when Tx A has acquired the FOR UPDATE lock.
-      // We'll store the release function so the test can commit Tx A later.
+    // Set up a barrier that acquireA will wait on AFTER it acquires the
+    // assignment FOR UPDATE lock but BEFORE it inserts the lease + updates
+    // the assignment. This is the test-only afterAssignmentLock hook.
+    let releaseBarrier!: () => void
+    const barrier = new Promise<void>((resolve) => {
+      releaseBarrier = resolve
+    })
+    // acquireA signals it has acquired the lock + paused.
+    let acquireALocked = false
+    const acquireAReady = new Promise<void>((resolve) => {
+      releaseBarrier = () => { resolve(); releaseBarrier = () => {} }
+    })
+    // We need two resolves: one for "locked", one for "release".
+    let signalLocked!: () => void
+    const lockedSignal = new Promise<void>((resolve) => { signalLocked = resolve })
+    let releaseLock!: () => void
+    const releaseSignal = new Promise<void>((resolve) => { releaseLock = resolve })
+
+    // Fire acquireA with the afterAssignmentLock hook. It will:
+    //   1. Lock the assignment FOR UPDATE (inside the db.$transaction wrapper).
+    //   2. Call afterAssignmentLock → signal that it's paused, wait for the
+    //      release signal, then throw (causing a rollback so no lease is
+    //      created — acquireB can then acquire cleanly).
+    const acquireAPromise = acquireExecutionLease({
+      executionAssignmentId: assignmentId,
+      workerIdentity: 'worker-A',
+      afterAssignmentLock: async () => {
+        acquireALocked = true
+        signalLocked()
+        await releaseSignal
+        throw new Error('test-controlled rollback')
+      },
     })
 
-    // We need a way to signal "hold the lock" then "release".
-    // Use a deferred Promise that Tx A awaits before committing.
-    const holdLock = new Promise<void>((resolve) => {
-      releaseTxA = resolve
-    })
+    // Wait for acquireA to signal it has acquired the assignment lock + paused.
+    await lockedSignal
+    expect(acquireALocked).toBe(true)
 
-    const txAReadyResolve: { resolve?: (v: void) => void } = {}
-    const txAReadyPromise = new Promise<void>((resolve) => {
-      txAReadyResolve.resolve = resolve
-    })
-
-    const txAPromise = db.$transaction(async (tx) => {
-      // Acquire the assignment lock FOR UPDATE.
-      await tx.$queryRaw`
-        SELECT id FROM "ExecutionAssignment"
-        WHERE id = ${assignmentId}
-        FOR UPDATE
-      `
-      // Signal that the lock is held.
-      txAReadyResolve.resolve!()
-      // Wait for the test to release us (commit the transaction).
-      await holdLock
-    }, { timeout: 30000 })
-
-    // Wait for Tx A to acquire the lock.
-    await txAReadyPromise
-
-    // Step 2: Fire a concurrent acquireExecutionLease (Tx B). It should
-    // BLOCK because Tx A holds the assignment lock.
+    // PROOF STEP: acquireA is paused INSIDE its critical section, holding
+    // the assignment FOR UPDATE lock (after the SELECT, before the INSERT).
+    // Fire a concurrent acquireExecutionLease (acquireB). It should BLOCK
+    // on the assignment FOR UPDATE lock that acquireA holds.
     let acquireBCompleted = false
     const acquireB = acquireExecutionLease({
       executionAssignmentId: assignmentId,
       workerIdentity: 'worker-B',
-    }).then((result) => {
+    }).then((r) => {
       acquireBCompleted = true
-      return result
+      return r
     })
 
-    // Wait 500ms — acquireB should still be blocked (not completed).
-    // If the lock were released after the SELECT (the old bug), acquireB
-    // would have completed by now.
+    // Wait 500ms — acquireB should still be blocked.
+    // If the lock were released after the SELECT (the old autocommit bug),
+    // acquireB would have completed by now.
     await new Promise((resolve) => setTimeout(resolve, 500))
-    expect(acquireBCompleted).toBe(false) // Tx B is blocked on the assignment lock
+    expect(acquireBCompleted).toBe(false) // PROOF: acquireB is blocked
 
-    // Step 3: Release Tx A (commit the transaction → release the lock).
-    releaseTxA()
-    await txAPromise
+    // Release acquireA's barrier. acquireA's hook will throw, causing the
+    // transaction to ROLLBACK (no lease created, no assignment update).
+    // The assignment FOR UPDATE lock is released on rollback. acquireB can
+    // now proceed + acquire the lease.
+    releaseLock()
+    // acquireA's transaction rolls back (the hook throws).
+    await expect(acquireAPromise).rejects.toThrow('test-controlled rollback')
 
-    // Step 4: Now acquireB should complete (the lock is released).
+    // Now acquireB should complete (the lock is released + no lease exists).
     const acquireBResult = await acquireB
     expect(acquireBResult.acquired).toBe(true)
 
-    // THE PROOF: acquireB was blocked for 500ms while Tx A held the
-    // assignment lock. This demonstrates that acquireExecutionLease holds
-    // the assignment FOR UPDATE lock across its critical section (not just
-    // during the SELECT). If the lock were released after the SELECT (the
-    // old bug — using `db` instead of a transaction wrapper), acquireB
-    // would have completed immediately.
-    void txAReady
+    // THE PROOF: acquireB was blocked for 500ms while acquireA held the
+    // assignment lock INSIDE its critical section (after the SELECT, before
+    // the INSERT). This distinguishes the transaction-wrapped implementation
+    // from the old autocommit one: if the lock were released after the
+    // SELECT, acquireB would have completed immediately.
+    void barrier
+    void acquireAReady
   })
 })
