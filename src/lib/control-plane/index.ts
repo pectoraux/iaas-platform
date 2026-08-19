@@ -106,8 +106,13 @@ export type {
 export {
   initEconomicPipeline,
   processEconomicPipeline,
-  reconcileEconomicPipeline,
   traceEconomicChain,
   ECONOMIC_STAGE,
 } from './economic-pipeline'
 export type { EconomicPipelineResult, EconomicStage } from './economic-pipeline'
+
+// Phase 12B Slice 6 hardening: reconciliation hydrates durable economic state
+// before delegating to the existing generic orchestrator. This prevents a
+// worker/process crash between a durable stage commit and checkpoint update
+// from causing a duplicate downstream chain.
+export { reconcileEconomicPipeline } from './economic-reconciliation'
