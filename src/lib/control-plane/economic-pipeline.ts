@@ -465,17 +465,40 @@ export async function reconcileEconomicPipeline(
   // Inspect PostgreSQL durable state and reconstruct the checkpoint from
   // existing durable objects. The checkpoint is derived/cacheable recovery
   // metadata — the durable domain objects are the source of truth.
+  //
+  // STALE-ID HANDLING (hardened):
+  // For every checkpointed durable stage, the checkpoint ID is VALIDATED:
+  //   1. If the checkpoint ID is present → load the referenced durable object.
+  //   2. Validate the loaded object belongs to THIS assignment's deterministic
+  //      identity (not another tenant's or another assignment's object).
+  //   3. If the loaded object is wrong/stale/nonexistent → discard the checkpoint
+  //      ID and rediscover by deterministic identity.
+  //   4. If the checkpoint ID is absent → rediscover by deterministic identity.
+  //   5. Persist the canonical durable ID into the checkpoint.
+  //
+  // This prevents cross-assignment poisoning (A's checkpoint pointing to B's
+  // contribution) and cross-tenant contamination.
   const updates: Record<string, string | null> = {}
 
-  // R1: Event — find by checkpoint ID, or by deterministic (tenantId, externalEventId).
+  // R1: Event — validate checkpoint ID, then rediscover by deterministic identity.
   let event: { id: string; status: string; payloadJson: string; capabilityType: string; occurredAt: Date; sequence: number | null; deviceId: string | null; attestations: Array<{ id: string }> } | null = null
   if (state.eventId) {
-    event = await db.event.findUnique({
+    // Load the referenced event.
+    const referencedEvent = await db.event.findUnique({
       where: { id: state.eventId },
       include: { attestations: true },
     })
+    // Validate: does it belong to this assignment's deterministic identity?
+    if (referencedEvent && referencedEvent.tenantId === state.tenantId && referencedEvent.externalEventId === state.eventIdempotencyKey) {
+      event = referencedEvent
+    } else {
+      // Stale or wrong — discard.
+      updates.eventId = null
+      state.eventId = null
+    }
   }
   if (!event) {
+    // Rediscover by deterministic identity.
     event = await db.event.findUnique({
       where: {
         tenantId_externalEventId: {
@@ -491,14 +514,39 @@ export async function reconcileEconomicPipeline(
     }
   }
 
-  // R2: Attestation — if the event exists + is verified, find the attestation.
-  if (event && event.attestations.length > 0 && !state.attestationId) {
-    const attestation = event.attestations[0]
-    updates.attestationId = attestation.id
-    state.attestationId = attestation.id
+  // R2: Attestation — validate checkpoint ID, then rediscover from the recovered Event.
+  let attestationId: string | null = null
+  if (state.attestationId && event) {
+    // Load the referenced attestation and validate it belongs to this event.
+    const referencedAttestation = await db.attestation.findUnique({
+      where: { id: state.attestationId },
+    })
+    if (referencedAttestation && referencedAttestation.eventId === event.id) {
+      attestationId = referencedAttestation.id
+    } else {
+      // Stale or wrong — discard.
+      updates.attestationId = null
+      state.attestationId = null
+    }
+  }
+  if (!attestationId && event && event.attestations.length > 0) {
+    // Rediscover from the event's attestations.
+    attestationId = event.attestations[0].id
+    updates.attestationId = attestationId
+    state.attestationId = attestationId
   }
 
-  // R3: Contribution — find by checkpoint ID, or by deterministic (tenantId, idempotencyKey).
+  // R3: Contribution — validate checkpoint ID, then rediscover by deterministic identity.
+  if (state.contributionId) {
+    const referencedContribution = await db.contribution.findUnique({
+      where: { id: state.contributionId },
+    })
+    if (!referencedContribution || referencedContribution.tenantId !== state.tenantId || referencedContribution.idempotencyKey !== state.contributionIdempotencyKey) {
+      // Stale or wrong — discard.
+      updates.contributionId = null
+      state.contributionId = null
+    }
+  }
   if (!state.contributionId) {
     const contribution = await db.contribution.findUnique({
       where: {
@@ -514,7 +562,16 @@ export async function reconcileEconomicPipeline(
     }
   }
 
-  // R4: Reward — find by checkpoint ID, or by deterministic (tenantId, idempotencyKey).
+  // R4: Reward — validate checkpoint ID, then rediscover by deterministic identity.
+  if (state.rewardId) {
+    const referencedReward = await db.reward.findUnique({
+      where: { id: state.rewardId },
+    })
+    if (!referencedReward || referencedReward.tenantId !== state.tenantId || referencedReward.idempotencyKey !== state.rewardIdempotencyKey) {
+      updates.rewardId = null
+      state.rewardId = null
+    }
+  }
   if (!state.rewardId) {
     const reward = await db.reward.findUnique({
       where: {
@@ -530,7 +587,16 @@ export async function reconcileEconomicPipeline(
     }
   }
 
-  // R5: LedgerPosting — find by checkpoint ID, or by deterministic (tenantId, idempotencyKey).
+  // R5: LedgerPosting — validate checkpoint ID, then rediscover by deterministic identity.
+  if (state.ledgerPostingId) {
+    const referencedPosting = await db.ledgerPosting.findUnique({
+      where: { id: state.ledgerPostingId },
+    })
+    if (!referencedPosting || referencedPosting.tenantId !== state.tenantId || referencedPosting.idempotencyKey !== state.ledgerIdempotencyKey) {
+      updates.ledgerPostingId = null
+      state.ledgerPostingId = null
+    }
+  }
   if (!state.ledgerPostingId) {
     const posting = await db.ledgerPosting.findUnique({
       where: {
@@ -546,7 +612,17 @@ export async function reconcileEconomicPipeline(
     }
   }
 
-  // R6: Settlement — find by checkpoint ID, or by the reward's 1:1 settlement.
+  // R6: Settlement — validate checkpoint ID, then rediscover by reward's 1:1 settlement.
+  if (state.settlementId) {
+    const referencedSettlement = await db.settlement.findUnique({
+      where: { id: state.settlementId },
+    })
+    // Validate: settlement must belong to this assignment's reward.
+    if (!referencedSettlement || !state.rewardId || referencedSettlement.rewardId !== state.rewardId) {
+      updates.settlementId = null
+      state.settlementId = null
+    }
+  }
   if (!state.settlementId && state.rewardId) {
     const settlement = await db.settlement.findUnique({
       where: { rewardId: state.rewardId },

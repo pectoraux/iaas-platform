@@ -4346,3 +4346,56 @@ FINAL ACCEPTANCE GATE STATUS:
 10. All existing tests remain green. ✅ (49/49 + 16/16)
 
 PHASE 12B SLICE 6 — HARDENED / COMPLETE
+
+---
+Task ID: 12B-slice-6-stale-id-hardening
+Agent: main (Z.ai Code)
+Task: Fix the stale-checkpoint-ID gap. The previous reconciliation only handled NULL checkpoint IDs (R1-R7). It did NOT handle stale/wrong/nonexistent checkpoint IDs — e.g., EconomicPipelineState.contributionId = "deleted-or-wrong-id". The `if (!state.contributionId)` check would be false, skipping recovery even though the referenced durable object no longer exists. This violates the frozen invariant that EconomicPipelineState is derived/cacheable metadata and durable economic objects are authoritative.
+
+Work Log:
+- FIX: rewrote the durable-state hydration in reconcileEconomicPipeline to VALIDATE every checkpoint ID against durable state + deterministic identity. For each stage:
+    1. If the checkpoint ID is present → load the referenced durable object.
+    2. Validate the loaded object belongs to THIS assignment's deterministic identity (tenantId + idempotencyKey / externalEventId / rewardId / eventId).
+    3. If the loaded object is wrong/stale/nonexistent → discard the checkpoint ID (set to null) and rediscover by deterministic identity.
+    4. If the checkpoint ID is absent → rediscover by deterministic identity.
+    5. Persist the canonical durable ID into the checkpoint.
+  This prevents cross-assignment poisoning (A's checkpoint pointing to B's contribution) and cross-tenant contamination.
+
+- VALIDATION DETAILS per stage:
+    R1 Event: validate (tenantId === state.tenantId && externalEventId === state.eventIdempotencyKey).
+    R2 Attestation: validate (eventId === event.id) — must belong to the recovered Event.
+    R3 Contribution: validate (tenantId === state.tenantId && idempotencyKey === state.contributionIdempotencyKey).
+    R4 Reward: validate (tenantId === state.tenantId && idempotencyKey === state.rewardIdempotencyKey).
+    R5 LedgerPosting: validate (tenantId === state.tenantId && idempotencyKey === state.ledgerIdempotencyKey).
+    R6 Settlement: validate (rewardId === state.rewardId) — must belong to the recovered Reward.
+
+- STALE-ID TESTS (R8-R14): each test constructs the exact post-crash database state (durable object committed + checkpoint ID set to a bogus/deleted value + other durable objects intact), then invokes reconcileEconomicPipeline:
+    R8: stale eventId (bogus ID) → correct Event rediscovered. PASS.
+    R9: stale attestationId (bogus ID) → correct Attestation rediscovered. PASS.
+    R10: stale contributionId (bogus ID) → correct Contribution rediscovered. PASS.
+    R11: stale rewardId (bogus ID) → correct Reward rediscovered, no duplicate ledger. PASS.
+    R12: stale ledgerPostingId (bogus ID) → correct posting rediscovered, no double debit. PASS.
+    R13: stale settlementId (bogus ID) → correct Settlement rediscovered, no double payout. PASS.
+    R14: cross-assignment poisoning (A.contributionId = B.contributionId) → A rediscovers own Contribution, B unchanged, no contamination. PASS.
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-6-crash-boundary.test.ts: 14/14 pass (R1-R14), 60+ expect() calls.
+- tests/phase-12b-slice-6-economic.test.ts: 6/6 pass (A/B/C/D/E/F).
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors in Slice 6 files.
+
+FINAL ACCEPTANCE GATE STATUS (updated):
+1. Verification rejection cannot create economic value. ✅
+2. Each durable economic stage survives checkpoint loss (NULL). ✅ (R1-R6)
+3. Reconciliation reuses durable objects instead of recreating them. ✅
+4. Reconciliation is safe across process restart. ✅
+5. Concurrent reconciliation produces exactly one economic outcome. ✅ (R7)
+6. No double funding debit. ✅
+7. No double ledger posting. ✅
+8. No double settlement/payout. ✅
+9. No vertical-specific imports. ✅
+10. All existing tests remain green. ✅
+11. Stale/invalid checkpoint IDs are validated + repaired. ✅ (R8-R13)
+12. Cross-assignment contamination is impossible. ✅ (R14)
+
+PHASE 12B SLICE 6 — HARDENED / COMPLETE

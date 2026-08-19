@@ -417,4 +417,171 @@ describeOrSkip('Phase 12B Slice 6: Durable Reconciliation — Crash-Boundary', (
     expect(stateAfter!.rewardId).toBe(stateBefore!.rewardId)
     expect(stateAfter!.settlementId).toBe(stateBefore!.settlementId)
   })
+
+  // Helper: set a checkpoint ID to a stale/bogus value.
+  async function setStaleCheckpointId(f: CrashFixture, field: string, bogusId: string) {
+    await db.economicPipelineState.update({
+      where: { executionAssignmentId: f.assignmentId },
+      data: {
+        [field]: bogusId,
+        stage: ECONOMIC_STAGE.RECONCILIATION_REQUIRED,
+        reconciliationReason: `simulated stale ID: ${field} = ${bogusId}`,
+      },
+    })
+  }
+
+  // R8 — stale Event ID
+  it('R8: stale eventId → reconcile rediscovers correct Event', async () => {
+    const f = await createAndExecute('R8')
+    const result = await runFullPipeline(f)
+    expect(result.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    const stateBefore = await db.economicPipelineState.findUnique({ where: { executionAssignmentId: f.assignmentId } })
+    const originalEventId = stateBefore!.eventId!
+
+    // Set eventId to a bogus/deleted ID.
+    await setStaleCheckpointId(f, 'eventId', 'nonexistent-event-id-12345')
+
+    const reconcileResult = await reconcileEconomicPipeline(f.assignmentId)
+    expect(reconcileResult.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    expect(reconcileResult.eventId).toBe(originalEventId)
+
+    const events = await db.event.findMany({ where: { tenantId: f.tenantId } })
+    expect(events.length).toBe(1)
+  })
+
+  // R9 — stale Attestation ID
+  it('R9: stale attestationId → reconcile rediscovers correct Attestation', async () => {
+    const f = await createAndExecute('R9')
+    const result = await runFullPipeline(f)
+    expect(result.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    const stateBefore = await db.economicPipelineState.findUnique({ where: { executionAssignmentId: f.assignmentId } })
+    const originalAttestationId = stateBefore!.attestationId!
+
+    await setStaleCheckpointId(f, 'attestationId', 'nonexistent-attestation-id-12345')
+
+    const reconcileResult = await reconcileEconomicPipeline(f.assignmentId)
+    expect(reconcileResult.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    expect(reconcileResult.attestationId).toBe(originalAttestationId)
+
+    const attestations = await db.attestation.findMany({ where: { tenantId: f.tenantId } })
+    expect(attestations.length).toBe(1)
+  })
+
+  // R10 — stale Contribution ID
+  it('R10: stale contributionId → reconcile rediscovers correct Contribution', async () => {
+    const f = await createAndExecute('R10')
+    const result = await runFullPipeline(f)
+    expect(result.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    const stateBefore = await db.economicPipelineState.findUnique({ where: { executionAssignmentId: f.assignmentId } })
+    const originalContributionId = stateBefore!.contributionId!
+
+    await setStaleCheckpointId(f, 'contributionId', 'nonexistent-contribution-id-12345')
+
+    const reconcileResult = await reconcileEconomicPipeline(f.assignmentId)
+    expect(reconcileResult.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    expect(reconcileResult.contributionId).toBe(originalContributionId)
+
+    const contributions = await db.contribution.findMany({ where: { tenantId: f.tenantId } })
+    expect(contributions.length).toBe(1)
+  })
+
+  // R11 — stale Reward ID
+  it('R11: stale rewardId → reconcile rediscovers correct Reward, no duplicate ledger', async () => {
+    const f = await createAndExecute('R11')
+    const result = await runFullPipeline(f)
+    expect(result.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    const stateBefore = await db.economicPipelineState.findUnique({ where: { executionAssignmentId: f.assignmentId } })
+    const originalRewardId = stateBefore!.rewardId!
+
+    await setStaleCheckpointId(f, 'rewardId', 'nonexistent-reward-id-12345')
+
+    const reconcileResult = await reconcileEconomicPipeline(f.assignmentId)
+    expect(reconcileResult.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    expect(reconcileResult.rewardId).toBe(originalRewardId)
+
+    const rewards = await db.reward.findMany({ where: { tenantId: f.tenantId } })
+    expect(rewards.length).toBe(1)
+    const postings = await db.ledgerPosting.findMany({ where: { tenantId: f.tenantId, postingType: 'reward' } })
+    expect(postings.length).toBe(1)
+  })
+
+  // R12 — stale LedgerPosting ID
+  it('R12: stale ledgerPostingId → reconcile rediscovers correct posting, no double debit', async () => {
+    const f = await createAndExecute('R12')
+    const result = await runFullPipeline(f)
+    expect(result.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    const stateBefore = await db.economicPipelineState.findUnique({ where: { executionAssignmentId: f.assignmentId } })
+    const originalPostingId = stateBefore!.ledgerPostingId!
+
+    await setStaleCheckpointId(f, 'ledgerPostingId', 'nonexistent-posting-id-12345')
+
+    const reconcileResult = await reconcileEconomicPipeline(f.assignmentId)
+    expect(reconcileResult.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    expect(reconcileResult.ledgerPostingId).toBe(originalPostingId)
+
+    const postings = await db.ledgerPosting.findMany({ where: { tenantId: f.tenantId, postingType: 'reward' } })
+    expect(postings.length).toBe(1)
+  })
+
+  // R13 — stale Settlement ID
+  it('R13: stale settlementId → reconcile rediscovers correct Settlement, no double payout', async () => {
+    const f = await createAndExecute('R13')
+    const result = await runFullPipeline(f)
+    expect(result.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    const stateBefore = await db.economicPipelineState.findUnique({ where: { executionAssignmentId: f.assignmentId } })
+    const originalSettlementId = stateBefore!.settlementId!
+
+    await setStaleCheckpointId(f, 'settlementId', 'nonexistent-settlement-id-12345')
+
+    const reconcileResult = await reconcileEconomicPipeline(f.assignmentId)
+    expect(reconcileResult.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    expect(reconcileResult.settlementId).toBe(originalSettlementId)
+
+    const settlements = await db.settlement.findMany({ where: { tenantId: f.tenantId } })
+    expect(settlements.length).toBe(1)
+  })
+
+  // R14 — cross-assignment poisoning: A.contributionId = B.contributionId
+  it('R14: cross-assignment poisoning — A.contributionId = B.contributionId → A rediscovers own Contribution, B unchanged', async () => {
+    const fA = await createAndExecute('R14A')
+    const fB = await createAndExecute('R14B')
+
+    // Run full pipelines for both A and B.
+    await runFullPipeline(fA)
+    await runFullPipeline(fB)
+
+    const stateA = await db.economicPipelineState.findUnique({ where: { executionAssignmentId: fA.assignmentId } })
+    const stateB = await db.economicPipelineState.findUnique({ where: { executionAssignmentId: fB.assignmentId } })
+    const originalAContributionId = stateA!.contributionId!
+    const originalBContributionId = stateB!.contributionId!
+
+    // Poison: set A's contributionId to B's contributionId.
+    await db.economicPipelineState.update({
+      where: { executionAssignmentId: fA.assignmentId },
+      data: {
+        contributionId: originalBContributionId,
+        stage: ECONOMIC_STAGE.RECONCILIATION_REQUIRED,
+        reconciliationReason: 'poisoned: A.contributionId = B.contributionId',
+      },
+    })
+
+    // Reconcile A.
+    const reconcileA = await reconcileEconomicPipeline(fA.assignmentId)
+    expect(reconcileA.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+
+    // A must have rediscovered ITS OWN contribution (not B's).
+    const stateAAfter = await db.economicPipelineState.findUnique({ where: { executionAssignmentId: fA.assignmentId } })
+    expect(stateAAfter!.contributionId).toBe(originalAContributionId)
+    expect(stateAAfter!.contributionId).not.toBe(originalBContributionId)
+
+    // B's checkpoint must be unchanged.
+    const stateBAfter = await db.economicPipelineState.findUnique({ where: { executionAssignmentId: fB.assignmentId } })
+    expect(stateBAfter!.contributionId).toBe(originalBContributionId)
+
+    // No duplicate contributions (A has 1, B has 1, total = 2 across both tenants).
+    const contributionsA = await db.contribution.findMany({ where: { tenantId: fA.tenantId } })
+    expect(contributionsA.length).toBe(1)
+    const contributionsB = await db.contribution.findMany({ where: { tenantId: fB.tenantId } })
+    expect(contributionsB.length).toBe(1)
+  })
 })
