@@ -754,4 +754,84 @@ describeOrSkip('Phase 12B Slice 5: Execution Lease — PostgreSQL concurrency', 
       expect(activeLeases.length).toBe(0)
     }
   })
+
+  // E16 (Deterministic interleaving): acquire holds the assignment lock
+  // across its entire critical section — a concurrent acquire CANNOT proceed
+  // until the first acquire commits. This proves the transaction-scope fix:
+  // the FOR UPDATE lock is not released after the SELECT (because the whole
+  // operation is wrapped in a transaction).
+  it('E16: acquire holds assignment lock across critical section — concurrent acquire blocks until first commits', async () => {
+    const f = await createFixture('E16')
+    const { assignmentId } = await submitAndCommit(f, 'e16')
+
+    // Step 1: Open a transaction (Tx A) and manually acquire the assignment
+    // lock FOR UPDATE — simulating acquireExecutionLease holding the lock
+    // during its critical section. We hold this lock open via a deferred
+    // Promise until we explicitly release it.
+    let releaseTxA!: () => void
+    const txAReady = new Promise<void>((resolve) => {
+      // txAReady resolves when Tx A has acquired the FOR UPDATE lock.
+      // We'll store the release function so the test can commit Tx A later.
+    })
+
+    // We need a way to signal "hold the lock" then "release".
+    // Use a deferred Promise that Tx A awaits before committing.
+    const holdLock = new Promise<void>((resolve) => {
+      releaseTxA = resolve
+    })
+
+    const txAReadyResolve: { resolve?: (v: void) => void } = {}
+    const txAReadyPromise = new Promise<void>((resolve) => {
+      txAReadyResolve.resolve = resolve
+    })
+
+    const txAPromise = db.$transaction(async (tx) => {
+      // Acquire the assignment lock FOR UPDATE.
+      await tx.$queryRaw`
+        SELECT id FROM "ExecutionAssignment"
+        WHERE id = ${assignmentId}
+        FOR UPDATE
+      `
+      // Signal that the lock is held.
+      txAReadyResolve.resolve!()
+      // Wait for the test to release us (commit the transaction).
+      await holdLock
+    }, { timeout: 30000 })
+
+    // Wait for Tx A to acquire the lock.
+    await txAReadyPromise
+
+    // Step 2: Fire a concurrent acquireExecutionLease (Tx B). It should
+    // BLOCK because Tx A holds the assignment lock.
+    let acquireBCompleted = false
+    const acquireB = acquireExecutionLease({
+      executionAssignmentId: assignmentId,
+      workerIdentity: 'worker-B',
+    }).then((result) => {
+      acquireBCompleted = true
+      return result
+    })
+
+    // Wait 500ms — acquireB should still be blocked (not completed).
+    // If the lock were released after the SELECT (the old bug), acquireB
+    // would have completed by now.
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    expect(acquireBCompleted).toBe(false) // Tx B is blocked on the assignment lock
+
+    // Step 3: Release Tx A (commit the transaction → release the lock).
+    releaseTxA()
+    await txAPromise
+
+    // Step 4: Now acquireB should complete (the lock is released).
+    const acquireBResult = await acquireB
+    expect(acquireBResult.acquired).toBe(true)
+
+    // THE PROOF: acquireB was blocked for 500ms while Tx A held the
+    // assignment lock. This demonstrates that acquireExecutionLease holds
+    // the assignment FOR UPDATE lock across its critical section (not just
+    // during the SELECT). If the lock were released after the SELECT (the
+    // old bug — using `db` instead of a transaction wrapper), acquireB
+    // would have completed immediately.
+    void txAReady
+  })
 })

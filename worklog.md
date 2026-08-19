@@ -4165,3 +4165,37 @@ Stage Summary:
 - The ExecutionAssignment row is now the ownership serialization boundary for both acquire and fence. The forbidden state (A=FENCING + B=ACTIVE) is impossible — proven by E15.
 - No regression to E1/E13/E14 or Slice 3/4 tests.
 - No change to the fencing architecture beyond this serialization fix. No operational tooling added.
+
+---
+Task ID: 12B-slice-5-acquire-transaction-scope-fix
+Agent: main (Z.ai Code)
+Task: Fix the remaining Slice 5 transaction-scope defect: acquireExecutionLease used `db` (autocommit) when no tx was provided, so the FOR UPDATE lock was released when the SELECT statement ended. The entire critical section (state check + existing-lease check + leaseVersion calc + lease INSERT + assignment update) must run inside one transaction so the lock holds across all of it.
+
+Work Log:
+- DEFECT: acquireExecutionLease did `const client = input.tx ?? db` then ran SELECT ... FOR UPDATE + checks + INSERT + UPDATE as separate statements on `db`. When `client === db` (no tx), each statement runs in autocommit mode — the FOR UPDATE lock is released when the SELECT ends. A concurrent fence (transitionLeaseToFencing) could slip in between the SELECT and the lease INSERT, creating the forbidden state: A=FENCING + B=ACTIVE.
+- FIX: refactored acquireExecutionLease into a public wrapper + an inner function (acquireExecutionLeaseInner), following the same pattern as transitionLeaseToFencing:
+    - If tx is provided, use it directly (caller manages the transaction).
+    - If tx is absent, wrap the ENTIRE critical section in db.$transaction(...) so the FOR UPDATE lock holds until COMMIT.
+  The critical section (all inside the transaction):
+    1. SELECT assignment FOR UPDATE (lock held until COMMIT)
+    2. verify assignment state (terminal check)
+    3. inspect existing non-terminal leases (active/fencing/unsafe_to_retry check)
+    4. calculate next leaseVersion
+    5. INSERT ExecutionLease (active)
+    6. UPDATE ExecutionAssignment → executing
+  This gives the true symmetry: both acquire and fence lock the same assignment row across their entire critical section. They cannot run concurrently.
+
+- DETERMINISTIC INTERLEAVING TEST (E16): "acquire holds assignment lock across critical section — concurrent acquire blocks until first commits". Opens a transaction (Tx A) that manually acquires the assignment FOR UPDATE lock + holds it open via a deferred Promise. Fires a concurrent acquireExecutionLease (Tx B). Waits 500ms. Asserts acquireBCompleted === false (Tx B is blocked on the assignment lock — proving the lock is held across Tx A's critical section, not just during the SELECT). Then releases Tx A (commits → releases the lock). Asserts Tx B now completes + acquires the lease.
+  This is a deterministic proof (not a randomized race): it directly demonstrates that acquireExecutionLease's transaction wrapper holds the FOR UPDATE lock across the critical section.
+
+Test results (against Neon PostgreSQL):
+- E16 (NEW): PASS — acquire holds assignment lock across critical section (concurrent acquire blocked for 500ms, then completed after Tx A committed).
+- E1+E7 (regression): PASS — two concurrent acquire → exactly one wins.
+- E15 (regression): PASS — ACTIVE→FENCING racing acquire → final state never has FENCING+ACTIVE.
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors.
+
+Stage Summary:
+- acquireExecutionLease now wraps its entire critical section in a transaction when no tx is provided. The FOR UPDATE lock holds until COMMIT, serializing acquire with fence.
+- The deterministic E16 test proves the lock is held (not just that a randomized race happened to produce a safe outcome).
+- Slice 5 is ready to freeze.

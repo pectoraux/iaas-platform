@@ -164,14 +164,48 @@ export async function acquireExecutionLease(input: {
   leaseMs?: number
   tx?: ExtendedTransactionClient
 }): Promise<AcquireLeaseResult> {
-  const client = input.tx ?? db
+  // If a transaction client is provided, use it directly. Otherwise, wrap
+  // the ENTIRE critical section in a dedicated transaction so the FOR UPDATE
+  // lock on the assignment row is held across:
+  //   - state check
+  //   - existing-lease check
+  //   - leaseVersion calculation
+  //   - lease INSERT
+  //   - assignment → executing update
+  //
+  // PHASE 12B SLICE 5 TRANSACTION-SCOPE FIX:
+  // Without this wrapper, the FOR UPDATE lock is released when the SELECT
+  // statement ends (because `db` runs each statement in autocommit mode).
+  // A concurrent fence could slip in between the SELECT and the lease INSERT,
+  // creating the forbidden state: A=FENCING + B=ACTIVE.
+  //
+  // By wrapping the whole critical section in a transaction, the FOR UPDATE
+  // lock holds until COMMIT, serializing acquire with fence (which locks the
+  // same assignment row in transitionLeaseToFencing).
+  if (input.tx) {
+    return acquireExecutionLeaseInner(input.tx, input)
+  }
+  return db.$transaction(async (tx) => {
+    return acquireExecutionLeaseInner(tx, input)
+  })
+}
+
+async function acquireExecutionLeaseInner(
+  client: ExtendedTransactionClient,
+  input: {
+    executionAssignmentId: string
+    workerIdentity: string
+    leaseMs?: number
+  },
+): Promise<AcquireLeaseResult> {
   const leaseMs = input.leaseMs ?? DEFAULT_LEASE_MS
   const leaseId = randomUUID()
   const now = new Date()
   const leaseUntil = new Date(now.getTime() + leaseMs)
 
-  // Lock the assignment row FOR UPDATE to prevent concurrent acquire from
-  // reading stale state.
+  // Lock the assignment row FOR UPDATE. This lock holds until the transaction
+  // commits, preventing a concurrent fence (transitionLeaseToFencing) from
+  // running between this check and the lease INSERT below.
   const locked = await client.$queryRaw<Array<{ id: string; status: string }>>`
     SELECT id, status FROM "ExecutionAssignment"
     WHERE id = ${input.executionAssignmentId}
@@ -211,6 +245,10 @@ export async function acquireExecutionLease(input: {
   // a new lease while Worker A's lease is FENCING (adapter.cancel() in
   // progress). Without this check, Worker B could execute the physical
   // resource while Worker A's cancel is still running → double execution.
+  //
+  // This check is now concurrency-safe because the assignment row is locked
+  // FOR UPDATE (held across the whole transaction). A concurrent fence cannot
+  // transition a lease to FENCING between this check and the lease INSERT.
   const existingNonTerminal = await client.executionLease.findFirst({
     where: {
       executionAssignmentId: input.executionAssignmentId,
