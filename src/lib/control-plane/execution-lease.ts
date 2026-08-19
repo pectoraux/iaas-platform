@@ -194,27 +194,61 @@ export async function acquireExecutionLease(input: {
     return { acquired: false, reason: `assignment is terminal (${assignmentStatus})` }
   }
 
-  // Check for an existing active lease.
-  const existingActive = await client.executionLease.findFirst({
-    where: { executionAssignmentId: input.executionAssignmentId, status: 'active' },
+  // Check for ANY existing non-terminal lease. A lease is "non-terminal" if
+  // it represents unresolved ownership:
+  //   - 'active' → another worker currently owns it (or it's expired-but-unfenced)
+  //   - 'fencing' → fencing is in progress (adapter.cancel() may be running)
+  //   - 'unsafe_to_retry' → physical execution may still be running; human
+  //     intervention required before the resource can be reused
+  //
+  // A 'fenced' lease IS terminal — the adapter confirmed cancellation, the
+  // assignment is 'failed', and capacity was released. A new lease can be
+  // acquired after fencing (the assignment is terminal 'failed', so the
+  // terminal-status check above catches it — a 'failed' assignment cannot be
+  // re-leased).
+  //
+  // CRITICAL: this prevents the unsafe interleaving where Worker B acquires
+  // a new lease while Worker A's lease is FENCING (adapter.cancel() in
+  // progress). Without this check, Worker B could execute the physical
+  // resource while Worker A's cancel is still running → double execution.
+  const existingNonTerminal = await client.executionLease.findFirst({
+    where: {
+      executionAssignmentId: input.executionAssignmentId,
+      status: { in: ['active', 'fencing', 'unsafe_to_retry'] },
+    },
   })
 
-  if (existingActive) {
-    // Is the existing lease expired?
-    if (existingActive.leaseUntil < now) {
+  if (existingNonTerminal) {
+    if (existingNonTerminal.status === 'active' && existingNonTerminal.leaseUntil < now) {
       // The lease is expired but still 'active' in the DB. Recovery has not
       // yet fenced it. We CANNOT acquire a new lease — the previous physical
       // execution may still be running. The caller must call
       // recoverStuckAssignments first to fence/unsafe_to_retry the old lease.
       return {
         acquired: false,
-        reason: `existing lease ${existingActive.id} is expired but not fenced (recovery required)`,
+        reason: `existing lease ${existingNonTerminal.id} is expired but not fenced (recovery required)`,
       }
     }
-    // The existing lease is still valid — another worker owns it.
+    if (existingNonTerminal.status === 'fencing') {
+      // Fencing is in progress — adapter.cancel() may be running. A new
+      // lease would enable double physical execution.
+      return {
+        acquired: false,
+        reason: `existing lease ${existingNonTerminal.id} is FENCING (cancellation in progress; cannot acquire until fencing resolves)`,
+      }
+    }
+    if (existingNonTerminal.status === 'unsafe_to_retry') {
+      // The previous lease was unsafe_to_retry — physical execution may
+      // still be running. Human/ops intervention is required.
+      return {
+        acquired: false,
+        reason: `existing lease ${existingNonTerminal.id} is UNSAFE_TO_RETRY (physical execution may still be running; human/ops intervention required)`,
+      }
+    }
+    // The existing lease is still valid (active + not expired) — another worker owns it.
     return {
       acquired: false,
-      reason: `existing active lease ${existingActive.id} (worker: ${existingActive.workerIdentity})`,
+      reason: `existing active lease ${existingNonTerminal.id} (worker: ${existingNonTerminal.workerIdentity})`,
     }
   }
 

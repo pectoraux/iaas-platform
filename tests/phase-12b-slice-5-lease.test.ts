@@ -570,4 +570,101 @@ describeOrSkip('Phase 12B Slice 5: Execution Lease — PostgreSQL concurrency', 
 
     void fenceResult
   })
+
+  // E13 (Defect 1 fix): FENCING state blocks a new lease acquisition
+  it('E13: FENCING lease blocks a concurrent acquire (no double physical execution)', async () => {
+    const f = await createFixture('E13')
+    const { assignmentId } = await submitAndCommit(f, 'e13')
+
+    // Worker A acquires a lease.
+    const acquireA = await acquireExecutionLease({
+      executionAssignmentId: assignmentId,
+      workerIdentity: 'worker-A',
+    })
+    expect(acquireA.acquired).toBe(true)
+    const leaseA = acquireA.lease!
+
+    // Simulate the lease being in FENCING state (phase 1 of fencing completed,
+    // adapter.cancel() in progress or crashed).
+    await db.executionLease.update({
+      where: { id: leaseA.id },
+      data: { status: 'fencing', fenceReason: 'simulated fencing in progress' },
+    })
+
+    // Worker B tries to acquire a new lease — MUST be rejected because the
+    // existing lease is FENCING (unresolved ownership). This prevents Worker B
+    // from executing the physical resource while Worker A's cancel is running.
+    const acquireB = await acquireExecutionLease({
+      executionAssignmentId: assignmentId,
+      workerIdentity: 'worker-B',
+    })
+    expect(acquireB.acquired).toBe(false)
+    expect(acquireB.reason).toContain('FENCING')
+
+    // Verify no new lease was created.
+    const leases = await db.executionLease.findMany({
+      where: { executionAssignmentId: assignmentId },
+    })
+    expect(leases.length).toBe(1) // only leaseA, no leaseB
+  })
+
+  // E14 (Defect 2 fix): UNSAFE_TO_RETRY → capacity remains reserved (not released)
+  it('E14: UNSAFE_TO_RETRY assignment (fence_required) retains capacity — releaseFailedAssignments is a no-op', async () => {
+    const f = await createFixture('E14')
+    const { decisionId, assignmentId, commitmentId, reservationId } = await submitAndCommit(f, 'e14')
+
+    // Acquire a lease + simulate fencing → UNSAFE_TO_RETRY (adapter can't cancel).
+    const acquireResult = await acquireExecutionLease({
+      executionAssignmentId: assignmentId,
+      workerIdentity: 'worker-A',
+    })
+    const lease = acquireResult.lease!
+
+    // Fence → UNSAFE_TO_RETRY (simulated adapter has supportsCancellation=false).
+    const fenceResult = await fenceExecutionLease({
+      leaseId: lease.id,
+      leaseVersion: lease.leaseVersion,
+      reason: 'adapter cannot cancel — unsafe_to_retry test',
+      adapterSelection: {
+        assetId: f.assetId,
+        assetType: 'compute_node',
+        capabilityType: 'gpu_compute',
+      },
+    })
+    expect(fenceResult.outcome).toBe('unsafe_to_retry')
+
+    // The lease is now UNSAFE_TO_RETRY.
+    const leaseAfter = await db.executionLease.findUnique({ where: { id: lease.id } })
+    expect(leaseAfter!.status).toBe(LEASE_STATUS.UNSAFE_TO_RETRY)
+
+    // The assignment is now 'fence_required'.
+    const assignment = await db.executionAssignment.findUnique({ where: { id: assignmentId } })
+    expect(assignment!.status).toBe(ASSIGNMENT_STATUS.FENCE_REQUIRED)
+
+    // Capture the capacity state BEFORE attempting release.
+    const commitmentBefore = await db.capacityCommitment.findUnique({ where: { id: commitmentId } })
+    const reservationBefore = await db.capacityReservation.findUnique({ where: { id: reservationId } })
+    const commitmentStatusBefore = commitmentBefore!.status
+    const reservationRemainingBefore = parseFloat(reservationBefore!.remainingAmount)
+
+    // ATTEMPT to release the fence_required assignment's capacity — this MUST
+    // be a NO-OP. The FENCE_REQUIRED PROTECTION in releaseFailedAssignments
+    // inspects the assignment's status (inside the FOR UPDATE lock) and skips
+    // releaseCommitment entirely for 'fence_required' assignments.
+    const { releaseFailedAssignments } = await import('../src/lib/control-plane')
+    await releaseFailedAssignments(decisionId, [assignmentId], 'attempt to release fence_required capacity (must be rejected)')
+
+    // THE CRITICAL ASSERTION: the commitment is UNCHANGED (NOT released).
+    const commitmentAfter = await db.capacityCommitment.findUnique({ where: { id: commitmentId } })
+    expect(commitmentAfter!.status).toBe(commitmentStatusBefore)
+    expect(commitmentAfter!.status).not.toBe('released')
+
+    // THE CRITICAL ASSERTION: the reservation is UNCHANGED (remainingAmount NOT restored).
+    const reservationAfter = await db.capacityReservation.findUnique({ where: { id: reservationId } })
+    expect(parseFloat(reservationAfter!.remainingAmount)).toBe(reservationRemainingBefore)
+
+    // The assignment is still 'fence_required' (not failed, not released).
+    const stillFenceRequired = await db.executionAssignment.findUnique({ where: { id: assignmentId } })
+    expect(stillFenceRequired!.status).toBe(ASSIGNMENT_STATUS.FENCE_REQUIRED)
+  })
 })

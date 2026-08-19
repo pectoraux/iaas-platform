@@ -632,6 +632,24 @@ export async function releaseFailedAssignments(
         return
       }
 
+      // FENCE_REQUIRED PROTECTION (Phase 12B Slice 5): an assignment marked
+      // 'fence_required' (because its lease was UNSAFE_TO_RETRY) must NEVER
+      // have its capacity released through this path. The physical execution
+      // may still be running — releasing capacity would allow the resource
+      // to be reallocated while the old operation is still active.
+      //
+      // Capacity release for a fence_required assignment requires explicit
+      // human/ops intervention to confirm the physical operation has stopped.
+      // The 'failed' status (set by finalizeLeaseFence only when outcome='fenced')
+      // is the ONLY post-fence state that permits capacity release.
+      if (currentStatus === 'fence_required') {
+        skipped.push({
+          assignmentId: assignment.id,
+          reason: `assignment is 'fence_required' — lease was UNSAFE_TO_RETRY (physical execution may still be running); capacity is NOT released; human/ops intervention required`,
+        })
+        return
+      }
+
       // 1. Fail the assignment (transitions → 'failed', finalizes parent if terminal).
       //    CAS: if already 'failed', this is a no-op. If 'assigned' or 'executing',
       //    it transitions to 'failed'. The row is still locked from the FOR UPDATE

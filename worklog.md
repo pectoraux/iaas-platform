@@ -4093,3 +4093,45 @@ Stage Summary:
 - Capacity release is permitted only after FENCED (finalizeLeaseFence transitions assignment to 'failed' only for 'fenced' outcome).
 - The 3-phase fencing is crash-safe: the lease never falsely appears ACTIVE (allowing re-execution) or FENCED (allowing capacity release) after a crash.
 - VPP/Compute dispatch paths pre-date the lease system and use optional lease fields (validation skipped when not provided). They will be migrated to pass lease tokens in a future slice.
+
+---
+Task ID: 12B-slice-5-hardening-fencing-blocks-acquire
+Agent: main (Z.ai Code)
+Task: Fix the two critical Slice 5 defects from the re-audit of f7abea2: (1) FENCING does not block a new lease — acquireExecutionLease only checked for 'active' leases, so Worker B could acquire while Worker A's lease was FENCING (adapter.cancel() in progress), enabling double physical execution; (2) UNSAFE_TO_RETRY can still release capacity through the executeDecision failure path — releaseFailedAssignments had a 'completed' guard but not a 'fence_required' guard, so an UNSAFE_TO_RETRY assignment's capacity got released despite the rule that "capacity MUST NOT be released for unsafe_to_retry."
+
+Work Log:
+- DEFECT 1 FIX (acquireExecutionLease): replaced the single 'active' status check with a check for ANY non-terminal lease status: { in: ['active', 'fencing', 'unsafe_to_retry'] }. Now:
+    - 'active' + expired → blocks (recovery required first)
+    - 'active' + not expired → blocks (another worker owns it)
+    - 'fencing' → blocks (cancellation in progress; cannot acquire until fencing resolves)
+    - 'unsafe_to_retry' → blocks (physical execution may still be running; human/ops intervention required)
+    - 'fenced' → allowed (but the assignment is 'failed', so the terminal-status check above catches it — a 'failed' assignment cannot be re-leased)
+  This prevents the unsafe interleaving: Worker B cannot acquire a new lease while Worker A's lease is FENCING.
+
+- DEFECT 2 FIX (releaseFailedAssignments): added a 'fence_required' guard alongside the existing 'completed' guard. Inside the per-assignment transaction (after the FOR UPDATE lock), if currentStatus === 'fence_required', skip releaseCommitment entirely. The commitment + reservation are left untouched. The assignment is NOT failed (stays fence_required). This is the FENCE_REQUIRED PROTECTION: an assignment marked 'fence_required' (because its lease was UNSAFE_TO_RETRY) must NEVER have its capacity released through this path. The physical execution may still be running — releasing capacity would allow the resource to be reallocated while the old operation is still active.
+
+- TEST E13 (Defect 1 proof): "FENCING lease blocks a concurrent acquire (no double physical execution)". Worker A acquires + manually transitions to FENCING. Worker B tries to acquire — MUST be rejected (reason contains 'FENCING'). No new lease created.
+
+- TEST E14 (Defect 2 proof): "UNSAFE_TO_RETRY assignment (fence_required) retains capacity — releaseFailedAssignments is a no-op". Acquires a lease, fences it (adapter can't cancel → UNSAFE_TO_RETRY), assignment becomes 'fence_required'. Then calls releaseFailedAssignments([assignmentId]). Asserts: commitment status UNCHANGED (not 'released'), reservation remainingAmount UNCHANGED (not restored), assignment still 'fence_required'.
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-5-lease.test.ts: 13/13 pass (was 11/11; +2 defect-proof tests), ~50 expect() calls.
+    + E13: FENCING lease blocks concurrent acquire (no double physical execution).
+    + E14: UNSAFE_TO_RETRY → fence_required → capacity retained (releaseFailedAssignments is a no-op).
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors.
+
+Stage Summary:
+- FENCING now blocks new lease acquisition. The unsafe interleaving (Worker B acquires while Worker A's lease is FENCING) is impossible.
+- UNSAFE_TO_RETRY / fence_required assignments NEVER have their capacity released through releaseFailedAssignments. The FENCE_REQUIRED PROTECTION is concurrency-safe (FOR UPDATE lock + status inspection).
+- Revised Slice 5 status:
+    FENCING blocks new acquisition         ✅ FIXED (was ❌)
+    UNSAFE_TO_RETRY retains capacity       ✅ FIXED (was ❌)
+    Single active lease                    ✅
+    Lease versioning                       ✅
+    Runtime lease validation               ✅
+    Renewal CAS                            ✅
+    Stale completion protection            ✅
+    3-phase fencing                        ✅
+    Expiry blocks active acquisition       ✅
+    VPP/Compute legacy paths               ⚠️ deferred (optional lease fields)
