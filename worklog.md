@@ -4049,3 +4049,47 @@ WHAT REMAINS DEFERRED:
 - Economics (contribution/reward/settlement) — deferred to a vertical-specific boundary.
 - Protocol runtime execution — deferred to a later module.
 - Full physical fencing subsystem (worker registration, heartbeat scheduling, ops dashboard for 'fence_required' resolution) — the lease primitives + adapter capability contract are delivered, but the operational tooling for managing fence_required assignments is NOT.
+
+---
+Task ID: 12B-slice-5-hardening-runtime-fencing
+Agent: main (Z.ai Code)
+Task: Slice 5 hardening per the 5 requirements: (1) move lease validation into NetworkRuntime.executeAssignment; (2) introduce explicit FENCING state (ACTIVE→FENCING durable→adapter.cancel() outside tx→FENCED/UNSAFE_TO_RETRY durable CAS); (3) capacity release only after FENCED; (4) test stale/direct runtime execution rejected; (5) test adapter.cancel() succeeds but durable transition fails → lease stays FENCING.
+
+Work Log:
+- REQ 1 — LEASE VALIDATION IN THE RUNTIME BOUNDARY:
+  - Extended RuntimeExecuteInput with leaseId/leaseVersion/workerIdentity (optional for backward compat with VPP/Compute pre-lease paths).
+  - Added LeaseValidator type to infrastructure-runtime.ts (dependency-injected into the constructor, avoiding a circular dependency: kernel cannot import from control-plane, so the bootstrap wires the concrete validateLeaseForExecution).
+  - InfrastructureRuntime.executeAssignment now validates the lease BEFORE invoking the adapter. If the validator is injected and the lease fields are missing → rejected ("missing lease token"). If the lease is stale/wrong-worker/expired → rejected.
+  - Updated bootstrap/index.ts to inject validateLeaseForExecution into InfrastructureRuntime.
+  - executeDecision now passes the lease token (leaseId, leaseVersion, workerIdentity) into runtime.executeAssignment.
+  - Exported validateLeaseForExecution from the control-plane index + LeaseValidator type from the runtime barrel.
+
+- REQ 2 — EXPLICIT FENCING STATE (3-phase durable transition):
+  - Added 'fencing' to LeaseStatus + LEASE_STATUS.
+  - Rewrote fenceExecutionLease into 3 phases:
+    Phase 1 (transitionLeaseToFencing): durable CAS ACTIVE→FENCING (in a tx). Records that fencing has started. Crash here → lease stays FENCING (not ACTIVE, not FENCED).
+    Phase 2 (performAdapterCancel): adapter.cancel() OUTSIDE any transaction. Slow network I/O doesn't hold a DB tx. Crash here → lease stays FENCING. Recovery can retry.
+    Phase 3 (finalizeLeaseFence): durable CAS FENCING→FENCED/UNSAFE_TO_RETRY (in a tx). Idempotent. Transitions the assignment to 'failed' (if fenced) or 'fence_required' (if unsafe_to_retry). Crash here → lease stays FENCING, assignment NOT transitioned, capacity NOT released.
+
+- REQ 3 — CAPACITY RELEASE ONLY AFTER FENCED:
+  - finalizeLeaseFence transitions the assignment to 'failed' ONLY when outcome='fenced'. For 'unsafe_to_retry', the assignment becomes 'fence_required' (capacity NOT released). The recoverStuckAssignments function only calls releaseFailedAssignments when fenceResult.outcome === 'fenced'. This is already in place from Slice 5; the 3-phase rewrite preserves it.
+
+- REQ 4 — TEST: stale/direct runtime execution rejected (E11):
+  - "E11: direct runtime.executeAssignment without a valid lease is rejected (runtime boundary)". Tests 4 cases: (1) missing lease token entirely → "missing lease token"; (2) stale leaseVersion → "leaseVersion mismatch"; (3) wrong workerIdentity → "workerIdentity mismatch"; (4) valid lease → execution succeeds. Proves the validation is at the runtime boundary, not just the orchestrator.
+
+- REQ 5 — TEST: adapter.cancel() succeeds but durable transition fails → lease stays FENCING (E12):
+  - "E12: if the durable FENCING→FENCED transition fails, the lease stays FENCING (crash safety)". Simulates a crash by manually transitioning the lease to FENCING, then asserts: (a) the lease is FENCING (not ACTIVE, not FENCED); (b) validateLeaseForExecution rejects it ("not active"); (c) a recovery retry via fenceExecutionLease does NOT corrupt it (stays not-ACTIVE). Proves the crash-safety property: a crash after cancel but before finalize leaves the lease in the safe FENCING state — not falsely ACTIVE (which would allow re-execution) and not falsely FENCED (which would release capacity).
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-5-lease.test.ts: 11/11 pass (was 9/9; +2 hardening), 44 expect() calls.
+    + E11: direct runtime.executeAssignment rejected (4 cases).
+    + E12: FENCING crash safety (lease stays FENCING, not ACTIVE/FENCED).
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors.
+
+Stage Summary:
+- Lease validation is now in the NetworkRuntime execution boundary (dependency-injected LeaseValidator). A direct runtime.executeAssignment() without a valid lease is rejected — even when bypassing executeDecision.
+- The FENCING state is explicit: ACTIVE→FENCING (durable tx)→adapter.cancel() (outside tx)→FENCED/UNSAFE_TO_RETRY (durable CAS). A crash at any point leaves the lease in a safe intermediate state (FENCING), not a dangerous one (ACTIVE or FENCED).
+- Capacity release is permitted only after FENCED (finalizeLeaseFence transitions assignment to 'failed' only for 'fenced' outcome).
+- The 3-phase fencing is crash-safe: the lease never falsely appears ACTIVE (allowing re-execution) or FENCED (allowing capacity release) after a crash.
+- VPP/Compute dispatch paths pre-date the lease system and use optional lease fields (validation skipped when not provided). They will be migrated to pass lease tokens in a future slice.

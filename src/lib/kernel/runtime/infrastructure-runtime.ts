@@ -48,14 +48,38 @@ import type {
  * The bootstrap constructs the registry + runtime; tests can construct
  * an isolated registry for multi-adapter scenarios.
  */
+/**
+ * Phase 12B Slice 5: a lease validator function, injected into the runtime.
+ *
+ * The runtime calls this BEFORE invoking the adapter. If it returns
+ * { valid: false }, the runtime rejects the execution (throws).
+ *
+ * This is dependency-injected (not imported) to avoid a circular dependency:
+ * the control plane imports from the kernel runtime, so the kernel runtime
+ * cannot import from the control plane. The bootstrap wires the concrete
+ * validateLeaseForExecution function.
+ */
+export type LeaseValidator = (input: {
+  leaseId: string
+  leaseVersion: number
+  workerIdentity: string
+}) => Promise<{ valid: boolean; reason?: string }>
+
 export class InfrastructureRuntime implements NetworkRuntime {
   readonly kind = 'infrastructure' as const
 
   /**
    * @param adapterRegistry The registry this runtime uses for adapter resolution.
    *   Injected (not imported as a global) so tests can use an isolated registry.
+   * @param leaseValidator Phase 12B Slice 5: validates the execution lease
+   *   before invoking the adapter. If not provided, lease validation is skipped
+   *   (backward compatible with existing tests that don't use leases). Production
+   *   deployments MUST inject validateLeaseForExecution.
    */
-  constructor(private readonly adapterRegistry: AdapterRegistry) {}
+  constructor(
+    private readonly adapterRegistry: AdapterRegistry,
+    private readonly leaseValidator?: LeaseValidator,
+  ) {}
 
   async createExecution(
     tx: RuntimeClient,
@@ -128,9 +152,44 @@ export class InfrastructureRuntime implements NetworkRuntime {
   // Phase 7.2: The runtime resolves the adapter using the full selection
   // (assetType + adapterType + capabilityType) — not just assetType.
   // This supports multi-adapter asset types (e.g., battery → multiple adapters).
+  // Phase 12B Slice 5: the runtime validates the execution lease BEFORE
+  // invoking the adapter. A direct call to executeAssignment() without a
+  // valid lease is rejected — even when bypassing executeDecision.
   async executeAssignment(
     input: RuntimeExecuteInput,
   ): Promise<RuntimeExecuteResult> {
+    // Phase 12B Slice 5: validate the lease (if a validator was injected).
+    // This is the load-bearing safety check: a stale/direct execution is
+    // rejected at the runtime boundary, not just at the orchestrator.
+    if (this.leaseValidator) {
+      // If the lease fields are missing, reject — the caller bypassed the
+      // lease system (e.g., a direct runtime.executeAssignment call without
+      // going through executeDecision).
+      if (!input.leaseId || input.leaseVersion === undefined || !input.workerIdentity) {
+        return {
+          actualQuantity: '0',
+          actualUnit: input.assignedUnit,
+          telemetryPayload: {},
+          success: false,
+          error: 'Execution lease rejected: missing lease token (leaseId/leaseVersion/workerIdentity). Direct runtime execution without a lease is not permitted when a lease validator is configured.',
+        }
+      }
+      const leaseCheck = await this.leaseValidator({
+        leaseId: input.leaseId,
+        leaseVersion: input.leaseVersion,
+        workerIdentity: input.workerIdentity,
+      })
+      if (!leaseCheck.valid) {
+        return {
+          actualQuantity: '0',
+          actualUnit: input.assignedUnit,
+          telemetryPayload: {},
+          success: false,
+          error: `Execution lease rejected: ${leaseCheck.reason}`,
+        }
+      }
+    }
+
     // Phase 7.2: Resolve the adapter via the full selection contract.
     // - If adapterType is specified: resolves the exact adapter.
     // - If adapterType is omitted + single adapter: resolves it.

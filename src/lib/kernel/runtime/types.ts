@@ -142,6 +142,28 @@ export interface RuntimeExecuteInput {
   durationSeconds: number
   /** Additional vertical-specific parameters (e.g., assignedKw for VPP). */
   parameters?: Record<string, unknown>
+  /**
+   * Phase 12B Slice 5: the execution lease token.
+   *
+   * The runtime validates this lease (active + version + workerIdentity +
+   * not expired) BEFORE invoking the adapter. A direct call to
+   * runtime.executeAssignment() without a valid lease is rejected —
+   * even when bypassing executeDecision.
+   *
+   * This makes lease validation part of the NetworkRuntime execution
+   * boundary, not just the orchestrator.
+   *
+   * NOTE: currently optional for backward compatibility with VPP/Compute
+   * dispatch paths that pre-date the lease system. When a leaseValidator
+   * is injected into the runtime (production bootstrap), a missing lease
+   * is rejected. VPP/Compute will be migrated to pass lease tokens in a
+   * future slice.
+   */
+  leaseId?: string
+  /** The lease version (fencing token). Must match the lease's current version. */
+  leaseVersion?: number
+  /** The worker identity that acquired the lease. */
+  workerIdentity?: string
 }
 
 /**

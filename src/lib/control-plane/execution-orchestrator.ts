@@ -944,6 +944,9 @@ export async function executeDecision(
     }, { timeout: 30000 })
 
     // 2. Execute via the adapter (runtime resolves adapter via AdapterRegistry).
+    //    Phase 12B Slice 5: the lease token is passed to the runtime, which
+    //    validates it BEFORE invoking the adapter. This makes lease validation
+    //    part of the NetworkRuntime execution boundary.
     let executeResult
     try {
       executeResult = await runtime.executeAssignment({
@@ -960,6 +963,10 @@ export async function executeDecision(
               1000,
           ),
         ),
+        // Phase 12B Slice 5: lease token (required by the runtime).
+        leaseId: lease.id,
+        leaseVersion: lease.leaseVersion,
+        workerIdentity,
       })
     } catch (err) {
       // Adapter threw — fence the lease + release capacity.

@@ -83,6 +83,7 @@ export {
   renewExecutionLease,
   completeExecutionLease,
   fenceExecutionLease,
+  validateLeaseForExecution,
   DEFAULT_LEASE_MS,
   LEASE_STATUS,
   ASSIGNMENT_STATUS,

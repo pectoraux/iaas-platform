@@ -54,6 +54,7 @@ import { DeterministicTransactionExecutor } from '@/lib/kernel/runtime/protocol/
 import { TransferHandler, MintHandler, RecordDeliveryHandler } from '@/lib/bootstrap/handlers'
 import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '@/lib/kernel/runtime/protocol/validator-consensus'
 import { InMemoryReconciliationStore } from '@/lib/kernel/runtime/protocol/in-memory-reconciliation-store'
+import { validateLeaseForExecution } from '@/lib/control-plane/execution-lease'
 
 let initialized = false
 
@@ -85,7 +86,9 @@ export function initializeBootstrap(): void {
   // 2. Construct InfrastructureRuntime with the populated adapter registry.
   //    Phase 7.3: dependency injection — the runtime receives the registry
   //    instance rather than importing the global singleton.
-  const infrastructureRuntime = new InfrastructureRuntime(adapterRegistry)
+  //    Phase 12B Slice 5: inject the lease validator so the runtime rejects
+  //    direct/stale executions at the runtime boundary.
+  const infrastructureRuntime = new InfrastructureRuntime(adapterRegistry, validateLeaseForExecution)
 
   // 3. Construct ProtocolRuntime with protocol-specific dependencies.
   //    Phase 9A: The protocol runtime owns a state store, executor,

@@ -56,7 +56,7 @@ export const DEFAULT_LEASE_MS = 5 * 60 * 1000 // 5 minutes
 // Types
 // ---------------------------------------------------------------------------
 
-export type LeaseStatus = 'active' | 'released' | 'fenced' | 'unsafe_to_retry'
+export type LeaseStatus = 'active' | 'fencing' | 'released' | 'fenced' | 'unsafe_to_retry'
 export type FenceOutcome = 'fenced' | 'unsafe_to_retry'
 
 export interface ExecutionLeaseRecord {
@@ -417,104 +417,293 @@ export async function fenceExecutionLease(input: {
   }
   tx?: ExtendedTransactionClient
 }): Promise<FenceLeaseResult> {
+  // PHASE 1: durable transition ACTIVE → FENCING (in a transaction).
+  // This records that fencing has started. If the process crashes after
+  // this commit but before adapter.cancel(), the lease stays FENCING —
+  // not falsely ACTIVE (which would allow another worker to execute)
+  // and not falsely FENCED (which would release capacity prematurely).
+  const transitionResult = await transitionLeaseToFencing({
+    leaseId: input.leaseId,
+    leaseVersion: input.leaseVersion,
+    reason: input.reason,
+  })
+
+  if (!transitionResult.transitioned) {
+    // The lease was not active (or version mismatch). Check if it's already
+    // terminal and return the existing outcome.
+    const existing = await db.executionLease.findUnique({
+      where: { id: input.leaseId },
+      select: { status: true, fenceOutcome: true },
+    })
+    if (existing && (existing.status === 'fenced' || existing.status === 'unsafe_to_retry' || existing.status === 'released')) {
+      return {
+        fenced: true,
+        outcome: (existing.fenceOutcome ?? 'unsafe_to_retry') as FenceOutcome,
+        reason: `lease already ${existing.status}`,
+      }
+    }
+    return {
+      fenced: false,
+      outcome: 'unsafe_to_retry',
+      reason: transitionResult.reason ?? 'could not transition to FENCING',
+    }
+  }
+
+  // PHASE 2: adapter.cancel() OUTSIDE the transaction.
+  // The cancel() call may be slow (network I/O to the physical resource).
+  // It must NOT hold a DB transaction open. If it fails or the process
+  // crashes here, the lease remains FENCING — recovery can retry.
+  const cancelOutcome = await performAdapterCancel(input)
+
+  // PHASE 3: durable CAS transition FENCING → FENCED/UNSAFE_TO_RETRY.
+  // CAS on (leaseId, status='fencing') — if another recovery process
+  // already finalized it, this is a no-op.
+  const finalizeResult = await finalizeLeaseFence({
+    leaseId: input.leaseId,
+    outcome: cancelOutcome,
+    reason: input.reason,
+  })
+
+  return {
+    fenced: finalizeResult.finalized,
+    outcome: cancelOutcome,
+    reason: input.reason,
+  }
+}
+
+/**
+ * PHASE 1 of fencing: durably transition the lease from ACTIVE → FENCING.
+ *
+ * This is a CAS on (leaseId, leaseVersion, status='active') → status='fencing'.
+ * If the lease is not active or the version doesn't match, the transition
+ * fails (returns transitioned=false). This prevents a stale worker or a
+ * concurrent fence from racing.
+ *
+ * After this commit, the lease is durably FENCING. A crash here leaves the
+ * lease in FENCING — not ACTIVE (which would allow re-execution) and not
+ * FENCED (which would release capacity).
+ */
+async function transitionLeaseToFencing(input: {
+  leaseId: string
+  leaseVersion: number
+  reason: string
+  tx?: ExtendedTransactionClient
+}): Promise<{ transitioned: boolean; reason?: string }> {
+  const client = input.tx ?? db
+
+  // CAS: status='active' + leaseVersion match → status='fencing'.
+  const result = await client.executionLease.updateMany({
+    where: {
+      id: input.leaseId,
+      leaseVersion: input.leaseVersion,
+      status: 'active',
+    },
+    data: {
+      status: 'fencing',
+      fenceReason: input.reason,
+    },
+  })
+
+  if (result.count === 0) {
+    return {
+      transitioned: false,
+      reason: 'lease not found, not active, or leaseVersion mismatch (stale worker)',
+    }
+  }
+  return { transitioned: true }
+}
+
+/**
+ * PHASE 2 of fencing: call adapter.cancel() OUTSIDE any transaction.
+ *
+ * If the adapter supports cancellation, calls adapter.cancel(). Returns
+ * 'fenced' if cancellation was confirmed, 'unsafe_to_retry' otherwise.
+ * If the adapter does NOT support cancellation, returns 'unsafe_to_retry'
+ * directly (no cancel() call).
+ *
+ * CRASH SAFETY: if the process crashes during this call, the lease remains
+ * FENCING (from phase 1). Recovery can retry the cancel.
+ */
+async function performAdapterCancel(input: {
+  leaseId: string
+  adapterSelection?: {
+    assetId: string
+    assetType: string
+    capabilityType: string
+    adapterType?: string
+  }
+  reason: string
+}): Promise<FenceOutcome> {
+  if (!input.adapterSelection) {
+    return 'unsafe_to_retry'
+  }
+
+  let adapter: InfrastructureAdapter | null = null
+  let supportsCancellation = false
+
+  try {
+    const descriptor = adapterRegistry.resolveDescriptor({
+      assetType: input.adapterSelection.assetType,
+      adapterType: input.adapterSelection.adapterType,
+      capabilityType: input.adapterSelection.capabilityType,
+    })
+    supportsCancellation = descriptor.adapter.supportsCancellation ?? false
+    adapter = descriptor.adapter
+  } catch {
+    // Adapter not found — cannot fence. Mark unsafe_to_retry.
+    return 'unsafe_to_retry'
+  }
+
+  if (supportsCancellation && adapter && adapter.cancel) {
+    try {
+      const cancelCommand: CancelCommand = {
+        assetId: input.adapterSelection.assetId,
+        capabilityType: input.adapterSelection.capabilityType,
+        leaseId: input.leaseId,
+        reason: input.reason,
+      }
+      const cancelResult = await adapter.cancel(cancelCommand)
+      return cancelResult.confirmed ? 'fenced' : 'unsafe_to_retry'
+    } catch {
+      // cancel() threw — physical execution may still be running.
+      return 'unsafe_to_retry'
+    }
+  }
+
+  // Adapter cannot cancel — physical execution may still be running.
+  return 'unsafe_to_retry'
+}
+
+/**
+ * PHASE 3 of fencing: durably CAS transition FENCING → FENCED/UNSAFE_TO_RETRY.
+ *
+ * CAS on (leaseId, status='fencing') → status=outcome. If another recovery
+ * process already finalized it (status is no longer 'fencing'), this is a
+ * no-op (idempotent).
+ *
+ * If outcome='fenced', transitions the assignment to 'failed' (capacity
+ * releasable). If 'unsafe_to_retry', transitions the assignment to
+ * 'fence_required' (capacity NOT released).
+ *
+ * CRASH SAFETY: if the process crashes after phase 2 (cancel confirmed) but
+ * before this commit, the lease remains FENCING. Recovery can retry phase 3
+ * — the assignment is NOT yet marked 'failed'/'fence_required', and capacity
+ * is NOT released. This is the safe state.
+ */
+async function finalizeLeaseFence(input: {
+  leaseId: string
+  outcome: FenceOutcome
+  reason: string
+  tx?: ExtendedTransactionClient
+}): Promise<{ finalized: boolean }> {
   const client = input.tx ?? db
   const now = new Date()
 
-  // Lock the lease row FOR UPDATE.
+  // CAS: status='fencing' → status=outcome. Idempotent if already finalized.
+  const result = await client.executionLease.updateMany({
+    where: {
+      id: input.leaseId,
+      status: 'fencing',
+    },
+    data: {
+      status: input.outcome,
+      fencedAt: now,
+      fenceReason: input.reason,
+      fenceOutcome: input.outcome,
+    },
+  })
+
+  if (result.count === 0) {
+    // Already finalized by another caller — idempotent.
+    return { finalized: true }
+  }
+
+  // Transition the assignment based on the outcome.
+  const lease = await client.executionLease.findUnique({
+    where: { id: input.leaseId },
+    select: { executionAssignmentId: true },
+  })
+
+  if (lease) {
+    if (input.outcome === 'fenced') {
+      // Safe — capacity can be released.
+      await client.executionAssignment.update({
+        where: { id: lease.executionAssignmentId },
+        data: { status: 'failed' },
+      })
+    } else {
+      // unsafe_to_retry — capacity NOT released. Human/ops intervention.
+      await client.executionAssignment.update({
+        where: { id: lease.executionAssignmentId },
+        data: { status: 'fence_required' },
+      })
+    }
+  }
+
+  return { finalized: true }
+}
+
+/**
+ * Validate that a lease is active + owned by the caller, for runtime execution.
+ *
+ * Phase 12B Slice 5 hardening: the runtime's executeAssignment() calls this
+ * BEFORE invoking the adapter. A stale worker (wrong leaseVersion) or a
+ * non-active lease (fencing/fenced/unsafe_to_retry/released) is rejected.
+ *
+ * This makes the lease validation part of the NetworkRuntime execution
+ * boundary — a direct call to runtime.executeAssignment() without a valid
+ * lease is rejected, even when bypassing executeDecision.
+ *
+ * @returns { valid: true } if the lease is active + version matches.
+ * @returns { valid: false, reason } otherwise.
+ */
+export async function validateLeaseForExecution(input: {
+  leaseId: string
+  leaseVersion: number
+  workerIdentity: string
+  tx?: ExtendedTransactionClient
+}): Promise<{ valid: boolean; reason?: string }> {
+  const client = input.tx ?? db
+
+  // Lock the lease row FOR UPDATE + verify ownership + active status.
   const locked = await client.$queryRaw<Array<{
     id: string
     status: string
     leaseVersion: number
-    executionAssignmentId: string
+    workerIdentity: string
+    leaseUntil: Date
   }>>`
-    SELECT id, status, "leaseVersion", "executionAssignmentId" FROM "ExecutionLease"
+    SELECT id, status, "leaseVersion", "workerIdentity", "leaseUntil"
+    FROM "ExecutionLease"
     WHERE id = ${input.leaseId}
     FOR UPDATE
   `
 
   if (locked.length === 0) {
-    return { fenced: false, outcome: 'unsafe_to_retry', reason: 'lease not found' }
+    return { valid: false, reason: 'lease not found' }
   }
 
   const row = locked[0]
 
-  // Already terminal — no-op.
-  if (row.status === 'released' || row.status === 'fenced' || row.status === 'unsafe_to_retry') {
-    return {
-      fenced: true,
-      outcome: row.status === 'fenced' ? 'fenced' : 'unsafe_to_retry',
-      reason: `lease already ${row.status}`,
-    }
+  if (row.status !== 'active') {
+    return { valid: false, reason: `lease status is '${row.status}' (not active)` }
   }
 
-  // Determine the adapter's cancellation capability.
-  let supportsCancellation = false
-  let adapter: InfrastructureAdapter | null = null
-  if (input.adapterSelection) {
-    try {
-      const descriptor = adapterRegistry.resolveDescriptor({
-        assetType: input.adapterSelection.assetType,
-        adapterType: input.adapterSelection.adapterType,
-        capabilityType: input.adapterSelection.capabilityType,
-      })
-      supportsCancellation = descriptor.adapter.supportsCancellation ?? false
-      adapter = descriptor.adapter
-    } catch {
-      // Adapter not found — cannot fence. Mark unsafe_to_retry.
-      supportsCancellation = false
-    }
+  if (row.leaseVersion !== input.leaseVersion) {
+    return { valid: false, reason: `leaseVersion mismatch: caller has ${input.leaseVersion}, lease has ${row.leaseVersion} (stale worker)` }
   }
 
-  let outcome: FenceOutcome
-  if (supportsCancellation && adapter && adapter.cancel) {
-    // Call the adapter's cancel() to stop the physical operation.
-    try {
-      const cancelCommand: CancelCommand = {
-        assetId: input.adapterSelection!.assetId,
-        capabilityType: input.adapterSelection!.capabilityType,
-        leaseId: input.leaseId,
-        reason: input.reason,
-      }
-      const cancelResult = await adapter.cancel(cancelCommand)
-      outcome = cancelResult.confirmed ? 'fenced' : 'unsafe_to_retry'
-    } catch {
-      // cancel() threw — physical execution may still be running.
-      outcome = 'unsafe_to_retry'
-    }
-  } else {
-    // Adapter cannot cancel — physical execution may still be running.
-    outcome = 'unsafe_to_retry'
+  if (row.workerIdentity !== input.workerIdentity) {
+    return { valid: false, reason: `workerIdentity mismatch: caller is '${input.workerIdentity}', lease is owned by '${row.workerIdentity}'` }
   }
 
-  // Transition the lease.
-  await client.executionLease.update({
-    where: { id: input.leaseId },
-    data: {
-      status: outcome,
-      fencedAt: now,
-      fenceReason: input.reason,
-      fenceOutcome: outcome,
-    },
-  })
-
-  // If fenced (safe), transition the assignment to 'failed' so capacity can
-  // be released. If unsafe_to_retry, mark the assignment 'fence_required' —
-  // capacity is NOT released.
-  if (outcome === 'fenced') {
-    await client.executionAssignment.update({
-      where: { id: row.executionAssignmentId },
-      data: { status: 'failed' },
-    })
-  } else {
-    // unsafe_to_retry — mark the assignment as 'fence_required' (a new status
-    // that blocks re-execution until human/ops intervention).
-    await client.executionAssignment.update({
-      where: { id: row.executionAssignmentId },
-      data: { status: 'fence_required' },
-    })
+  // Check lease expiry. An expired lease is NOT valid for execution —
+  // recovery must fence it first.
+  if (row.leaseUntil < new Date()) {
+    return { valid: false, reason: `lease expired (leaseUntil=${row.leaseUntil.toISOString()})` }
   }
 
-  return { fenced: true, outcome, reason: input.reason }
+  return { valid: true }
 }
 
 // ---------------------------------------------------------------------------
@@ -557,6 +746,7 @@ function dbLeaseToRecord(row: {
 
 export const LEASE_STATUS = {
   ACTIVE: 'active',
+  FENCING: 'fencing',
   RELEASED: 'released',
   FENCED: 'fenced',
   UNSAFE_TO_RETRY: 'unsafe_to_retry',
