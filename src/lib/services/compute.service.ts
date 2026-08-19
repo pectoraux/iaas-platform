@@ -35,12 +35,6 @@ import { db } from '@/lib/db'
 import { Prisma } from '@prisma/client'
 import { NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit } from '@/lib/domain/audit'
-import { ingestEvent, buildCanonicalMessage } from './ingestion.service'
-import { processEventOutbox, processSettlementForReward } from './worker.service'
-import { createContribution } from './contribution.service'
-import { calculateReward } from './reward.service'
-import { postRewardToLedger } from './ledger.service'
-import { createSettlement } from './settlement.service'
 import {
   ensureCapacityResource,
   createCapacityReservation,
@@ -51,6 +45,11 @@ import {
 import { signMessage, deriveSigningKey } from '@/lib/domain/crypto'
 import { randomUUID } from 'crypto'
 import { resolveRuntime, type RuntimeKind } from '@/lib/kernel/runtime'
+import {
+  initEconomicPipeline,
+  processEconomicPipeline,
+  type EconomicPipelineResult,
+} from '@/lib/control-plane/economic-pipeline'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -223,6 +222,19 @@ export async function createAndExecuteComputeJob(
   // adapter.execute(). The runtime owns physical execution.
   // Phase 8C: Passes adapterType if specified (for explicit adapter selection
   // or failure testing with a nonexistent adapterType).
+  // Phase 12B Slice 7: acquire an execution lease before executing (required
+  // by the Slice 5 lease validation injected into the runtime).
+  const { acquireExecutionLease } = await import('@/lib/control-plane/execution-lease')
+  const leaseResult = await acquireExecutionLease({
+    executionAssignmentId: execution.executionAssignmentId,
+    workerIdentity: `compute-${computeJobId}`,
+  })
+  if (!leaseResult.acquired) {
+    await releaseCommitment(tenantId, 'compute_job', computeJobId)
+    throw new Error(`Could not acquire execution lease: ${leaseResult.reason}`)
+  }
+  const lease = leaseResult.lease!
+
   const executeResult = await runtime.executeAssignment({
     assetId: input.assetId,
     assetType: asset.assetType,
@@ -232,6 +244,9 @@ export async function createAndExecuteComputeJob(
     assignedUnit: input.assignedUnit,
     durationSeconds: input.durationSeconds,
     parameters: input.parameters,
+    leaseId: lease.id,
+    leaseVersion: lease.leaseVersion,
+    workerIdentity: `compute-${computeJobId}`,
   })
 
   if (!executeResult.success) {
@@ -246,49 +261,15 @@ export async function createAndExecuteComputeJob(
     throw new Error(`Compute execution failed: ${executeResult.error}`)
   }
 
-  // --- 3. Sign + submit telemetry as a generic Event ---
-  const eventId = `compute-job-${execution.executionAssignmentId}-${Date.now()}`
-  const timestamp = new Date().toISOString()
-  const sequence = Math.floor(Date.now() / 1000)
-  const message = buildCanonicalMessage({
-    device_id: device.id,
-    event_id: eventId,
-    timestamp,
-    event_type: 'telemetry',
-    sequence,
-    payload: executeResult.telemetryPayload,
-  })
-  const signingKey = deriveSigningKey(provisioningSecret)
-  const signature = signMessage(message, signingKey)
-
-  // Resolve the network version for verification (same immutable version).
-  const ingestResult = await ingestEvent(tenantId, {
-    device_id: device.id,
-    event_id: eventId,
-    timestamp,
-    event_type: 'telemetry',
-    sequence,
-    payload: executeResult.telemetryPayload,
-    signature,
-    network_version_id: networkVersion.id,
-    capability_type: input.capabilityType,
+  // Complete the execution lease (success).
+  const { completeExecutionLease } = await import('@/lib/control-plane/execution-lease')
+  await completeExecutionLease({
+    leaseId: lease.id,
+    leaseVersion: lease.leaseVersion,
+    workerIdentity: `compute-${computeJobId}`,
   })
 
-  // --- 4. Process the event through generic verification → attestation ---
-  await processEventOutbox(tenantId)
-
-  const event = await db.event.findUnique({
-    where: { id: ingestResult.event_id },
-    include: { attestations: true },
-  })
-
-  if (event?.status !== 'verified' || !event.attestations[0]) {
-    throw new Error(`Compute telemetry verification failed: ${event?.status}`)
-  }
-
-  const attestation = event.attestations[0]
-
-  // --- 5. Record results + complete the assignment (OPERATIONAL COMPLETION) ---
+  // --- 3. Record results + complete the assignment (OPERATIONAL COMPLETION) ---
   // Phase 5.2 / 8C: operational completion happens BEFORE economics.
   // The generic ExecutionAssignment is completed when the work is verified,
   // NOT when the contribution/reward/settlement succeeds.
@@ -298,31 +279,11 @@ export async function createAndExecuteComputeJob(
       actualUnit: executeResult.actualUnit,
       verifiedQuantity: executeResult.actualQuantity,
       verifiedUnit: executeResult.actualUnit,
-      eventId: event.id,
     })
     await runtime.completeAssignment(tx, tenantId, execution.executionAssignmentId, execution.executionId)
   })
 
-  // --- 6. Create a Contribution from the verified result (ECONOMICS) ---
-  // Phase 8C: Contribution is created AFTER operational completion, not before.
-  // The actual GPU-hours delivered becomes the Contribution quantity.
-  // This is the SAME generic contribution service VPP uses.
-  const contribution = await createContribution(
-    tenantId,
-    {
-      attestationIds: [attestation.id],
-      derivedQuantity: executeResult.actualQuantity,
-      derivedUnit: executeResult.actualUnit,
-    },
-    `compute-attestation-${attestation.id}`,
-  )
-
-  // --- 7. Link the contribution (write-once, after operational completion) ---
-  await db.$transaction(async (tx) => {
-    await runtime.linkContribution(tx, execution.executionAssignmentId, contribution.id)
-  })
-
-  // --- 8. Record capacity usage ---
+  // --- 4. Record capacity usage ---
   await recordUsage({
     tenantId,
     commitmentId: commitment.commitmentId,
@@ -334,15 +295,30 @@ export async function createAndExecuteComputeJob(
     sourceId: computeJobId,
   })
 
-  // --- 9. Calculate Reward (generic reward service) ---
-  const reward = await calculateReward(tenantId, contribution.id, `compute-contrib-${contribution.id}`)
+  // --- 5. Initialize + run the generic economic pipeline ---
+  // Phase 12B Slice 7: Compute delegates economic processing to the generic
+  // EconomicPipelineState + processEconomicPipeline. No compute-specific
+  // economic primitives are created — the generic pipeline orchestrates
+  // Event → Verification → Attestation → Contribution → Reward → Ledger →
+  // Settlement through deterministic idempotency keys.
+  await initEconomicPipeline({
+    executionAssignmentId: execution.executionAssignmentId,
+    tenantId,
+    networkVersionId: networkVersion.id,
+    networkId: input.networkId,
+  })
 
-  // --- 10. Post to Ledger (generic ledger service) ---
-  await postRewardToLedger(tenantId, { rewardId: reward.id }, `compute-reward-${reward.id}`)
-
-  // --- 11. Create + process Settlement (generic settlement service) ---
-  const settlement = await createSettlement(tenantId, reward.id)
-  await processSettlementForReward(tenantId, reward.id)
+  const economicResult = await processEconomicPipeline({
+    executionAssignmentId: execution.executionAssignmentId,
+    telemetryPayload: executeResult.telemetryPayload,
+    actualQuantity: executeResult.actualQuantity,
+    actualUnit: executeResult.actualUnit,
+    deviceId: device.id,
+    signingKey: deriveSigningKey(provisioningSecret),
+    capabilityType: input.capabilityType,
+    timestamp: new Date().toISOString(),
+    sequence: Math.floor(Date.now() / 1000),
+  })
 
   await appendAudit({
     tenantId,
@@ -353,21 +329,24 @@ export async function createAndExecuteComputeJob(
     metadata: {
       actualQuantity: executeResult.actualQuantity,
       actualUnit: executeResult.actualUnit,
-      eventId: event.id,
-      contributionId: contribution.id,
-      rewardId: reward.id,
-      settlementId: settlement.id,
+      eventId: economicResult.eventId,
+      attestationId: economicResult.attestationId,
+      contributionId: economicResult.contributionId,
+      rewardId: economicResult.rewardId,
+      ledgerPostingId: economicResult.ledgerPostingId,
+      settlementId: economicResult.settlementId,
+      economicStage: economicResult.stage,
     },
   })
 
   return {
     executionId: execution.executionId,
     executionAssignmentId: execution.executionAssignmentId,
-    eventId: event.id,
-    attestationId: attestation.id,
-    contributionId: contribution.id,
-    rewardId: reward.id,
-    settlementId: settlement.id,
+    eventId: economicResult.eventId!,
+    attestationId: economicResult.attestationId!,
+    contributionId: economicResult.contributionId!,
+    rewardId: economicResult.rewardId!,
+    settlementId: economicResult.settlementId!,
     actualQuantity: executeResult.actualQuantity,
     actualUnit: executeResult.actualUnit,
   }
