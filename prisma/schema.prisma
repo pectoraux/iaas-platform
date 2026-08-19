@@ -1450,6 +1450,8 @@ model ExecutionAssignment {
   // Phase 12B Slice 5: the execution leases for this assignment (one active
   // at a time — enforced by the partial unique index on ExecutionLease).
   executionLeases ExecutionLease[]
+  // Phase 12B Slice 6: the economic pipeline checkpoint (1:1).
+  economicPipelineState EconomicPipelineState?
 
   // Phase 12B Slice 3: DB-level "one assignment per commitment" (the VPP 1:1
   // pattern, now enforced structurally). Nullable capacityCommitmentId rows
@@ -1510,6 +1512,69 @@ model ExecutionLease {
   @@index([status])
   @@index([leaseUntil])
   @@index([workerIdentity])
+}
+
+/// Phase 12B Slice 6: EconomicPipelineState — the generic checkpoint for the
+/// Evidence → Verification → Contribution → Reward → Ledger → Settlement pipeline.
+///
+/// This is NOT a new economic primitive. It is the durable checkpoint +
+/// reconciliation layer that ties together the EXISTING generic primitives:
+///   - Event (telemetry ingestion + outbox)
+///   - VerificationResult (policy-driven verification)
+///   - Attestation (verified claim)
+///   - Contribution (verified economic activity)
+///   - Reward (economic entitlement)
+///   - LedgerPosting (double-entry accounting)
+///   - Settlement (payment instruction)
+///
+/// The checkpoint is keyed 1:1 by ExecutionAssignmentId. It records the
+/// stage reached, the deterministic idempotency keys used at each stage, and
+/// the durable object IDs (eventId, attestationId, contributionId, rewardId,
+/// settlementId) so that reconciliation can resume from the exact gap without
+/// duplicating downstream outcomes.
+///
+/// VERTICAL NEUTRALITY: the orchestrator imports no vertical service. The
+/// vertical provides the evidence (telemetry payload) + the signing identity
+/// (device credential); the orchestrator drives the generic pipeline.
+model EconomicPipelineState {
+  id                      String   @id @default(cuid())
+  executionAssignmentId   String   @unique  // 1:1 with ExecutionAssignment
+  tenantId                String
+  networkVersionId        String
+  networkId               String
+  // The current stage of the economic pipeline.
+  //   evidence_pending → evidence_recorded → verified → contribution_created
+  //   → reward_calculated → ledger_posted → settlement_created → completed
+  //   → reconciliation_required (on partial failure)
+  stage                   String   @default("evidence_pending")
+  // Deterministic idempotency keys for each stage (derived from assignmentId,
+  // NOT from Date.now() or randomUUID). Each downstream step uses these keys
+  // so retries converge.
+  eventIdempotencyKey     String   // used for ingestEvent's externalEventId
+  contributionIdempotencyKey String // used for createContribution
+  rewardIdempotencyKey    String   // used for calculateReward
+  ledgerIdempotencyKey    String   // used for postRewardToLedger
+  settlementIdempotencyKey String  // used for createSettlement (auto-derived as reward-${rewardId})
+  // Durable object IDs (filled in as each stage completes). NULL until the
+  // stage is reached. These are the source of truth for reconciliation —
+  // reconciliation inspects these, NOT the stage field.
+  eventId                 String?
+  attestationId           String?
+  contributionId          String?
+  rewardId                String?
+  ledgerPostingId         String?
+  settlementId            String?
+  // Reconciliation metadata.
+  reconciliationReason    String?
+  lastReconciledAt        DateTime?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  executionAssignment     ExecutionAssignment @relation(fields: [executionAssignmentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([stage])
+  @@index([networkVersionId])
 }
 
 // -----------------------------------------------------------------------------

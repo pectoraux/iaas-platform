@@ -100,3 +100,14 @@ export type {
   CompleteLeaseResult,
   FenceLeaseResult,
 } from './execution-lease'
+
+// Phase 12B Slice 6: Economic pipeline orchestrator (Evidence → Verification →
+// Contribution → Reward → Ledger → Settlement).
+export {
+  initEconomicPipeline,
+  processEconomicPipeline,
+  reconcileEconomicPipeline,
+  traceEconomicChain,
+  ECONOMIC_STAGE,
+} from './economic-pipeline'
+export type { EconomicPipelineResult, EconomicStage } from './economic-pipeline'

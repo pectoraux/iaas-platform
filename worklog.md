@@ -4229,3 +4229,49 @@ Test results (against Neon PostgreSQL):
 Stage Summary:
 - The E16 proof is now valid: it pauses INSIDE the actual acquireExecutionLease function (via the test-only afterAssignmentLock hook), not in a manually created transaction. This proves the transaction wrapper holds the FOR UPDATE lock across the critical section.
 - Slice 5 is ready to freeze.
+
+---
+Task ID: 12B-slice-6-economic-pipeline
+Agent: main (Z.ai Code)
+Task: Phase 12B Slice 6 — Evidence, Verification & Economic Outcome. Build the generic Evidence → Verification → Contribution → Reward → Ledger → Settlement boundary. Reuse existing generic primitives; introduce only the generic EconomicPipelineState checkpoint + reconciliation layer.
+
+Work Log:
+- ARCHITECTURE AUDIT (via Explore subagent): mapped the entire existing pipeline. Key finding: the existing economic primitives (ingestEvent, processEventOutbox, VerificationResult, Attestation, createContribution, calculateReward, postRewardToLedger, createSettlement) are mature, generic, and reusable. The gaps were: (1) no generic economic-stage checkpoint (VPP has economicStage on its vertical-specific VppDispatchAssignment; Compute has nothing), (2) no generic economic reconciliation (VPP has reconcileAssignment; Compute has nothing), (3) Contribution↔Attestation dual representation. The Phase 11B ReconciliationStore is protocol-specific (not reusable for the economic pipeline).
+- DESIGN DECISION: do NOT introduce GenericEvidenceV2/GenericRewardV2/etc. (the directive explicitly warns against this). Instead, introduce ONE new generic primitive: EconomicPipelineState — a 1:1 checkpoint on ExecutionAssignment that records the stage reached + the durable object IDs (eventId, attestationId, contributionId, rewardId, ledgerPostingId, settlementId) + the deterministic idempotency keys used at each stage. This is the "glue" that makes the existing primitives work as a single recoverable chain without duplicating them.
+- SCHEMA MIGRATION (prisma/migrations/20260821000000_control_plane_slice6_economic_pipeline/migration.sql):
+    + EconomicPipelineState model: 1:1 with ExecutionAssignment, stage (evidence_pending → evidence_recorded → verified → contribution_created → reward_calculated → ledger_posted → settlement_created → completed → reconciliation_required), deterministic idempotency keys (derived from assignmentId, not Date.now()), durable object IDs (filled as each stage completes), reconciliation metadata.
+    + Added economicPipelineState reverse relation on ExecutionAssignment.
+- ECONOMIC PIPELINE ORCHESTRATOR (src/lib/control-plane/economic-pipeline.ts):
+    + initEconomicPipeline: creates the checkpoint (idempotent — returns existing if present).
+    + processEconomicPipeline: drives the full pipeline. For each stage: checks if the durable object ID is already set (skip if yes — idempotent), calls the existing generic primitive (ingestEvent, processEventOutbox, createContribution, calculateReward, postRewardToLedger, createSettlement), updates the checkpoint. On verification rejection → terminal failure (no contribution/reward/ledger/settlement). On any other failure → reconciliation_required.
+    + reconcileEconomicPipeline: inspects durable objects + resumes from the gap (the VPP reconcileAssignment pattern, but generic). Each downstream step is idempotent (deterministic keys), so retries converge — no duplicate outcomes.
+    + traceEconomicChain: walks the chain backward (Settlement → Ledger → Reward → Contribution → Attestation → Event → ExecutionAssignment).
+    + VERTICAL NEUTRALITY: imports no vertical service. A static source check in the test verifies this.
+- EVIDENCE MODEL: the existing Event + VerificationResult + Attestation chain IS the evidence chain for infrastructure networks. No new Evidence model was introduced — the directive says "do not create GenericEvidenceV2 just because the existing names are imperfect." The EconomicPipelineState references the eventId + attestationId that already exist.
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-6-economic.test.ts: 4/4 pass.
+    + A (happy path): Execution → Evidence → Verification → Contribution → Reward → Ledger → Settlement — full chain, 14 expect() calls.
+    + B (retry): run pipeline twice → exactly one outcome at each idempotent boundary (replayed=true, no duplicate events/contributions/rewards/postings/settlements).
+    + E (traceability): trace the full chain backward — Settlement → Ledger → Reward → Contribution → Attestation → Event → ExecutionAssignment.
+    + F (vertical neutrality): economic-pipeline source imports no vertical service.
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors in Slice 6 files.
+
+EXACT GENERIC PRIMITIVES REUSED:
+- ingestEvent (ingestion.service.ts) — REUSE AS-IS
+- processEventOutbox (worker.service.ts) — REUSE AS-IS
+- VerificationResult model + runVerification (verification.service.ts) — REUSE AS-IS
+- Attestation model + createAttestationForEvent (attestation.service.ts) — REUSE AS-IS
+- createContribution (contribution.service.ts) — REUSE AS-IS
+- calculateReward (reward.service.ts) — REUSE AS-IS
+- postRewardToLedger (ledger.service.ts) — REUSE AS-IS
+- createSettlement (settlement.service.ts) — REUSE AS-IS
+
+NEW PRIMITIVE INTRODUCED:
+- EconomicPipelineState model + economic-pipeline.ts orchestrator — the generic checkpoint + reconciliation layer. This is the ONLY new primitive. It does NOT duplicate any existing economic logic; it orchestrates the existing primitives as a single recoverable chain.
+
+REMAINING GAPS (honestly stated):
+- The existing worker.service.ts processEventOutbox uses a 5s default transaction timeout (db.$transaction without { timeout: ... }). On Neon with network latency, this can intermittently cause P2028. This is a pre-existing issue, not introduced by Slice 6. Tests A, B, E, F all passed (E passed on retry after an intermittent timeout).
+- The VPP + Compute vertical paths have NOT been migrated to use the generic EconomicPipelineState. They still use their own economicStage/reconcileAssignment patterns. Migration is a future slice.
+- Verification rejection test (C) + intermediate failure test (D) are not yet in the test file — they require more complex fixture setup (a way to make verification fail or force an intermediate step to fail). The happy path + retry + traceability + vertical-neutrality tests are delivered.
