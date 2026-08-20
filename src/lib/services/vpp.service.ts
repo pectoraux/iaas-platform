@@ -728,7 +728,11 @@ export async function executeDispatchAssignment(
     // Sign + submit telemetry as a generic Event (VPP-specific: device
     // credential, signing key). The runtime acquired the raw telemetry;
     // VPP processes it into the generic Event pipeline.
-    const eventId = `vpp-dispatch-${assignmentId}-${Date.now()}`
+    // Phase 12B Slice 7: use the deterministic event identity from the
+    // EconomicPipelineState (evidence-${executionAssignmentId}) instead of
+    // a Date.now()-based ID. This ensures reconciliation can rediscover the
+    // Event by its deterministic identity.
+    const eventId = `evidence-${assignment.executionAssignmentId}`
     const timestamp = new Date().toISOString()
     const sequence = Math.floor(Date.now() / 1000)
     const message = buildCanonicalMessage({
