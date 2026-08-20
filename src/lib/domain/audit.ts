@@ -32,6 +32,13 @@ export const AuditEvents = {
   PortfolioCommitmentCreated: 'vpp.portfolio_commitment_created',
   PortfolioCommitmentEvaluated: 'vpp.portfolio_commitment_evaluated',
   BuyerSettlementCharged: 'vpp.buyer_settlement_charged',
+  // Phase 14A: Node lifecycle audit events.
+  NodeRegistered: 'node.registered',
+  NodeActivated: 'node.activated',
+  NodeSuspended: 'node.suspended',
+  NodeRevoked: 'node.revoked',
+  NodeJoinedNetwork: 'node.joined_network',
+  NodeLeftNetwork: 'node.left_network',
 } as const
 
 export type AuditEventType = (typeof AuditEvents)[keyof typeof AuditEvents]

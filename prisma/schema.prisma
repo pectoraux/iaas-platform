@@ -90,6 +90,8 @@ model Tenant {
   capacityCommitments CapacityCommitment[]
   capacityUsages CapacityUsage[]
   baselineEvaluations BaselineEvaluation[]
+  // Phase 14A: Node — tenant-scoped protocol participant endpoint.
+  nodes            Node[]
 
   @@index([slug])
 }
@@ -128,6 +130,10 @@ model NetworkDefinition {
   vppPrograms    VppBuyerProgram[]
   executions     Execution[]
   capacityResources CapacityResource[]
+  // NOTE: NodeNetworkMembership.networkId is a plain String (no relation),
+  // following the same convention as NetworkResourceMembership. Integrity is
+  // enforced at the service layer (node.service.ts validates the network
+  // belongs to the tenant before joining).
 
   @@unique([tenantId, slug])
   @@index([tenantId])
@@ -286,6 +292,9 @@ model Device {
   asset       Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
   credential  DeviceCredential?
   events      Event[]
+  // Phase 14A: Nodes optionally backed by this device (one device may back
+  // multiple nodes, but identity does not depend on the device).
+  nodes       Node[]
 
   @@index([tenantId])
   @@index([assetId])
@@ -1757,6 +1766,8 @@ model ParticipantIdentity {
   organization    Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
   memberships     ParticipantMembership[]
   controlledResources ResourceIdentity[]
+  // Phase 14A: Nodes associated with this participant (the economic actor).
+  nodes           Node[]
 
   @@index([organizationId])
 }
@@ -1774,6 +1785,8 @@ model ParticipantMembership {
   participant     ParticipantIdentity @relation(fields: [participantId], references: [id], onDelete: Cascade)
   roles           ParticipantRole[]
   resourceMemberships NetworkResourceMembership[]
+  // Phase 14A: Node network memberships authorized by this participant membership.
+  nodeMemberships NodeNetworkMembership[]
 
   @@unique([participantId, networkId]) // one membership per participant per network
   @@index([networkId])
@@ -1813,6 +1826,8 @@ model ResourceIdentity {
 
   controller      ParticipantIdentity? @relation(fields: [controllerId], references: [id], onDelete: SetNull)
   networkMemberships NetworkResourceMembership[]
+  // Phase 14A: Nodes optionally backed by this resource (does not duplicate it).
+  nodes           Node[]
 
   @@index([controllerId])
   @@index([resourceKind])
@@ -1945,4 +1960,112 @@ model AllocationReservation {
   @@unique([decisionId, capabilityType, unit]) // one reservation per capability+unit per decision (multi-dimensional)
   @@index([decisionId])
   @@index([reservationId])
+}
+
+// -----------------------------------------------------------------------------
+// Phase 14A: Node — a protocol participant endpoint.
+// -----------------------------------------------------------------------------
+// A Node is a protocol participation identity/endpoint. It is DISTINCT from
+// Asset, Device, ParticipantIdentity, and ResourceIdentity (constitution §1).
+//
+//   Asset            — a physical/logical thing (battery, GPU, storage node).
+//   Device           — the technical interface to an asset (controller, meter).
+//   ParticipantIdentity — the economic/network participant identity (global).
+//   ResourceIdentity — the universal resource abstraction (global).
+//   Node             — a protocol participation endpoint (tenant-scoped).
+//
+// A single Node MAY be backed by an optional Device (and transitively an
+// Asset) and MAY be associated with an optional ParticipantIdentity (the
+// economic actor) and an optional ResourceIdentity. These are BINDINGS, not
+// identity — a Node survives changes of device, IP, network, location, and
+// transport. Node identity is an immutable cuid, never derived from device
+// name, IP, MAC, network membership, or runtime process ID.
+//
+// A single Node participates in multiple networks/protocols via
+// NodeNetworkMembership WITHOUT duplicating Device/Asset/ResourceIdentity
+// rows. This is the multi-network participation proof (Phase 14A Step 8).
+//
+// IDENTITY RULES:
+//   - Node.id is a cuid (immutable, random).
+//   - Idempotent registration derives a deterministic nodeId from
+//     SHA-256(tenantId, participantId, nodeKind, idempotencyKey). Concurrent
+//     registerNode() calls with the same key converge to the same durable Node.
+//   - deviceId/resourceId/displayName are bindings (mutable), NOT part of identity.
+//
+// LIFECYCLE: registered → active → suspended | revoked.
+//   - registered: initial state, cannot join networks yet.
+//   - active: can join/leave networks.
+//   - suspended: cannot join new networks; existing memberships preserved.
+//   - revoked: terminal; cannot join new networks.
+//
+// The Node does NOT contain: routing state, bundle storage, transform execution
+// state, protocol-specific state, or economic state. Those belong to later
+// boundaries (Data Plane, Bundle, Transform, economic pipeline).
+// -----------------------------------------------------------------------------
+model Node {
+  id                      String   @id @default(cuid())
+  tenantId                String
+  participantId           String?  // FK to ParticipantIdentity (the economic actor)
+  deviceId                String?  // FK to Device (optional backing device)
+  resourceId              String?  // FK to ResourceIdentity (optional resource backing)
+  nodeKind                String   // generic protocol endpoint kind (e.g. "protocol_endpoint")
+  displayName             String
+  status                  String   @default("registered") // registered | active | suspended | revoked
+  protocolEligibilityJson String   @default("[]") // generic protocol kinds this node may participate in
+  idempotencyKey          String   // caller-supplied, for deterministic registration
+  payloadHash             String   // SHA-256 of canonical registration payload (conflict detection)
+  metadataJson            String   @default("{}")
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  tenant                  Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  participant              ParticipantIdentity?  @relation(fields: [participantId], references: [id], onDelete: SetNull)
+  device                  Device?               @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  resource                ResourceIdentity?     @relation(fields: [resourceId], references: [id], onDelete: SetNull)
+  networkMemberships      NodeNetworkMembership[]
+
+  @@unique([tenantId, participantId, nodeKind, idempotencyKey]) // deterministic registration identity
+  @@index([tenantId])
+  @@index([participantId])
+  @@index([deviceId])
+  @@index([resourceId])
+  @@index([status])
+}
+
+/// Phase 14A: NodeNetworkMembership — a Node's participation in a specific
+/// network/protocol. This is DISTINCT from NetworkResourceMembership:
+///
+///   - NetworkResourceMembership binds a ResourceIdentity to a network (the
+///     resource participates as a CAPACITY PROVIDER).
+///   - NodeNetworkMembership binds a Node to a network (the node participates
+///     as a PROTOCOL ENDPOINT).
+///
+/// These are separate relationships and MUST NOT be conflated. A Node and a
+/// Resource MAY both participate in the same network via their respective
+/// memberships without duplicating either.
+///
+/// Network Scope Integrity (§8.6): the participantMembershipId's networkId
+/// MUST equal this membership's networkId. Enforced at the service layer via
+/// assertNetworkScopeIntegrity (same pattern as NetworkResourceMembership).
+///
+/// One membership per node per network: @@unique([nodeId, networkId]).
+/// Concurrent joinNetwork() calls converge to a single membership.
+model NodeNetworkMembership {
+  id                      String   @id @default(cuid())
+  nodeId                  String   // FK to Node
+  networkId               String   // the network/protocol
+  participantMembershipId String   // FK to ParticipantMembership — network-scoped authority
+  protocolRole            String   @default("participant") // generic protocol role
+  status                  String   @default("active") // active | suspended | revoked
+  joinedAt                DateTime @default(now())
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  node                    Node                @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  participantMembership   ParticipantMembership @relation(fields: [participantMembershipId], references: [id], onDelete: Cascade)
+
+  @@unique([nodeId, networkId]) // one membership per node per network
+  @@index([networkId])
+  @@index([participantMembershipId])
+  @@index([status])
 }

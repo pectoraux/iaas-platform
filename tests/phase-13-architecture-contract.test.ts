@@ -169,10 +169,18 @@ describe('Phase 13: Architecture Anti-Drift', () => {
     expect(existsSync('./docs/architecture/FUTURE-NETWORK-COVERAGE.md')).toBe(true)
   })
 
-  // 17. No future architecture implementation files exist yet
-  it('no Node/Bundle/Transform/Extension implementation files exist', () => {
-    const futureFiles = [
-      './src/lib/kernel/node.ts',
+  // 17. No future kernel-level architecture files exist yet.
+  //
+  // Phase 14A update: Node is now IMPLEMENTED as a service-layer primitive
+  // (src/lib/services/node.service.ts) — NOT a kernel-level node.ts. The
+  // constitution §1 frozen boundary "Asset ≠ Device ≠ Node ≠ ParticipantIdentity
+  // ≠ ResourceIdentity" is now realized by a concrete Node model.
+  //
+  // The items below remain future kernel contracts that MUST NOT exist yet:
+  // Bundle, Transform, TransformRegistry, Extension, ExtensionRegistry,
+  // DataPlane, Marketplace, SDK.
+  it('no future kernel-level Bundle/Transform/Extension/DataPlane/Marketplace/SDK files exist', () => {
+    const futureKernelFiles = [
       './src/lib/kernel/bundle.ts',
       './src/lib/kernel/transform.ts',
       './src/lib/kernel/transform-registry.ts',
@@ -182,8 +190,17 @@ describe('Phase 13: Architecture Anti-Drift', () => {
       './src/lib/kernel/marketplace.ts',
       './src/lib/kernel/sdk.ts',
     ]
-    for (const f of futureFiles) {
+    for (const f of futureKernelFiles) {
       expect(existsSync(f)).toBe(false)
     }
+  })
+
+  // 18. Node IS implemented as a service-layer primitive (Phase 14A).
+  //    A kernel-level node.ts is deliberately NOT created — ProtocolRuntime
+  //    already uses string sender/executor identity, so no speculative
+  //    kernel contract is needed (Phase 14A Step 12).
+  it('Node is implemented as a service-layer primitive, not a kernel contract', () => {
+    expect(existsSync('./src/lib/services/node.service.ts')).toBe(true)
+    expect(existsSync('./src/lib/kernel/node.ts')).toBe(false)
   })
 })

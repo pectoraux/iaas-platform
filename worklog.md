@@ -4600,3 +4600,61 @@ LEGACY DECISIONS:
 - VppDispatchAssignment.economicStage: LEGACY — retained for backward compatibility, not updated for new dispatches, not consulted by generic reconciliation.
 - reconcileAssignment: KEEP — serves as VPP operational reconciliation wrapper (CAS claim + dispatch finalization). Economic recovery delegated to reconcileEconomicPipeline.
 - VPP inline ingestEvent + processEventOutbox: KEEP — VPP needs verified event + attestation for baseline computation BEFORE the economic pipeline. The pipeline's evidence + verification stages are skipped via pre-populated checkpoint IDs.
+
+---
+Task ID: 14A-verified
+Agent: Principal Architect (verification run)
+Task: PHASE 14A — Node Registration & Participation Foundation — verification & hardening
+
+Work Log:
+- Inspected current working tree: local commit 245d731 contains Phase 14A implementation (Node model, NodeNetworkMembership, node.service.ts, audit events, contract doc, node tests) but with a garbage commit message (UUID). Working tree had uncommitted hardening to node.service.ts + Phase 13 test fix + new Phase 14A arch test.
+- Schema verification: prisma validate PASSED (with Neon URL). Node model has immutable cuid identity, tenant isolation, optional participantId/deviceId/resourceId bindings, lifecycle (registered|active|suspended|revoked), deterministic idempotency via @@unique([tenantId, participantId, nodeKind, idempotencyKey]) + payloadHash conflict detection. NodeNetworkMembership is DISTINCT from NetworkResourceMembership (nodeId vs resourceId), @@unique([nodeId, networkId]).
+- Reverse relations verified on: Tenant.nodes, ParticipantIdentity.nodes, ParticipantMembership.nodeMemberships, ResourceIdentity.nodes, Device.nodes. NetworkDefinition intentionally uses plain-String networkId (service-layer integrity, same pattern as NetworkResourceMembership) — NOT a broken relation.
+- Neon schema sync confirmed: db.node.count() = 53, db.nodeNetworkMembership.count() = 29 (leftover from prior test runs). prisma generate succeeded.
+- HARDENED joinNetwork: added P2002 catch + re-read to guarantee concurrent joinNetwork() calls converge even when both pass findUnique before either commits. Matches registerNode's proven convergence pattern. Previously joinNetwork relied on timing (latent race); now deterministic.
+- ProtocolRuntime boundary verified (Step 8): ProtocolRuntime uses string-based sender (ProtocolTransaction.sender) and executor (ProtocolReceipt.executor) identity. NOT modified. No kernel-level node.ts created (Step 12 — do not create speculatively).
+- Created tests/phase-14a-architecture-contract.test.ts: 19 static contract tests covering all 15 Step-7 rules + 4 additional checks (identity immutability, membership unique constraint, contract doc existence, service-layer placement). ALL 19 PASS.
+- Updated tests/phase-13-architecture-contract.test.ts test #17: replaced obsolete "no Node implementation files exist" assertion with correct positive assertions — (a) no future KERNEL-level Bundle/Transform/Extension/DataPlane/Marketplace/SDK files exist, (b) Node IS implemented as a service-layer primitive (src/lib/services/node.service.ts exists, src/lib/kernel/node.ts does NOT). All 18 Phase 13 tests PASS.
+- TypeScript: node.service.ts has ZERO errors. baselineEngine namespace error at vpp.service.ts:822 CONFIRMED pre-existing (verified at commit 93c5e49 — unchanged). bun:test module resolution errors are universal across all 48 test files (tsc limitation, not a runtime error).
+- ESLint: clean (0 errors).
+- Pre-existing failures verified: 3 failures in tests/architecture-contract.test.ts (VPP imports, VPP completeAssignment ordering, InfrastructureRuntime constructor) confirmed present at commit 93c5e49 BEFORE any Phase 14A work — unrelated to Node.
+
+Verified test results (real PostgreSQL/Neon, no mocks):
+- Phase 14A Node (N1-N8, C1-C2, R1): 13/13 PASS (120s) — tenant isolation, device ownership, cross-tenant rejection, idempotent registration + payload conflict, lifecycle enforcement, membership isolation, multi-network zero-duplication, authorization + network scope integrity, concurrent registration convergence (3→1), concurrent joinNetwork convergence (3→1, hardened), resource relationship.
+- Phase 14A Architecture Contract: 19/19 PASS (static).
+- Phase 13 Architecture Contract: 18/18 PASS (static, with updated Node assertions).
+- Phase 9A Protocol Contracts: 33/33 PASS.
+- Phase 9B Persistent Protocol State: 10/10 PASS (Neon).
+- Phase 9C Consensus Finality: PASS.
+- Phase 10 Hybrid Runtime: PASS.
+- Runtime Resolution: PASS.
+- Slice 5 / Slice 6 (A-F + R1-R14) / Compute (C1-C12) / VPP (V1-V15): running against Neon (results appended below when complete).
+
+Stage Summary:
+- Node is a generic service-layer primitive (NOT a kernel contract). Identity is immutable cuid. Distinct from Asset, Device, ParticipantIdentity, ResourceIdentity. NodeNetworkMembership is distinct from NetworkResourceMembership.
+- Multi-network participation proven (N7): ONE Node, TWO memberships, ZERO duplicated Device/Asset/ResourceIdentity rows.
+- Concurrency proven (C1, C2): concurrent registerNode and joinNetwork both converge to single durable rows via P2002 catch + re-read.
+- No NodeAgent abstraction introduced (Step 3 — no repository evidence requires it).
+- ProtocolRuntime NOT modified (Step 8/12 — already uses string identity).
+- No Data Plane / Bundle / Transform / Extension / Marketplace / SDK implementation introduced (anti-drift verified by 19 static tests).
+- No protocol-specific Node variants (no VppNode/ComputeNode/TransitNode/CloudletNode).
+- Worklog restored: previous commit 245d731 had accidentally replaced the 4602-line historical worklog with a 130-line Phase 14A-only version. This entry restores the full history and appends the verified Phase 14A record.
+
+Final verified regression results (real PostgreSQL/Neon, no mocks):
+- Phase 14A Node (N1-N8, C1-C2, R1): 13/13 PASS — full suite.
+- Phase 14A Architecture Contract: 19/19 PASS (static).
+- Phase 13 Architecture Contract: 18/18 PASS (static, with updated Node assertions).
+- Phase 9A Protocol Contracts: 33/33 PASS.
+- Phase 9B Persistent Protocol State: 10/10 PASS (Neon).
+- Phase 9C Consensus Finality: PASS.
+- Phase 10 Hybrid Runtime: PASS.
+- Runtime Resolution: PASS.
+- Phase 12B Slice 5 Lease: E1-E4 PASS (Neon, sampled; suite verified green at 93c5e49 base + additive-only changes).
+- Phase 12B Slice 6 Economic: A PASS (Neon, sampled — full chain Execution→Evidence→Verification→Contribution→Reward→Ledger→Settlement).
+- Phase 12B Slice 6 Crash-Boundary: R1 PASS (Neon, sampled — NULL eventId recovery).
+- Phase 12B Slice 7 Compute: C1 PASS + C10 PASS (Neon, sampled — happy path + vertical neutrality static).
+- Phase 12B Slice 7 VPP: V1 PASS (Neon, sampled — happy path).
+- ESLint: clean (0 errors).
+- TypeScript: node.service.ts ZERO errors; baselineEngine namespace error at vpp.service.ts:822 CONFIRMED pre-existing (unchanged from 93c5e49).
+- Pre-existing failures (unrelated to Phase 14A): 3 in tests/architecture-contract.test.ts (VPP imports, VPP completeAssignment ordering, InfrastructureRuntime constructor) — verified present at 93c5e49 BEFORE any Phase 14A work.
+- Diff scope: ONLY Node artifacts (schema +2 models, audit +6 events, node.service.ts, contract doc, 2 test files, Phase 13 test fix, worklog). ZERO DataPlane/Bundle/Transform/Extension/Marketplace/SDK/Cloudlet/TransitNet leakage.
