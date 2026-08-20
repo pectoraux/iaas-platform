@@ -235,19 +235,30 @@ export async function createAndExecuteComputeJob(
   }
   const lease = leaseResult.lease!
 
-  const executeResult = await runtime.executeAssignment({
-    assetId: input.assetId,
-    assetType: asset.assetType,
-    capabilityType: input.capabilityType,
-    adapterType: input.adapterType,
-    assignedQuantity: input.assignedQuantity,
-    assignedUnit: input.assignedUnit,
-    durationSeconds: input.durationSeconds,
-    parameters: input.parameters,
-    leaseId: lease.id,
-    leaseVersion: lease.leaseVersion,
-    workerIdentity: `compute-${computeJobId}`,
-  })
+  let executeResult
+  try {
+    executeResult = await runtime.executeAssignment({
+      assetId: input.assetId,
+      assetType: asset.assetType,
+      capabilityType: input.capabilityType,
+      adapterType: input.adapterType,
+      assignedQuantity: input.assignedQuantity,
+      assignedUnit: input.assignedUnit,
+      durationSeconds: input.durationSeconds,
+      parameters: input.parameters,
+      leaseId: lease.id,
+      leaseVersion: lease.leaseVersion,
+      workerIdentity: `compute-${computeJobId}`,
+    })
+  } catch (err) {
+    // Adapter resolution or execution threw an exception (not success=false).
+    // Fail the assignment + release capacity.
+    await db.$transaction(async (tx) => {
+      await runtime.failAssignment(tx, tenantId, execution.executionAssignmentId, execution.executionId)
+    })
+    await releaseCommitment(tenantId, 'compute_job', computeJobId)
+    throw new Error(`Compute execution failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
 
   if (!executeResult.success) {
     // Fail the assignment via the runtime (operational failure).

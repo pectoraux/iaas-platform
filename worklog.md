@@ -4458,3 +4458,46 @@ ACCEPTANCE CRITERIA STATUS:
 20. PostgreSQL/Neon integration tests pass. ✅
 
 PHASE 12B SLICE 7 — COMPUTE MIGRATION COMPLETE
+
+---
+Task ID: 12B-slice-7-compute-migration-hardening
+Agent: main (Z.ai Code)
+Task: Close the acceptance gaps for Slice 7 Compute Migration: add C4 (verification rejection), C7 (concurrent reconciliation), C8 (tenant isolation), C11 (economic failure after operational success), C12 (execution lease failure-state). Fix a real bug discovered during the lease audit: when runtime.executeAssignment throws (adapter resolution failure), the compute service didn't catch the exception, leaving the assignment in 'executing' state with the lease active + capacity unreleased.
+
+Work Log:
+- BUG FOUND + FIXED (C12 audit): when runtime.executeAssignment throws (e.g., nonexistent adapterType), the compute service's `if (!executeResult.success)` block was never reached, so failAssignment + releaseCommitment were never called. The assignment stayed 'executing' (set by acquireExecutionLease), the lease stayed 'active', and capacity was never released. Fixed by wrapping runtime.executeAssignment in a try/catch that fails the assignment + releases capacity on any thrown exception.
+- C4 (verification rejection): runs the compute job successfully, then deletes all economic objects + resets the checkpoint, then re-runs processEconomicPipeline with a BAD signing key. The Event is ingested (with a bad signature), verification rejects it, and no attestation/contribution/reward/ledger/settlement is created. EconomicPipelineState → reconciliation_required.
+- C7 (concurrent reconciliation): runs the compute job, clears all downstream checkpoint IDs, fires two concurrent reconcileEconomicPipeline calls. Both converge on the same durable chain — exactly one contribution/reward/posting/settlement. Same canonical IDs.
+- C8 (tenant isolation): creates two compute fixtures in separate tenants. Poisons A's checkpoint.contributionId to point to B's contributionId. Reconciles A — A rediscovers its own contribution (not B's). B's checkpoint is unchanged. No cross-tenant contamination.
+- C11 (economic failure after operational success): runs the compute job, deletes downstream economic objects (contribution/reward/ledger/settlement) while preserving the Event + Attestation. Resets the checkpoint. Reconciles — the assignment stays 'completed' (no physical re-execution), no new ExecutionLease is created (no active leases), and exactly one of each economic object is re-created.
+- C12 (execution lease failure-state): runs a compute job with a nonexistent adapterType → adapter resolution throws. The fix (try/catch) ensures the assignment is 'failed' (terminal), the lease is not 'released' (not implying success), re-acquisition is rejected (terminal status), and no economic value is created.
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-7-compute.test.ts: 12/12 pass (C1-C12).
+    C1: happy path. C2: retry. C3: adapter failure. C4: verification rejection.
+    C5: restart recovery. C6: stale checkpoint. C7: concurrent reconciliation.
+    C8: tenant isolation. C9: dimensional correctness. C10: vertical neutrality.
+    C11: economic failure after operational success. C12: lease failure-state.
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors.
+
+ACCEPTANCE GATE STATUS:
+1. Compute uses EconomicPipelineState. ✅
+2. Compute has no duplicate economic primitives. ✅
+3. Compute economic recovery uses generic reconciliation. ✅
+4. Compute operational recovery remains separate. ✅
+5. Compute verification rejection creates zero economic value. ✅ (C4)
+6. Compute retries are idempotent. ✅ (C2)
+7. Concurrent Compute reconciliation is safe. ✅ (C7)
+8. Compute is tenant-isolated. ✅ (C8)
+9. Compute quantities/units are dimensionally correct. ✅ (C9)
+10. NetworkVersion binding remains immutable. ✅
+11. Economic failure after operational success does not rerun physical work. ✅ (C11)
+12. Execution lease invariants remain intact. ✅ (C12)
+13. Existing Slice 6 invariants remain green. ✅
+14. Generic pipeline has no Compute imports. ✅ (C10)
+15. All PostgreSQL integration tests pass. ✅
+16. Lint passes. ✅
+17. TypeScript passes. ✅
+
+PHASE 12B SLICE 7 — COMPUTE MIGRATION — COMPLETE
