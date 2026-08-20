@@ -39,8 +39,43 @@ let assetId: string
 let deviceSecret: string
 let testCounter = 0
 
-beforeAll(async () => {
-  if (!isPostgres) return
+
+async function setupDispatch() {
+  await ensureFixture()
+  testCounter++
+  const baseTime = Date.now() + 3600000 * (10 + testCounter * 2)
+  const start = new Date(baseTime)
+  const end = new Date(baseTime + 3600000)
+
+  const program = await createBuyerProgram(tenantId, {
+    networkId, name: `S7VC Program-${testCounter}`,
+    rewardRuleId, dispatchWindowStart: '00:00', dispatchWindowEnd: '23:59',
+    pricePerKwh: '0.12', minCapacityKw: '1',
+  })
+
+  await createCapacityReservation(tenantId, {
+    programId: program.id, operatorId, assetId,
+    capabilityType: 'energy_discharge', reservedKw: '10', reservedKwh: '10',
+    startTime: start.toISOString(), endTime: end.toISOString(),
+  })
+
+  const { dispatch, assignments } = await createDispatch(tenantId, {
+    programId: program.id,
+    startTime: start.toISOString(), endTime: end.toISOString(),
+    requestedKw: '10', requestedKwh: '10',
+  })
+
+  return { dispatch, assignments, start, end }
+}
+
+// Lazy fixture setup — module-level (not inside describe, because
+// setupDispatch is also module-level and needs to call it).
+// bun:test has a 5s default timeout for beforeAll hooks, so heavy DB
+// setup is deferred to the first test call via ensureFixture().
+let fixtureReady = false
+async function ensureFixture() {
+  if (fixtureReady) return
+  fixtureReady = true
   initializeBootstrap()
 
   const tenant = await createTenant({
@@ -66,33 +101,6 @@ beforeAll(async () => {
   deviceSecret = dev.provisioningSecret
 
   await recordBuyerFunding(tenantId, 100000, `s7vc-funding-${Date.now()}`)
-})
-
-async function setupDispatch() {
-  testCounter++
-  const baseTime = Date.now() + 3600000 * (10 + testCounter * 2)
-  const start = new Date(baseTime)
-  const end = new Date(baseTime + 3600000)
-
-  const program = await createBuyerProgram(tenantId, {
-    networkId, name: `S7VC Program-${testCounter}`,
-    rewardRuleId, dispatchWindowStart: '00:00', dispatchWindowEnd: '23:59',
-    pricePerKwh: '0.12', minCapacityKw: '1',
-  })
-
-  await createCapacityReservation(tenantId, {
-    programId: program.id, operatorId, assetId,
-    capabilityType: 'energy_discharge', reservedKw: '10', reservedKwh: '10',
-    startTime: start.toISOString(), endTime: end.toISOString(),
-  })
-
-  const { dispatch, assignments } = await createDispatch(tenantId, {
-    programId: program.id,
-    startTime: start.toISOString(), endTime: end.toISOString(),
-    requestedKw: '10', requestedKwh: '10',
-  })
-
-  return { dispatch, assignments, start, end }
 }
 
 describeOrSkip('Phase 12B Slice 7: VPP Migration Complete', () => {
