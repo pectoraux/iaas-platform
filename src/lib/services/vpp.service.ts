@@ -58,6 +58,7 @@ import {
   processEconomicPipeline,
   reconcileEconomicPipeline,
   ECONOMIC_STAGE,
+  type EconomicStage,
 } from '@/lib/control-plane/economic-pipeline'
 import {
   acquireExecutionLease,
@@ -542,6 +543,12 @@ export async function executeDispatchAssignment(
   assignmentId: string,
   provisioningSecret: string,
   actorId?: string,
+  /**
+   * TEST-ONLY: passes failAfterStage to processEconomicPipeline to inject
+   * a real economic failure at a specific stage boundary. Production callers
+   * MUST NOT pass this. No effect when omitted.
+   */
+  testFailAfterStage?: string,
 ) {
   const assignment = await db.vppDispatchAssignment.findFirst({
     where: { id: assignmentId, tenantId },
@@ -1051,6 +1058,7 @@ export async function executeDispatchAssignment(
       capabilityType: assignment.capabilityType,
       timestamp: new Date().toISOString(),
       sequence: Math.floor(Date.now() / 1000),
+      ...(testFailAfterStage ? { failAfterStage: testFailAfterStage as EconomicStage } : {}),
     })
 
     // Link the contribution to the generic assignment (economic link, post-completion).
