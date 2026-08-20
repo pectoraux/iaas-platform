@@ -4501,3 +4501,61 @@ ACCEPTANCE GATE STATUS:
 17. TypeScript passes. ✅
 
 PHASE 12B SLICE 7 — COMPUTE MIGRATION — COMPLETE
+
+---
+Task ID: 12B-slice-7-vpp-audit
+Agent: main (Z.ai Code)
+Task: Audit VPP economic path for VPP migration to generic EconomicPipelineState. Do NOT implement yet — record findings.
+
+VPP AUDIT FINDINGS:
+
+1. VppDispatchAssignment.economicStage (schema.prisma:1111):
+   - A VPP-specific economic checkpoint: none | delivery_verified | usage_recorded | reward_calculated | ledger_posted | settlement_pending | completed
+   - DUPLICATES what EconomicPipelineState.stage now provides generically
+   - Must become legacy/read-only — not authoritative runtime state
+
+2. reconcileAssignment (vpp.service.ts:1261-1354):
+   - VPP-specific economic reconciliation
+   - Inspects durable objects (reward, ledger posting, settlement) and resumes from the gap
+   - DUPLICATES what reconcileEconomicPipeline now does generically
+   - Must be replaced with reconcileEconomicPipeline for economic recovery
+   - VPP-specific operational concerns (maybeFinalizeDispatch) remain separate
+
+3. Inline economic calls in executeDispatchAssignment (vpp.service.ts:962-998):
+   - createContribution (line 963) — should go through processEconomicPipeline
+   - calculateReward (line 983) — should go through processEconomicPipeline
+   - postRewardToLedger (line 987) — should go through processEconomicPipeline
+   - createSettlement (line 991) — should go through processEconomicPipeline
+   - processSettlementForReward (line 998) — should go through processEconomicPipeline
+   - All should be replaced with initEconomicPipeline + processEconomicPipeline
+
+4. VPP-specific operational concerns (MUST REMAIN VPP-specific):
+   - Baseline computation (HistoricalTelemetryProvider + BaselineEngine + persisted policy)
+   - recordUsage (capacity accounting)
+   - linkContribution (write-once CAS)
+   - VppDispatchAssignment status management (assigned → dispatching → delivery_verified → completed | reconciliation_required)
+   - maybeFinalizeDispatch (portfolio-level finalization)
+   - VPP dispatch creation (createDispatch)
+
+5. VPP derived quantity semantics:
+   - contribution quantity = verifiedPerformanceKwh (actual - baseline, non-negative)
+   - contribution unit = 'kWh'
+   - These must be passed to processEconomicPipeline as actualQuantity + actualUnit
+   - Dimensional correctness: kWh (not kW or utilization %)
+
+6. Lease integration needed:
+   - VPP executeDispatchAssignment calls runtime.executeAssignment without a lease
+   - Must add acquireExecutionLease + completeExecutionLease (like Compute migration)
+
+7. NetworkVersion binding:
+   - VPP uses program.networkVersionId (immutable)
+   - Must pass to initEconomicPipeline
+
+MIGRATION PLAN:
+- Step 1: Replace inline economic calls with initEconomicPipeline + processEconomicPipeline
+- Step 2: Add lease acquisition to VPP execution path
+- Step 3: Replace reconcileAssignment with reconcileEconomicPipeline for economic recovery
+- Step 4: Make economicStage legacy/read-only (compatibility metadata, not authoritative)
+- Step 5: Add VPP migration tests V1-V15 (same pattern as Compute C1-C12)
+
+This audit is complete. Implementation deferred to next session due to context limits.
