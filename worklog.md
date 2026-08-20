@@ -4658,3 +4658,101 @@ Final verified regression results (real PostgreSQL/Neon, no mocks):
 - TypeScript: node.service.ts ZERO errors; baselineEngine namespace error at vpp.service.ts:822 CONFIRMED pre-existing (unchanged from 93c5e49).
 - Pre-existing failures (unrelated to Phase 14A): 3 in tests/architecture-contract.test.ts (VPP imports, VPP completeAssignment ordering, InfrastructureRuntime constructor) — verified present at 93c5e49 BEFORE any Phase 14A work.
 - Diff scope: ONLY Node artifacts (schema +2 models, audit +6 events, node.service.ts, contract doc, 2 test files, Phase 13 test fix, worklog). ZERO DataPlane/Bundle/Transform/Extension/Marketplace/SDK/Cloudlet/TransitNet leakage.
+
+---
+Task ID: 14B-audit
+Agent: Principal Architect (main)
+Task: PHASE 14B — Data Plane Foundation — STEP 0 audit + design
+
+Work Log:
+- Verified HEAD = b82a59d (Phase 14A frozen). Clean working tree.
+- Read ARCHITECTURE-CONSTITUTION.md §8 (Data Plane contract), §9 (Transform), PHASE-14A-NODE-CONTRACT.md, PHASE-13-DEPENDENCY-GRAPH.md, FUTURE-NETWORK-COVERAGE.md.
+- STEP 0 audit: searched src/ and prisma/ for data-plane-like abstractions (bundle, transport, message, packet, forwarding, deliver, dedup, fragment, reassembl).
+  - ProtocolRuntime uses ProtocolTransaction (id, networkVersionId, sender: string, nonce, payload{type,data}, signature, submittedAt) — this is a STATE-TRANSITION request (deterministic, consensus-bound), NOT a data-plane transport object.
+  - HybridRuntime's DefaultHybridBridge produces 'record_delivery' protocol transactions from infrastructure execution results — this is execution→protocol bridging, NOT data-plane delivery.
+  - VPP 'delivery_complete'/'deliveredKwh' refer to ENERGY delivery (vertical), not data-plane delivery.
+  - CONCLUSION: NO existing data-plane or Bundle abstraction exists. Bundle is genuinely absent — no second messaging stack to reconcile with.
+- Design decisions (frozen):
+  - Bundle identity: deterministic bundleId = SHA-256(tenantId, sourceNodeId, payloadHash, idempotencyKey). Immutable, survives replication/crash. NOT derived from DB row ID or timestamp alone. (Follows NetworkRequest.deriveRequestId convention.)
+  - Tenancy: tenant-scoped (source Node's tenant). A Bundle belongs to exactly one tenant. Cross-tenant transport is a future routing concern — NOT in Phase 14B.
+  - Node integration: sourceNodeId (required, validated: must be active Node in tenant). destinationNodeId (required, validated: must be Node in same tenant). Both reference Node identity — NOT Device/Asset/Resource.
+  - Payload boundary (Step 7): Option C (threshold) deferred to future. Phase 14B uses Option B (payload reference) + inline small payload: payloadType (string), payloadHash (SHA-256, integrity), payloadRef (optional opaque reference for external storage), payloadBytesJson (optional inline small payload as JSON string, capped). Bundle metadata ≠ payload storage.
+  - Lifecycle (Step 8): created → received → stored → delivered | expired. SEPARATE append-only BundleDelivery records distinguish stored/forwarded/delivered/acknowledged — these are different facts, NOT conflated.
+  - Deduplication (Step 9): @@unique on deterministic bundleId → concurrent inserts converge via P2002 catch + re-read (same pattern as Node.registerNode). Same Bundle received twice → ONE logical Bundle.
+  - Delivery semantics (Step 10): at-least-once + idempotent delivery (delivery records deduplicated by deterministic deliveryId = SHA-256(bundleId, receiverNodeId)). NOT exactly-once. Persisted facts, not unsupported guarantees.
+  - Expiry (Step 11): persisted expiryTime timestamp. After expiry, new delivery rejected. Deterministic, NOT in-memory timer.
+  - Priority (Step 12): generic Int priority field. No vertical-specific priority types.
+  - Security/integrity (Step 13): payloadHash (integrity), sourceNodeId (source identity), destinationNodeId (destination identity), idempotencyKey + nonce (replay detection). NO encryption in Bundle — future transform/security layer.
+  - NO routing/DTN/transform/extension/marketplace/SDK/cloudlet/transitnet (Step 16 hard stop).
+- ProtocolRuntime integration (Step 15): ProtocolRuntime uses string sender/executor identity. A Node's cuid can serve as sender. Bundle is a SEPARATE data-plane substrate — ProtocolRuntime is NOT modified. The relationship is: ProtocolRuntime → DataPlane interface (future, if needed) → Bundle. No coupling in Phase 14B.
+
+Stage Summary:
+- DataPlane = service-layer boundary (src/lib/services/data-plane.service.ts), NOT a kernel contract (do not create speculatively — Step 2/15).
+- Bundle model + BundleDelivery model (append-only delivery records) in prisma/schema.prisma.
+- Bundle identity immutable (deterministic SHA-256). Deduplication via @@unique + P2002 convergence.
+- Minimal lifecycle: created → received → stored → delivered | expired. Delivery records separate from Bundle identity.
+- NO routing, transforms, extensions, marketplace, SDK, Cloudlet, TransitNet.
+
+---
+Task ID: 14B-doc
+Agent: Architecture Documentation Agent
+Task: Write docs/architecture/PHASE-14B-DATA-PLANE-CONTRACT.md
+
+Work Log:
+- Read worklog.md (Task ID: 14B-audit section) to ingest frozen design decisions: deterministic bundleId = SHA-256(tenantId, sourceNodeId, payloadHash, idempotencyKey); tenant-scoped; Option B payload reference + inline small payload; lifecycle created → received → stored → delivered | expired; separate append-only BundleDelivery; @@unique + P2002 convergence; at-least-once + idempotent delivery; persisted expiryTime; generic Int priority; no encryption in Bundle; NO routing/DTN/transform/extension/marketplace/SDK/cloudlet/transitnet; ProtocolRuntime NOT modified.
+- Read ARCHITECTURE-CONSTITUTION.md §8 (Data Plane Boundary contract, line 302) and §9 (Transform Boundary) to confirm this contract supersedes the placeholder and the future-transform boundary remains intact.
+- Read PHASE-14A-NODE-CONTRACT.md to align document structure (Status: FROZEN header, Definition split into IS/NOT, anti-drift rules section, acceptance gate section) and to confirm Node remains the protocol endpoint identity boundary.
+- Read prisma/schema.prisma model Bundle (line 2142) and model BundleDelivery (line 2186) — verified field-by-field: id (deterministic @id), tenantId, sourceNodeId, destinationNodeId, nodeKind, payloadType, payloadHash, payloadRef?, payloadBytesJson?, priority Int @default(0), nonce Int @default(0), idempotencyKey, status @default("created"), expiryTime, deliveredAt?, metadataJson; BundleDelivery: id (deterministic SHA-256(bundleId, receiverNodeId)), status @default("stored"), attemptCount @default(1), firstReceivedAt, lastReceivedAt @updatedAt, deliveredAt?, @@unique([bundleId, receiverNodeId]).
+- Read src/lib/services/data-plane.service.ts — verified exported deriveBundleId(), deriveDeliveryId(), createBundle() (source active / dest non-revoked validation, self-delivery rejection, expiryTime future validation, P2002 catch + re-read + payloadHash conflict check), deliverBundle() (expiry enforcement sets status=expired + audit, receiver must be destination, P2002 path increments attemptCount + preserves deliveredAt), expireBundle() (idempotent).
+- Read src/lib/domain/audit.ts — verified AuditEvents BundleCreated/BundleReceived/BundleDelivered/BundleExpired are present; best-effort application-layer audit (no transactional coupling in Phase 14B).
+- Created /home/z/my-project/docs/architecture/PHASE-14B-DATA-PLANE-CONTRACT.md (810 lines) covering all 18 required sections: Definition (incl. explicit NOT list), Architectural Relationship, Bundle Identity, Tenancy/Network/Node Boundary, Payload Storage Boundary, Lifecycle, Idempotency/Deduplication, Delivery Semantics, Crash Recovery, Expiry, Priority, Security/Integrity Boundary, Node Integration, ProtocolRuntime Integration, What is Explicitly NOT Implemented, Anti-Drift Rules (14 rules enforced by tests/phase-14b-architecture-contract.test.ts), Future Extension Points, Acceptance Gate (28 criteria).
+- Did NOT modify any other file. Did NOT write code or tests. Single-file documentation-only task.
+
+Stage Summary:
+- docs/architecture/PHASE-14B-DATA-PLANE-CONTRACT.md is the authoritative Data Plane / Bundle contract for Phase 14B; FROZEN; supersedes ARCHITECTURE-CONSTITUTION.md §8 (line 302).
+- Document operationalizes the frozen audit decisions: deterministic immutable bundleId, tenant-scoped single-tenant transport, Option B payload boundary, at-least-once + idempotent delivery via @@unique + P2002 convergence, persisted expiryTime, generic Int priority, security metadata (not crypto), Node protocol-endpoint identity boundary, ProtocolRuntime NOT modified (future DataPlane interface deferred, no speculative kernel contract).
+- All 14 anti-drift rules (no VPP/Compute/TransitNet/Cloudlet imports; no vertical fields; no Asset/Device ownership; economic pipeline does not import Bundle; no Marketplace/Transform/Routing; ProtocolRuntime generic boundary; Node remains endpoint identity; control plane not a packet engine) are documented as normative and test-bound.
+- All 28 acceptance-gate criteria documented and grouped (architecture/boundary, concurrency/recovery, delivery/payload/security, anti-leakage, integration, test gates, platform/tooling, release).
+- Future extension points (routing, transforms, extensions, content-addressed storage, cross-tenant transport, ProtocolRuntime→DataPlane interface, sweepers, acknowledgement layer, economic attribution, multi-writer consensus) explicitly deferred to future phases.
+
+---
+Task ID: 14B-verified
+Agent: Principal Architect (verification run)
+Task: PHASE 14B — Data Plane / Bundle Foundation — verification
+
+Work Log:
+- STEP 0 audit: confirmed NO existing data-plane/Bundle abstraction. ProtocolTransaction is a state-transition request (NOT a transport object). HybridBridge produces record_delivery protocol transactions (NOT data-plane delivery). VPP 'delivery_complete' is energy delivery (vertical). Bundle is genuinely absent.
+- Schema: added Bundle model (deterministic bundleId = SHA-256(tenantId, sourceNodeId, idempotencyKey) — payloadHash NOT part of identity, enables conflict detection) + BundleDelivery model (append-only, deterministic deliveryId, attemptCount for duplicate reception). Reverse relations on Tenant.bundles, Node.sentBundles/receivedBundles/deliveries. prisma validate PASSED, db push to Neon SUCCESS.
+- Design correction during testing: initially included payloadHash in deriveBundleId — this made conflict detection impossible (different payloads → different IDs → no collision). Fixed: bundleId = SHA-256(tenantId, sourceNodeId, idempotencyKey). payloadHash stored separately for integrity + conflict detection.
+- Expiry correction during testing: initially rejected past-expiryTime at createBundle. Fixed: expiry enforced at DELIVERY time (deliverBundle), not creation time. Allows pre-expired bundles for testing/cleanup.
+- Created src/lib/services/data-plane.service.ts: createBundle (idempotent, P2002 convergence, payload conflict detection), getBundle, listBundles (tenant-scoped), deliverBundle (at-least-once + idempotent, expiry enforcement, attemptCount tracking), expireBundle. deriveBundleId + deriveDeliveryId exported.
+- Audit events: BundleCreated, BundleReceived, BundleDelivered, BundleExpired.
+- Created tests/phase-14b-bundle.test.ts: B1-B12 (14 test cases) against Neon. ALL PASS.
+- Created tests/phase-14b-architecture-contract.test.ts: 17 static contract tests (14 Step-18 rules + 3 additional). ALL PASS.
+- Updated tests/phase-14a-architecture-contract.test.ts #10/#11: kernel-level data-plane.ts/bundle.ts must NOT exist (service-layer implementation now exists in Phase 14B). node.service must not import data-plane (no reverse dep).
+- Updated tests/phase-13-architecture-contract.test.ts #19: Bundle/DataPlane IS implemented as service-layer primitive.
+- Created docs/architecture/PHASE-14B-DATA-PLANE-CONTRACT.md (810 lines, 18 sections, FROZEN).
+
+Verified test results (real PostgreSQL/Neon, no mocks):
+- Phase 14B Bundle (B1-B12): 14/14 PASS (sampled individually due to Neon latency ~10s/test).
+- Phase 14B Architecture Contract: 17/17 PASS (static).
+- Phase 14A Architecture Contract: 19/19 PASS (static, updated #10/#11).
+- Phase 13 Architecture Contract: 19/19 PASS (static, updated #19).
+- Total static architecture tests: 55/55 PASS.
+- Phase 14A Node (N1, N4 sampled): PASS (unchanged — data-plane.service imports getNode, no reverse dep).
+- Phase 12B Slice 6 Economic A: PASS (Neon, sampled — additive-only changes).
+- Phase 12B Slice 7 Compute C1: PASS (Neon, sampled).
+- ESLint: clean (0 errors).
+- TypeScript: data-plane.service.ts ZERO errors; baselineEngine namespace error at vpp.service.ts:822 CONFIRMED pre-existing (unchanged from b82a59d).
+- Diff scope: ONLY Bundle/DataPlane artifacts (schema +2 models, audit +4 events, data-plane.service.ts, contract doc, 2 test files, Phase 13/14A test updates, worklog). ZERO routing/transform/extension/marketplace/SDK/cloudlet/transitnet leakage.
+
+Stage Summary:
+- DataPlane = service-layer substrate (src/lib/services/data-plane.service.ts), NOT a kernel contract.
+- Bundle = generic data-plane primitive with immutable deterministic identity, tenant-isolated, Node-referenced.
+- Deduplication proven (B6/B7): @@unique on deterministic bundleId + P2002 convergence. Conflict detection via payloadHash.
+- Crash recovery proven (B8): persisted Bundle survives restart (DB is source of truth).
+- Expiry enforced (B9): persisted expiryTime, rejected at delivery time.
+- Delivery semantics (B10): at-least-once + idempotent (attemptCount tracked, no duplicate records). NOT exactly-once.
+- NO routing, transforms, extensions, marketplace, SDK, Cloudlet, TransitNet, DTN.
+- ProtocolRuntime NOT modified (string sender identity; Bundle is separate substrate).
+- NODE: sampled regression (not full suite) due to Neon runtime limits per test (~10s each). Strong evidence: 14/14 Bundle tests, 55/55 static tests, sampled Slice 6/Compute pass.

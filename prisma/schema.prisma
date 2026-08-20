@@ -92,6 +92,8 @@ model Tenant {
   baselineEvaluations BaselineEvaluation[]
   // Phase 14A: Node — tenant-scoped protocol participant endpoint.
   nodes            Node[]
+  // Phase 14B: Bundle — tenant-scoped data-plane primitive.
+  bundles          Bundle[]
 
   @@index([slug])
 }
@@ -2023,6 +2025,12 @@ model Node {
   device                  Device?               @relation(fields: [deviceId], references: [id], onDelete: SetNull)
   resource                ResourceIdentity?     @relation(fields: [resourceId], references: [id], onDelete: SetNull)
   networkMemberships      NodeNetworkMembership[]
+  // Phase 14B: bundles sourced by this Node (sender) + bundles delivered to
+  // this Node (receiver). Both reference Node identity (protocol endpoint),
+  // NOT Device/Asset/Resource.
+  sentBundles             Bundle[]              @relation("BundleSourceNode")
+  receivedBundles         Bundle[]              @relation("BundleDestinationNode")
+  deliveries              BundleDelivery[]      @relation("BundleDeliveryNode")
 
   @@unique([tenantId, participantId, nodeKind, idempotencyKey]) // deterministic registration identity
   @@index([tenantId])
@@ -2067,5 +2075,133 @@ model NodeNetworkMembership {
   @@unique([nodeId, networkId]) // one membership per node per network
   @@index([networkId])
   @@index([participantMembershipId])
+  @@index([status])
+}
+
+// -----------------------------------------------------------------------------
+// Phase 14B: Bundle — generic data-plane primitive.
+// -----------------------------------------------------------------------------
+// A Bundle is a transport/data-plane envelope capable of carrying arbitrary
+// protocol payloads. It is DISTINCT from ProtocolTransaction (a deterministic
+// state-transition request) and from VPP energy delivery.
+//
+// Bundle is NOT:
+//   - a TransitNet packet
+//   - a local-internet packet
+//   - an HTTP request
+//   - a blockchain transaction
+//   - a compute job
+//
+// IDENTITY (Step 5):
+//   - bundleId is DETERMINISTIC: SHA-256(tenantId, sourceNodeId, idempotencyKey).
+//     Immutable, survives replication/crash/retry. payloadHash is NOT part of
+//     the identity (it detects conflicts when the same key is reused with a
+//     different payload).
+//   - NOT derived from DB row ID, timestamp alone, route, storage node, or
+//     network membership. A duplicate copy of the same Bundle retains the same
+//     logical identity (enables dedup, retry, forwarding, replication).
+//
+// TENANCY (Step 6):
+//   - tenant-scoped (source Node's tenant). A Bundle belongs to exactly one
+//     tenant. Cross-tenant transport is a future routing concern — NOT in 14B.
+//   - sourceNodeId + destinationNodeId both validated against the tenant.
+//
+// PAYLOAD BOUNDARY (Step 7):
+//   - payloadType: generic string (e.g. "application/json", "opaque").
+//   - payloadHash: SHA-256 of the payload (integrity).
+//   - payloadRef: optional opaque reference for external content-addressed
+//     storage (future). For Phase 14B, small payloads may be stored inline via
+//     payloadBytesJson.
+//   - Bundle metadata ≠ payload storage implementation.
+//
+// LIFECYCLE (Step 8):
+//   status: created → received → stored → delivered | expired
+//   - created: Bundle identity persisted, not yet received by destination.
+//   - received: destination has acknowledged reception (may be stored).
+//   - stored: persisted at an intermediate or final location.
+//   - delivered: delivered to destination (at-least-once, idempotent).
+//   - expired: past expiryTime; no new delivery permitted.
+//   Delivery facts are SEPARATE (BundleDelivery, append-only) — stored,
+//   forwarded, delivered, acknowledged are distinct facts, NOT conflated.
+//
+// DELIVERY SEMANTICS (Step 10):
+//   at-least-once + idempotent delivery. NOT exactly-once. The Bundle layer
+//   preserves facts rather than making unsupported guarantees. Delivery records
+//   deduplicated by deterministic deliveryId.
+//
+// EXPIRY (Step 11):
+//   expiryTime is a persisted timestamp. After expiry, new delivery is rejected.
+//   Deterministic, NOT an in-memory timer.
+//
+// SECURITY/INTEGRITY (Step 13):
+//   payloadHash (integrity), sourceNodeId (source identity), destinationNodeId
+//   (destination identity), idempotencyKey + nonce (replay detection).
+//   NO encryption algorithms — that belongs in future transform/security layers.
+//
+// NOT IN SCOPE (Step 16 hard stop):
+//   routing, DTN, transforms, extensions, marketplace, SDK, Cloudlet, TransitNet.
+// -----------------------------------------------------------------------------
+model Bundle {
+  id                      String   @id // deterministic: SHA-256(tenantId, sourceNodeId, idempotencyKey) — payloadHash NOT part of identity
+  tenantId                String
+  sourceNodeId            String   // FK to Node (sender — protocol endpoint identity)
+  destinationNodeId       String   // FK to Node (receiver — protocol endpoint identity)
+  nodeKind                String   // generic bundle kind (e.g. "generic_payload")
+  payloadType             String   // generic content type (e.g. "application/json")
+  payloadHash             String   // SHA-256 of payload (integrity)
+  payloadRef              String?  // optional opaque reference to external storage
+  payloadBytesJson        String?  // optional inline small payload (JSON string)
+  priority                Int      @default(0) // generic, protocol-neutral
+  nonce                   Int      @default(0) // replay detection
+  idempotencyKey          String   // caller-supplied, for deterministic identity
+  status                  String   @default("created") // created | received | stored | delivered | expired
+  createdAt               DateTime @default(now())
+  expiryTime              DateTime // persisted — after this, no new delivery
+  deliveredAt             DateTime? // set when first delivered
+  metadataJson            String   @default("{}")
+  updatedAt               DateTime @updatedAt
+
+  tenant                  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sourceNode              Node     @relation("BundleSourceNode", fields: [sourceNodeId], references: [id], onDelete: Cascade)
+  destinationNode         Node     @relation("BundleDestinationNode", fields: [destinationNodeId], references: [id], onDelete: Cascade)
+  deliveries              BundleDelivery[]
+
+  @@index([tenantId])
+  @@index([sourceNodeId])
+  @@index([destinationNodeId])
+  @@index([status])
+  @@index([expiryTime])
+  @@index([priority])
+}
+
+/// Phase 14B: BundleDelivery — append-only delivery records. Each delivery
+/// attempt/event is a separate fact, distinguished by status:
+///   stored | forwarded | delivered | acknowledged | failed
+///
+/// Deduplication: @@unique([bundleId, receiverNodeId]) → same Bundle delivered
+/// to the same receiver twice converges to ONE delivery record (idempotent).
+/// The deliveryId is deterministic: SHA-256(bundleId, receiverNodeId).
+///
+/// This model does NOT conflate stored/forwarded/delivered/acknowledged —
+/// they are distinct lifecycle facts recorded as separate status transitions.
+/// For Phase 14B, the primary statuses are 'stored' and 'delivered'.
+model BundleDelivery {
+  id                      String   @id // deterministic: SHA-256(bundleId, receiverNodeId)
+  bundleId                String   // FK to Bundle
+  receiverNodeId          String   // FK to Node (who received/is receiving)
+  tenantId                String   // denormalized for tenant-scoped queries
+  status                  String   @default("stored") // stored | forwarded | delivered | acknowledged | failed
+  attemptCount            Int      @default(1) // incremented on duplicate reception
+  firstReceivedAt         DateTime @default(now())
+  lastReceivedAt          DateTime @updatedAt
+  deliveredAt             DateTime? // set when first delivered
+  metadataJson            String   @default("{}")
+
+  bundle                  Bundle   @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  receiverNode            Node     @relation("BundleDeliveryNode", fields: [receiverNodeId], references: [id], onDelete: Cascade)
+
+  @@index([bundleId])
+  @@index([receiverNodeId])
+  @@index([tenantId])
   @@index([status])
 }

@@ -203,4 +203,13 @@ describe('Phase 13: Architecture Anti-Drift', () => {
     expect(existsSync('./src/lib/services/node.service.ts')).toBe(true)
     expect(existsSync('./src/lib/kernel/node.ts')).toBe(false)
   })
+
+  // 19. Bundle/DataPlane IS implemented as a service-layer primitive (Phase 14B).
+  //    A kernel-level bundle.ts/data-plane.ts is deliberately NOT created —
+  //    the DataPlane is a substrate, not a kernel contract.
+  it('Bundle/DataPlane is implemented as a service-layer primitive, not a kernel contract', () => {
+    expect(existsSync('./src/lib/services/data-plane.service.ts')).toBe(true)
+    expect(existsSync('./src/lib/kernel/bundle.ts')).toBe(false)
+    expect(existsSync('./src/lib/kernel/data-plane.ts')).toBe(false)
+  })
 })

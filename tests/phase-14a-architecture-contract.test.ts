@@ -127,23 +127,25 @@ describe('Phase 14A: Node Architecture Anti-Drift', () => {
     expect(imports).not.toMatch(/node\.service/)
   })
 
-  // 10. No Data Plane implementation is introduced
-  it('no Data Plane implementation file exists', () => {
+  // 10. No KERNEL-level Data Plane implementation is introduced.
+  //    Phase 14B implements the DataPlane as a SERVICE-LAYER primitive
+  //    (src/lib/services/data-plane.service.ts), NOT a kernel contract.
+  //    The kernel-level data-plane.ts must NOT exist.
+  //    node.service.ts (Phase 14A) must not import data-plane (no reverse dep).
+  it('no kernel-level Data Plane file exists; node.service does not import data-plane', () => {
     expect(existsSync('./src/lib/kernel/data-plane.ts')).toBe(false)
-    expect(existsSync('./src/lib/services/data-plane.service.ts')).toBe(false)
-    // node.service.ts must not import data-plane.
+    // node.service.ts must not import data-plane (Node is lower-level than Bundle).
     const source = readFile('./src/lib/services/node.service.ts')
     const imports = getImportLines(source)
     expect(imports).not.toMatch(/data-plane/)
+    expect(imports).not.toMatch(/bundle/)
   })
 
-  // 11. No Bundle implementation is introduced
-  it('no Bundle implementation file exists', () => {
+  // 11. No KERNEL-level Bundle implementation is introduced.
+  //    Phase 14B implements Bundle as a Prisma model + service-layer primitive.
+  //    The kernel-level bundle.ts must NOT exist.
+  it('no kernel-level Bundle file exists', () => {
     expect(existsSync('./src/lib/kernel/bundle.ts')).toBe(false)
-    expect(existsSync('./src/lib/services/bundle.service.ts')).toBe(false)
-    const source = readFile('./src/lib/services/node.service.ts')
-    const imports = getImportLines(source)
-    expect(imports).not.toMatch(/bundle/)
   })
 
   // 12. No Transform implementation is introduced

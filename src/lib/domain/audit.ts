@@ -39,6 +39,11 @@ export const AuditEvents = {
   NodeRevoked: 'node.revoked',
   NodeJoinedNetwork: 'node.joined_network',
   NodeLeftNetwork: 'node.left_network',
+  // Phase 14B: Bundle lifecycle audit events.
+  BundleCreated: 'bundle.created',
+  BundleReceived: 'bundle.received',
+  BundleDelivered: 'bundle.delivered',
+  BundleExpired: 'bundle.expired',
 } as const
 
 export type AuditEventType = (typeof AuditEvents)[keyof typeof AuditEvents]
