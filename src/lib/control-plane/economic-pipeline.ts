@@ -185,6 +185,16 @@ export async function processEconomicPipeline(input: {
   timestamp: string
   /** The sequence number for replay protection. */
   sequence: number
+  /**
+   * TEST-ONLY HOOK: if set, processEconomicPipeline throws after completing
+   * the specified stage but BEFORE the next stage starts. This lets a test
+   * inject a real failure at an economic stage boundary (not a deletion-based
+   * simulation). The checkpoint reflects the last completed stage, and
+   * reconciliation can resume from the durable boundary.
+   *
+   * Production callers MUST NOT pass this hook. No effect when omitted.
+   */
+  failAfterStage?: EconomicStage
 }): Promise<EconomicPipelineResult> {
   const state = await db.economicPipelineState.findUnique({
     where: { executionAssignmentId: input.executionAssignmentId },
@@ -249,6 +259,9 @@ export async function processEconomicPipeline(input: {
       })
       state.eventId = ingestResult.event_id
       state.stage = ECONOMIC_STAGE.EVIDENCE_RECORDED
+      if (input.failAfterStage === ECONOMIC_STAGE.EVIDENCE_RECORDED) {
+        throw new Error('TEST-ONLY: injected failure after EVIDENCE_RECORDED')
+      }
     }
 
     // --- Stage 2: Verification (processEventOutbox) ---
@@ -298,6 +311,9 @@ export async function processEconomicPipeline(input: {
       })
       state.attestationId = attestation.id
       state.stage = ECONOMIC_STAGE.VERIFIED
+      if (input.failAfterStage === ECONOMIC_STAGE.VERIFIED) {
+        throw new Error('TEST-ONLY: injected failure after VERIFIED')
+      }
     }
 
     // --- Stage 3: Contribution ---
@@ -321,6 +337,9 @@ export async function processEconomicPipeline(input: {
       })
       state.contributionId = contribution.id
       state.stage = ECONOMIC_STAGE.CONTRIBUTION_CREATED
+      if (input.failAfterStage === ECONOMIC_STAGE.CONTRIBUTION_CREATED) {
+        throw new Error('TEST-ONLY: injected failure after CONTRIBUTION_CREATED')
+      }
     }
 
     // --- Stage 4: Reward ---
@@ -340,6 +359,9 @@ export async function processEconomicPipeline(input: {
       })
       state.rewardId = reward.id
       state.stage = ECONOMIC_STAGE.REWARD_CALCULATED
+      if (input.failAfterStage === ECONOMIC_STAGE.REWARD_CALCULATED) {
+        throw new Error('TEST-ONLY: injected failure after REWARD_CALCULATED')
+      }
     }
 
     // --- Stage 5: Ledger ---
@@ -359,6 +381,9 @@ export async function processEconomicPipeline(input: {
       })
       state.ledgerPostingId = ledgerResult.posting_id
       state.stage = ECONOMIC_STAGE.LEDGER_POSTED
+      if (input.failAfterStage === ECONOMIC_STAGE.LEDGER_POSTED) {
+        throw new Error('TEST-ONLY: injected failure after LEDGER_POSTED')
+      }
     }
 
     // --- Stage 6: Settlement ---
@@ -374,6 +399,9 @@ export async function processEconomicPipeline(input: {
       })
       state.settlementId = settlement.id
       state.stage = ECONOMIC_STAGE.SETTLEMENT_CREATED
+      if (input.failAfterStage === ECONOMIC_STAGE.SETTLEMENT_CREATED) {
+        throw new Error('TEST-ONLY: injected failure after SETTLEMENT_CREATED')
+      }
     }
 
     // --- Stage 7: Completed ---
