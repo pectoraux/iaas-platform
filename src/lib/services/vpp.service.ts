@@ -25,11 +25,7 @@ import { Prisma } from '@prisma/client'
 import { NotFoundError, ValidationError, ConflictError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import { ingestEvent, buildCanonicalMessage } from './ingestion.service'
-import { processEventOutbox, processSettlementOutbox, processSettlementForReward } from './worker.service'
-import { createContribution } from './contribution.service'
-import { calculateReward } from './reward.service'
-import { postRewardToLedger } from './ledger.service'
-import { createSettlement } from './settlement.service'
+import { processEventOutbox, processSettlementOutbox } from './worker.service'
 import { signMessage, deriveSigningKey } from '@/lib/domain/crypto'
 import {
   createCapacityReservation as allocateReservation,
@@ -41,8 +37,6 @@ import {
 
 // VPP-4: Generic execution model — VPP wraps the kernel's Execution/ExecutionAssignment.
 // VPP-5: VPP enters through the NetworkRuntime (resolved via RuntimeRegistry).
-//        The vertical NEVER touches Execution records directly — it goes
-//        through the runtime, which owns the generic execution lifecycle.
 // VPP-6: VPP does NOT import or instantiate DERAdapter. Physical execution
 //        enters through runtime.executeAssignment(), which resolves the adapter
 //        via the AdapterRegistry.
@@ -53,6 +47,22 @@ import {
   resolveRuntime,
   type RuntimeKind,
 } from '@/lib/kernel/runtime'
+
+// Phase 12B Slice 7: VPP delegates economic processing to the generic
+// EconomicPipelineState + processEconomicPipeline. No VPP-specific economic
+// primitives are created — the generic pipeline orchestrates Event →
+// Verification → Attestation → Contribution → Reward → Ledger → Settlement
+// through deterministic idempotency keys.
+import {
+  initEconomicPipeline,
+  processEconomicPipeline,
+  reconcileEconomicPipeline,
+  ECONOMIC_STAGE,
+} from '@/lib/control-plane/economic-pipeline'
+import {
+  acquireExecutionLease,
+  completeExecutionLease,
+} from '@/lib/control-plane/execution-lease'
 
 // ---------------------------------------------------------------------------
 // Buyer Programs
@@ -661,23 +671,57 @@ export async function executeDispatchAssignment(
     // adapter.execute(). VPP does NOT import or instantiate DERAdapter.
     // The runtime owns: adapter resolution, physical execute, telemetry
     // acquisition. VPP owns: baseline, verification, contribution, economics.
+    // Phase 12B Slice 7: acquire execution lease before executing (required
+    // by the Slice 5 lease validation injected into the runtime).
     // =========================================================================
     const durationSeconds = Math.floor(
       (assignment.dispatch.endTime.getTime() - assignment.dispatch.startTime.getTime()) / 1000,
     )
-    const executeResult = await runtime.executeAssignment({
-      assetId: assignment.assetId,
-      assetType: assignment.asset.assetType,
-      capabilityType: assignment.capabilityType,
-      assignedQuantity: assignment.assignedKwh,
-      assignedUnit: 'kWh',
-      durationSeconds,
-      parameters: { assignedKw: assignment.assignedKw },
+
+    // Phase 12B Slice 7: acquire execution lease.
+    const leaseResult = await acquireExecutionLease({
+      executionAssignmentId: assignment.executionAssignmentId,
+      workerIdentity: `vpp-${assignmentId}`,
     })
+    if (!leaseResult.acquired) {
+      throw new Error(`Could not acquire execution lease: ${leaseResult.reason}`)
+    }
+    const lease = leaseResult.lease!
+
+    let executeResult
+    try {
+      executeResult = await runtime.executeAssignment({
+        assetId: assignment.assetId,
+        assetType: assignment.asset.assetType,
+        capabilityType: assignment.capabilityType,
+        assignedQuantity: assignment.assignedKwh,
+        assignedUnit: 'kWh',
+        durationSeconds,
+        parameters: { assignedKw: assignment.assignedKw },
+        leaseId: lease.id,
+        leaseVersion: lease.leaseVersion,
+        workerIdentity: `vpp-${assignmentId}`,
+      })
+    } catch (err) {
+      // Adapter resolution or execution threw an exception (not success=false).
+      // Fail the assignment + release capacity.
+      await db.$transaction(async (tx) => {
+        await runtime.failAssignment(tx, tenantId, assignment.executionAssignmentId, assignment.dispatch.executionId)
+      })
+      await releaseAssignmentCapacity()
+      throw new Error(`Physical execution failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
 
     if (!executeResult.success) {
       throw new Error(`Physical execution failed: ${executeResult.error}`)
     }
+
+    // Complete the execution lease (success).
+    await completeExecutionLease({
+      leaseId: lease.id,
+      leaseVersion: lease.leaseVersion,
+      workerIdentity: `vpp-${assignmentId}`,
+    })
 
     const actualKwh = new Prisma.Decimal(executeResult.actualQuantity)
 
@@ -949,67 +993,80 @@ export async function executeDispatchAssignment(
       })
     }
     usageRecorded = true
-    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'usage_recorded' } })
+    // LEGACY: economicStage is retained for backward compatibility with existing
+    // rows but is no longer authoritative runtime state. The authoritative
+    // economic checkpoint is EconomicPipelineState.
 
     // =========================================================================
     // ECONOMIC PIPELINE (after operational completion)
     // =========================================================================
-    // The generic Execution is already completed. The following steps are
-    // VPP-specific economics. Failures here do NOT affect the generic
-    // Execution status — they only affect the VPP economic state.
+    // Phase 12B Slice 7: VPP delegates economic processing to the generic
+    // EconomicPipelineState + processEconomicPipeline.
+    //
+    // VPP performs its own evidence + verification + baseline calculation
+    // BEFORE the economic pipeline because the baseline depends on the
+    // attestation. The economic pipeline's evidence + verification stages
+    // will be SKIPPED (eventId + attestationId are already set on the
+    // checkpoint). The pipeline handles only: Contribution → Reward →
+    // Ledger → Settlement.
+    //
+    // VPP provides the economic inputs:
+    //   - actualQuantity: verifiedPerformanceKwh (max(0, actual - baseline))
+    //   - actualUnit: 'kWh'
+    //   - telemetryPayload: the adapter's raw telemetry (for the pipeline
+    //     record, not for re-ingestion — the Event already exists)
+    //   - deviceId, signingKey, capabilityType: not needed (Event already
+    //     ingested) but required by the pipeline signature
     // =========================================================================
 
-    // --- Derived contribution (uses verifiedPerformanceKwh — never negative) ---
-    const contribution = await createContribution(
+    await initEconomicPipeline({
+      executionAssignmentId: assignment.executionAssignmentId,
       tenantId,
-      {
-        attestationIds: [attestation.id],
-        derivedQuantity: verifiedPerformanceKwh.toString(),
-        derivedUnit: 'kWh',
-      },
-      `vpp-baseline-${baseline.id}`,
-    )
-
-    // Link the contribution to the generic assignment (economic link, post-completion).
-    await db.$transaction(async (tx) => {
-      await tx.vppDispatchAssignment.update({
-        where: { id: assignmentId },
-        data: { contributionId: contribution.id },
-      })
-      await runtime.linkContribution(tx, assignment.executionAssignmentId, contribution.id)
+      networkVersionId: programVersion.id,
+      networkId: assignment.dispatch.program.networkId,
     })
 
-    // --- Reward ---
-    const reward = await calculateReward(tenantId, contribution.id, `vpp-contrib-${contribution.id}`)
-    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'reward_calculated' } })
+    // Pre-populate the checkpoint with the already-existing Event + Attestation
+    // so the pipeline skips the evidence + verification stages.
+    await db.economicPipelineState.update({
+      where: { executionAssignmentId: assignment.executionAssignmentId },
+      data: {
+        eventId: event.id,
+        attestationId: attestation.id,
+        stage: ECONOMIC_STAGE.VERIFIED,
+      },
+    })
 
-    // --- Ledger ---
-    await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
-    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'ledger_posted' } })
+    const economicResult = await processEconomicPipeline({
+      executionAssignmentId: assignment.executionAssignmentId,
+      telemetryPayload: executeResult.telemetryPayload,
+      actualQuantity: verifiedPerformanceKwh.toString(),
+      actualUnit: 'kWh',
+      deviceId: device.id,
+      signingKey: deriveSigningKey(provisioningSecret),
+      capabilityType: assignment.capabilityType,
+      timestamp: new Date().toISOString(),
+      sequence: Math.floor(Date.now() / 1000),
+    })
 
-    // --- Settlement ---
-    const settlement = await createSettlement(tenantId, reward.id)
-    await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'settlement_pending' } })
-
-    // Use the TARGETED, LEASE-SAFE settlement processor.
-    // Phase 5.2: If settlement fails, the VPP assignment enters
-    // reconciliation_required (economic recovery), but the generic
-    // ExecutionAssignment STAYS completed — the execution succeeded.
-    const settlementResult = await processSettlementForReward(tenantId, reward.id)
-    if (!settlementResult.completed) {
-      // Settlement did not complete. The VPP assignment enters
-      // reconciliation_required (economic). The generic assignment is
-      // ALREADY completed — it is NOT failed.
-      throw new Error(`Settlement not completed (status: ${settlementResult.settlementId})`)
+    // Link the contribution to the generic assignment (economic link, post-completion).
+    if (economicResult.contributionId) {
+      const contributionId = economicResult.contributionId
+      await db.$transaction(async (tx) => {
+        await tx.vppDispatchAssignment.update({
+          where: { id: assignmentId },
+          data: { contributionId },
+        })
+        await runtime.linkContribution(tx, assignment.executionAssignmentId, contributionId)
+      })
     }
 
-    // --- VPP COMPLETED (only reached if settlement succeeded) ---
+    // --- VPP COMPLETED (only reached if economic pipeline succeeded) ---
     // Phase 5.2: The generic assignment was already completed during
     // operational completion. Here we only update the VPP-specific state.
-    // No runtime.completeAssignment call — the generic is already done.
     await db.vppDispatchAssignment.update({
       where: { id: assignmentId },
-      data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
+      data: { status: 'completed', completedAt: new Date() },
     })
 
     // VPP-2D-4: canonical finalization. Checks if ALL assignments are
@@ -1025,25 +1082,27 @@ export async function executeDispatchAssignment(
       metadata: {
         actualKwh: actualKwh.toString(),
         performanceKwh: verifiedPerformanceKwh.toString(),
-        eventId: event.id,
-        contributionId: contribution.id,
-        rewardId: reward.id,
-        contributionQuantity: contribution.quantity,
+        eventId: economicResult.eventId,
+        contributionId: economicResult.contributionId,
+        rewardId: economicResult.rewardId,
+        ledgerPostingId: economicResult.ledgerPostingId,
+        settlementId: economicResult.settlementId,
+        economicStage: economicResult.stage,
       },
     })
 
     return {
       assignment_id: assignmentId,
-      event_id: event.id,
-      attestation_id: attestation.id,
+      event_id: economicResult.eventId!,
+      attestation_id: economicResult.attestationId!,
       baseline_id: baseline.id,
-      contribution_id: contribution.id,
-      reward_id: reward.id,
-      settlement_id: settlement.id,
+      contribution_id: economicResult.contributionId!,
+      reward_id: economicResult.rewardId!,
+      settlement_id: economicResult.settlementId!,
       performance_kwh: verifiedPerformanceKwh.toString(),
       actual_kwh: actualKwh.toString(),
       baseline_kwh: baselineKwh.toString(),
-      contribution_quantity: contribution.quantity,
+      contribution_quantity: verifiedPerformanceKwh.toString(),
       duplicate: false,
     }
   } catch (err) {
@@ -1285,47 +1344,31 @@ export async function reconcileAssignment(
   if (!assignment) throw new NotFoundError('vpp_dispatch_assignment', assignmentId)
 
   try {
-    // Inspect DURABLE OBJECTS (not just economicStage) to determine the actual
-    // next stage. The economicStage checkpoint is a hint, but the existence/state
-    // of reward, ledger posting, and settlement is the source of truth.
-    if (!assignment.contributionId) {
-      throw new Error('Cannot reconcile: contributionId missing')
-    }
+    // Phase 12B Slice 7: delegate economic recovery to the generic pipeline.
+    // The generic reconcileEconomicPipeline inspects durable PostgreSQL state
+    // (Event, Attestation, Contribution, Reward, LedgerPosting, Settlement)
+    // and reconstructs the economic chain from existing durable objects.
+    // VPP does NOT independently reconstruct economic primitives.
+    const economicResult = await reconcileEconomicPipeline(assignment.executionAssignmentId)
 
-    // 1. Check if reward exists. If not, calculate it.
-    let reward = await db.reward.findFirst({ where: { contributionId: assignment.contributionId } })
-    if (!reward) {
-      reward = await calculateReward(tenantId, assignment.contributionId, `vpp-contrib-${assignment.contributionId}`)
-      await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'reward_calculated' } })
-    }
+    if (economicResult.stage === ECONOMIC_STAGE.COMPLETED) {
+      // Link the contribution to the VPP assignment if not already done.
+      if (economicResult.contributionId && !assignment.contributionId) {
+        await db.vppDispatchAssignment.update({
+          where: { id: assignmentId },
+          data: {
+            contributionId: economicResult.contributionId,
+            status: 'completed',
+            completedAt: new Date(),
+          },
+        })
+      } else {
+        await db.vppDispatchAssignment.update({
+          where: { id: assignmentId },
+          data: { status: 'completed', completedAt: new Date() },
+        })
+      }
 
-    // 2. Check if reward is posted to ledger. If not, post it.
-    if (reward.status === 'calculated') {
-      await postRewardToLedger(tenantId, { rewardId: reward.id }, `vpp-reward-${reward.id}`)
-      // Reload reward to get updated status.
-      reward = (await db.reward.findUnique({ where: { id: reward.id } }))!
-      await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'ledger_posted' } })
-    }
-
-    // 3. Check if settlement exists. If not, create it.
-    let settlement = await db.settlement.findUnique({ where: { rewardId: reward.id } })
-    if (!settlement) {
-      settlement = await createSettlement(tenantId, reward.id)
-      await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { economicStage: 'settlement_pending' } })
-    }
-
-    // 4. Process the specific settlement if not yet completed.
-    if (settlement.status !== 'completed') {
-      await processSettlementForReward(tenantId, reward.id)
-      settlement = (await db.settlement.findUnique({ where: { rewardId: reward.id } }))!
-    }
-
-    // 5. Check if settlement is now completed.
-    if (settlement.status === 'completed') {
-      await db.vppDispatchAssignment.update({
-        where: { id: assignmentId },
-        data: { status: 'completed', economicStage: 'completed', completedAt: new Date() },
-      })
       // VPP-2D-4: canonical finalization after successful reconciliation.
       await maybeFinalizeDispatch(tenantId, assignment.dispatchId, actorId)
       await appendAudit({
@@ -1333,18 +1376,21 @@ export async function reconcileAssignment(
         eventType: 'vpp.reconciliation_completed',
         resourceType: 'vpp_dispatch_assignment',
         resourceId: assignmentId,
-        metadata: { rewardId: reward.id, settlementId: settlement.id },
+        metadata: {
+          rewardId: economicResult.rewardId,
+          settlementId: economicResult.settlementId,
+        },
       })
       return { assignment_id: assignmentId, status: 'completed', economic_stage: 'completed', message: 'Reconciliation succeeded' }
     }
 
-    // Settlement still not completed.
+    // Economic pipeline not yet completed.
     await db.vppDispatchAssignment.update({ where: { id: assignmentId }, data: { status: 'reconciliation_required' } })
     return {
       assignment_id: assignmentId,
       status: 'reconciliation_required',
-      economic_stage: assignment.economicStage,
-      message: 'Reconciliation attempted but settlement not yet completed. Manual review may be needed.',
+      economic_stage: economicResult.stage,
+      message: `Reconciliation attempted but economic pipeline not completed (stage: ${economicResult.stage}).`,
     }
   } catch (err) {
     // Reconciliation itself failed → back to reconciliation_required.
