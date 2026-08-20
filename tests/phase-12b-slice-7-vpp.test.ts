@@ -299,25 +299,59 @@ describeOrSkip('Phase 12B Slice 7: VPP Migration Complete', () => {
   })
 
   // V11 — economic failure after operational success
+  //
+  // Proves: PHYSICAL EXECUTION SUCCESS → OPERATIONAL COMPLETION → ECONOMIC
+  // FAILURE → RECONCILIATION → ECONOMIC COMPLETION, WITHOUT physical re-execution.
+  //
+  // Uses the SAME failAfterStage pattern as Compute C11: run the full VPP
+  // pipeline (which succeeds), reset the economic checkpoint to VERIFIED
+  // (keeping Event + Attestation — they are VPP-specific and pre-exist the
+  // pipeline), delete only the pipeline-owned downstream objects (Contribution,
+  // Reward, LedgerPosting, Settlement), then re-run processEconomicPipeline
+  // with failAfterStage=REWARD_CALCULATED.
+  //
+  // This injects a REAL failure at the economic boundary (after Reward,
+  // before LedgerPosting). The pipeline THROWS, the checkpoint records
+  // reconciliation_required, and reconciliation resumes from the gap.
   it('V11: VPP economic failure after operational success — failAfterStage → no physical re-execution', async () => {
     const { assignments } = await setupDispatch()
     const assignmentId = assignments[0].id
+    const execAssignmentId = assignments[0].executionAssignmentId
 
-    // Execute the VPP job — this creates Event, verifies, computes baseline,
-    // completes operationally, then runs the economic pipeline.
+    // --- Step 0: Execute the VPP job fully (operational + economic success) ---
     const result = await executeDispatchAssignment(tenantId, assignmentId, deviceSecret)
 
-    // The job completed. Now reset the economic pipeline and re-run with
-    // failAfterStage to inject a real economic failure.
+    // Capture durable execution evidence BEFORE the economic failure.
+    const leasesBefore = await db.executionLease.findMany({
+      where: { executionAssignmentId: execAssignmentId },
+    })
+    const leaseCountBefore = leasesBefore.length
+    const activeLeasesBefore = leasesBefore.filter((l) => l.status === LEASE_STATUS.ACTIVE).length
+
+    // Capture the Event + Attestation IDs (VPP-specific, pre-existing the pipeline).
+    const stateBefore = await db.economicPipelineState.findUnique({
+      where: { executionAssignmentId: execAssignmentId },
+    })
+    const eventIdBefore = stateBefore!.eventId
+    const attestationIdBefore = stateBefore!.attestationId
+
+    // Verify deterministic event identity (Phase 12B Slice 7 fix).
+    const eventBefore = await db.event.findUnique({ where: { id: eventIdBefore! } })
+    expect(eventBefore!.externalEventId).toBe(`evidence-${execAssignmentId}`)
+
+    // --- Step 1: Reset the economic pipeline to inject failure ---
+    // Keep Event + Attestation (they are VPP-specific evidence, not pipeline-owned).
+    // Delete only pipeline-owned downstream objects (Contribution, Reward,
+    // LedgerPosting, Settlement) so the pipeline re-runs from VERIFIED.
+    // Re-fund the buyer (the first run consumed funds).
     await db.economicPipelineState.update({
-      where: { executionAssignmentId: assignments[0].executionAssignmentId },
+      where: { executionAssignmentId: execAssignmentId },
       data: {
         stage: ECONOMIC_STAGE.VERIFIED,
         contributionId: null, rewardId: null, ledgerPostingId: null, settlementId: null,
         reconciliationReason: null,
       },
     })
-    // Delete downstream economic objects.
     await db.settlement.deleteMany({ where: { tenantId } })
     await db.ledgerEntry.deleteMany({ where: { tenantId } })
     await db.ledgerPosting.deleteMany({ where: { tenantId } })
@@ -325,11 +359,13 @@ describeOrSkip('Phase 12B Slice 7: VPP Migration Complete', () => {
     await db.contribution.deleteMany({ where: { tenantId } })
     await recordBuyerFunding(tenantId, '100000', `refund-v11-${Date.now()}`)
 
-    // Re-run with failure injection after REWARD_CALCULATED.
+    // --- Step 2: Re-run pipeline with failure injection after REWARD_CALCULATED ---
+    // Event + Verification + Attestation are SKIPPED (already on checkpoint).
+    // Contribution + Reward SUCCEED. Then the pipeline THROWS before LedgerPosting.
     const { processEconomicPipeline: runPipeline } = await import('../src/lib/control-plane/economic-pipeline')
     await expect(
       runPipeline({
-        executionAssignmentId: assignments[0].executionAssignmentId,
+        executionAssignmentId: execAssignmentId,
         telemetryPayload: { power_kw: 5, energy_kwh: 9.5, duration_seconds: 3600 },
         actualQuantity: result.performance_kwh!,
         actualUnit: 'kWh',
@@ -342,43 +378,114 @@ describeOrSkip('Phase 12B Slice 7: VPP Migration Complete', () => {
       }),
     ).rejects.toThrow('TEST-ONLY: injected failure after REWARD_CALCULATED')
 
-    // Assignment remains completed (operational completion irreversible).
+    // --- Step 3: Verify the failure boundary ---
+    // 3a. Assignment remains 'completed' (operational completion is irreversible).
     const assignment = await db.executionAssignment.findUnique({
-      where: { id: assignments[0].executionAssignmentId },
+      where: { id: execAssignmentId },
       select: { status: true },
     })
     expect(assignment!.status).toBe('completed')
 
-    // Checkpoint = reconciliation_required.
+    // 3b. Checkpoint = reconciliation_required (economic failure recorded).
     const stateAfterFailure = await db.economicPipelineState.findUnique({
-      where: { executionAssignmentId: assignments[0].executionAssignmentId },
+      where: { executionAssignmentId: execAssignmentId },
     })
     expect(stateAfterFailure!.stage).toBe(ECONOMIC_STAGE.RECONCILIATION_REQUIRED)
+    expect(stateAfterFailure!.reconciliationReason).toContain('injected failure')
+
+    // 3c. Upstream economic objects are durable (created before the failure).
+    expect(stateAfterFailure!.eventId).not.toBeNull()
+    expect(stateAfterFailure!.attestationId).not.toBeNull()
     expect(stateAfterFailure!.contributionId).not.toBeNull()
     expect(stateAfterFailure!.rewardId).not.toBeNull()
+
+    // 3d. LedgerPosting + Settlement were NOT created (failure before them).
     expect(stateAfterFailure!.ledgerPostingId).toBeNull()
     expect(stateAfterFailure!.settlementId).toBeNull()
 
-    // No new lease (physical execution not repeated).
-    const leases = await db.executionLease.findMany({
-      where: { executionAssignmentId: assignments[0].executionAssignmentId },
+    // 3e. No LedgerPosting or Settlement exists in durable state.
+    const postingsBefore = await db.ledgerPosting.findMany({
+      where: { tenantId, postingType: 'reward' },
     })
-    const activeLeases = leases.filter((l) => l.status === LEASE_STATUS.ACTIVE)
-    expect(activeLeases.length).toBe(0)
+    expect(postingsBefore.length).toBe(0)
+    const settlementsBefore = await db.settlement.findMany({ where: { tenantId } })
+    expect(settlementsBefore.length).toBe(0)
 
-    // Reconcile → completes the chain.
-    const reconcileResult = await reconcileEconomicPipeline(assignments[0].executionAssignmentId)
+    // --- Step 4: Prove NO physical re-execution ---
+    // 4a. No new ExecutionLease was created (execution count unchanged).
+    const leasesAfter = await db.executionLease.findMany({
+      where: { executionAssignmentId: execAssignmentId },
+    })
+    expect(leasesAfter.length).toBe(leaseCountBefore) // no new lease
+    const activeLeasesAfter = leasesAfter.filter((l) => l.status === LEASE_STATUS.ACTIVE)
+    expect(activeLeasesAfter.length).toBe(activeLeasesBefore) // no new active lease
+    expect(activeLeasesAfter.length).toBe(0) // no active leases at all
+
+    // 4b. Event + Attestation IDs are UNCHANGED (not recreated).
+    expect(stateAfterFailure!.eventId).toBe(eventIdBefore)
+    expect(stateAfterFailure!.attestationId).toBe(attestationIdBefore)
+
+    // --- Step 5: Prove operational completion is preserved ---
+    // (Already verified in 3a — assignment.status === 'completed'.)
+    // VPP operational state is separate from EconomicPipelineState.
+    const vppAssignment = await db.vppDispatchAssignment.findUnique({
+      where: { id: assignmentId },
+      select: { status: true },
+    })
+    expect(vppAssignment!.status).toBe('completed')
+
+    // --- Step 6: Reconcile → completes the chain ---
+    // Reconciliation discovers the existing durable objects (Event, Attestation,
+    // Contribution, Reward) and resumes from the missing LedgerPosting + Settlement.
+    const reconcileResult = await reconcileEconomicPipeline(execAssignmentId)
     expect(reconcileResult.stage).toBe(ECONOMIC_STAGE.COMPLETED)
 
-    // Exactly one of each.
+    // --- Step 7: Verify exactly one economic chain (no duplicates) ---
+    const events = await db.event.findMany({ where: { tenantId } })
+    expect(events.length).toBe(1)
     const contributions = await db.contribution.findMany({ where: { tenantId } })
     expect(contributions.length).toBe(1)
     const rewards = await db.reward.findMany({ where: { tenantId } })
     expect(rewards.length).toBe(1)
-    const postings = await db.ledgerPosting.findMany({ where: { tenantId, postingType: 'reward' } })
+    const postings = await db.ledgerPosting.findMany({
+      where: { tenantId, postingType: 'reward' },
+    })
     expect(postings.length).toBe(1)
     const settlements = await db.settlement.findMany({ where: { tenantId } })
     expect(settlements.length).toBe(1)
+
+    // --- Step 8: Prove idempotent finalization (reconcile twice) ---
+    const reconcileResult2 = await reconcileEconomicPipeline(execAssignmentId)
+    expect(reconcileResult2.stage).toBe(ECONOMIC_STAGE.COMPLETED)
+    expect(reconcileResult2.replayed).toBe(true)
+
+    // Still exactly one of each (no duplicates from the second reconciliation).
+    const contributions2 = await db.contribution.findMany({ where: { tenantId } })
+    expect(contributions2.length).toBe(1)
+    const rewards2 = await db.reward.findMany({ where: { tenantId } })
+    expect(rewards2.length).toBe(1)
+    const postings2 = await db.ledgerPosting.findMany({
+      where: { tenantId, postingType: 'reward' },
+    })
+    expect(postings2.length).toBe(1)
+    const settlements2 = await db.settlement.findMany({ where: { tenantId } })
+    expect(settlements2.length).toBe(1)
+
+    // --- Step 9: Verify deterministic event identity is preserved ---
+    const eventAfter = await db.event.findUnique({ where: { id: eventIdBefore! } })
+    expect(eventAfter!.externalEventId).toBe(`evidence-${execAssignmentId}`)
+
+    // --- Step 10: Verify capacity semantics (usage NOT released by economic failure) ---
+    // The execution assignment is completed — capacity was consumed during
+    // physical execution. Economic failure does NOT release capacity.
+    const assignmentFinal = await db.executionAssignment.findUnique({
+      where: { id: execAssignmentId },
+      select: { status: true },
+    })
+    expect(assignmentFinal!.status).toBe('completed')
+    // Capacity was released during operational completion (not by economics).
+    // The key assertion: economic failure did NOT cause capacity to be
+    // re-released or double-recorded. The assignment remains 'completed'.
   })
 
   // V12 — NetworkVersion immutability
