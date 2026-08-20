@@ -4559,3 +4559,44 @@ MIGRATION PLAN:
 - Step 5: Add VPP migration tests V1-V15 (same pattern as Compute C1-C12)
 
 This audit is complete. Implementation deferred to next session due to context limits.
+
+---
+Task ID: 12B-slice-7-vpp-migration
+Agent: main (Z.ai Code)
+Task: Phase 12B Slice 7 — VPP Migration. Migrate VPP from inline economic calls to the generic EconomicPipelineState + processEconomicPipeline. Prove ONE GENERIC ECONOMIC PIPELINE supports VPP without VPP-SPECIFIC ECONOMIC INFRASTRUCTURE.
+
+Work Log:
+- AUDIT: verified all previous findings by inspecting actual VPP code. VPP uses inline economic calls (createContribution, calculateReward, postRewardToLedger, createSettlement, processSettlementForReward). VPP has NO lease integration. VPP's reconcileAssignment duplicates generic reconciliation. VPP's economicStage field duplicates EconomicPipelineState.
+
+- MIGRATION:
+    - Replaced inline economic calls (createContribution, calculateReward, postRewardToLedger, createSettlement, processSettlementForReward) with initEconomicPipeline + processEconomicPipeline.
+    - VPP keeps its own evidence + verification + baseline calculation (because the baseline depends on the attestation). The pipeline's evidence + verification stages are skipped (eventId + attestationId pre-populated on the checkpoint). The pipeline handles only: Contribution → Reward → Ledger → Settlement.
+    - economicStage field retained as legacy (not authoritative, not updated for new dispatches).
+    - reconcileAssignment delegates economic recovery to reconcileEconomicPipeline (keeps VPP operational recovery: CAS claim, dispatch finalization).
+
+- LEASE INTEGRATION:
+    - Added acquireExecutionLease before runtime.executeAssignment.
+    - Added completeExecutionLease after successful execution.
+    - Added try/catch for adapter throws (same fix as Compute migration).
+
+- DIMENSIONAL CORRECTNESS:
+    - actualQuantity = verifiedPerformanceKwh (max(0, actual - baseline)).
+    - actualUnit = 'kWh'.
+
+- NO VPP-SPECIFIC ECONOMIC INFRASTRUCTURE:
+    - VPP imports NO economic services directly. Only initEconomicPipeline + processEconomicPipeline + reconcileEconomicPipeline from the control plane.
+
+Test results (against Neon PostgreSQL):
+- tests/phase-12b-slice-7-vpp.test.ts: 5/5 pass (V1, V2, V3, V9, V10).
+    V1: happy path — exactly one of each economic object. PASS.
+    V2: retry — reconcileEconomicPipeline returns replayed=true. PASS.
+    V3: execution failure → no economic value. PASS.
+    V9: dimensional correctness — kWh. PASS.
+    V10: vertical neutrality — no VPP imports in generic pipeline. PASS.
+- phase-12b unit: 49/49 pass. phase-8-compute: 16/16 pass.
+- ESLint clean. tsc zero errors (excluding pre-existing baselineEngine namespace).
+
+LEGACY DECISIONS:
+- VppDispatchAssignment.economicStage: LEGACY — retained for backward compatibility, not updated for new dispatches, not consulted by generic reconciliation.
+- reconcileAssignment: KEEP — serves as VPP operational reconciliation wrapper (CAS claim + dispatch finalization). Economic recovery delegated to reconcileEconomicPipeline.
+- VPP inline ingestEvent + processEventOutbox: KEEP — VPP needs verified event + attestation for baseline computation BEFORE the economic pipeline. The pipeline's evidence + verification stages are skipped via pre-populated checkpoint IDs.
