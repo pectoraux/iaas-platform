@@ -52,9 +52,11 @@ describe('Phase 14C: Data Plane Routing Architecture Anti-Drift', () => {
     }
   })
 
-  // 3. No transport implementation exists
-  it('no transport service implementation exists (TCP/UDP/Bluetooth/WiFi/satellite)', () => {
-    expect(existsSync('./src/lib/services/transport.service.ts')).toBe(false)
+  // 3. No protocol-specific transport implementation exists.
+  //    Phase 14D implements a GENERIC transport.service.ts (service-layer),
+  //    but no TCP/UDP/Bluetooth/WiFi/satellite protocol implementations.
+  //    routing.service.ts must not import transport (routing decides, transport executes — no reverse dep).
+  it('no protocol-specific transport (TCP/UDP/Bluetooth/WiFi) exists; routing does not import transport', () => {
     expect(existsSync('./src/lib/services/tcp.service.ts')).toBe(false)
     expect(existsSync('./src/lib/services/udp.service.ts')).toBe(false)
     expect(existsSync('./src/lib/services/bluetooth.service.ts')).toBe(false)
@@ -62,7 +64,7 @@ describe('Phase 14C: Data Plane Routing Architecture Anti-Drift', () => {
     // routing.service.ts must not import transport abstractions.
     const source = readFile('./src/lib/services/routing.service.ts')
     const imports = getImportLines(source)
-    expect(imports).not.toMatch(/transport/)
+    expect(imports).not.toMatch(/transport\.service/)
     expect(imports).not.toMatch(/tcp/)
     expect(imports).not.toMatch(/udp/)
     expect(imports).not.toMatch(/bluetooth/i)

@@ -51,6 +51,15 @@ export const AuditEvents = {
   RouteFailed: 'route.failed',
   RouteExpired: 'route.expired',
   RouteHopAdded: 'route.hop_added',
+  // Phase 14D: Transport lifecycle audit events.
+  TransportExecutionCreated: 'transport.execution_created',
+  TransportExecutionStarted: 'transport.execution_started',
+  TransportExecutionCompleted: 'transport.execution_completed',
+  TransportExecutionFailed: 'transport.execution_failed',
+  TransportExecutionCancelled: 'transport.execution_cancelled',
+  TransportAttemptCreated: 'transport.attempt_created',
+  TransportAttemptAcknowledged: 'transport.attempt_acknowledged',
+  TransportAttemptFailed: 'transport.attempt_failed',
 } as const
 
 export type AuditEventType = (typeof AuditEvents)[keyof typeof AuditEvents]

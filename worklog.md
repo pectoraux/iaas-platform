@@ -4847,3 +4847,98 @@ Stage Summary:
 - NO transport protocols, DTN forwarding, relay scheduling, bandwidth markets, transforms, extensions, marketplace, SDK, cloudlets, TransitNet.
 - ProtocolRuntime NOT modified. HybridRuntime NOT modified. Economic pipeline NOT modified.
 - TARGETED/SAMPLED REGRESSION (not full suite) due to Neon runtime limits. Strong evidence: 11/11 Routing tests, 68/68 static tests, sampled Bundle pass.
+
+---
+Task ID: 14D-audit
+Agent: Principal Architect (main)
+Task: PHASE 14D — Transport Execution Foundation — STEP 0 audit + design
+
+Work Log:
+- Verified HEAD = 7fc10d2 (Phase 14C frozen). Clean working tree.
+- Read ARCHITECTURE-CONSTITUTION.md, PHASE-14B-DATA-PLANE-CONTRACT.md, PHASE-14C-ROUTING-CONTRACT.md, PHASE-13-GAP-MATRIX.md, PHASE-13-DEPENDENCY-GRAPH.md.
+- Audit: confirmed NO transport abstraction exists. The existing InfrastructureAdapter (src/lib/kernel/adapters/infrastructure-adapter.ts) is for PHYSICAL INFRASTRUCTURE execution (discover/readTelemetry/execute/health on assets like batteries/GPUs/storage). It is DISTINCT from the Phase 14D TransportAdapter, which executes transport attempts (moving Bundles along Routes). The kernel has: adapters, concurrency, execution, runtime — no transport. Services have: node.service, data-plane.service, routing.service — no transport.service.
+- Design decisions (frozen):
+  - TransportExecution model: tenant-scoped, immutable identity (cuid). Fields: id, tenantId, routeId (FK to Route), bundleId (FK to Bundle), status (created|started|completed|failed|cancelled), attemptNumber (Int), createdAt, startedAt, completedAt, failureReason?, metadataJson. References existing Bundle + Route — does NOT modify them (T2/T3). Idempotent creation via deterministic key (T6).
+  - TransportAttempt model: separate from execution. Fields: id, executionId (FK), fromNodeId, toNodeId, status (created|sent|acknowledged|failed), startedAt, completedAt, errorCode?, metadataJson. Ordered by createdAt (T7). Records individual transport attempts within an execution.
+  - TransportCapability model: node capability declaration for transport. Allowed: STORE_AND_FORWARD | BUNDLE_TRANSFER | TRANSPORT_EXECUTION | generic. NOT allowed: WIFI | BLUETOOTH | LTE | SATELLITE (future adapter details). @@unique([nodeId, capability]).
+  - TransportAdapter INTERFACE (not a Prisma model): src/lib/kernel/adapters/transport-adapter.ts. Methods: executeTransportAttempt(), getCapabilities(), validate(). NO TCP/sockets/network calls. A mock/null adapter is acceptable. This is the boundary future network implementations plug into.
+  - Dependency direction: Bundle → Route → TransportExecution → TransportAdapter. Transport executes routing decisions; it does NOT make routing decisions.
+  - Lifecycle enforcement (T4): created → started → completed (valid). completed → started (invalid — terminal). failed is NOT terminal for attempts (T5: a failed execution can create another attempt).
+  - Tenant isolation (T1): all queries filter by tenantId.
+  - Concurrent execution creation (T6): deterministic executionId via @@unique + P2002 convergence.
+  - Capability isolation (T8): TransportCapability is a declaration, NOT network ownership/bandwidth/pricing/connectivity.
+
+Stage Summary:
+- TransportExecution = service-layer primitive (src/lib/services/transport.service.ts), NOT a kernel contract.
+- TransportAdapter = kernel interface (src/lib/kernel/adapters/transport-adapter.ts) — the boundary future networks implement.
+- TransportExecution/TransportAttempt/TransportCapability models in prisma/schema.prisma.
+- Minimal lifecycle: created → started → completed | failed | cancelled.
+- NO TCP/UDP/QUIC/Bluetooth/WiFi/LoRa/satellite/DTN forwarding/congestion control/routing algorithm/radio selection/bandwidth marketplace.
+- Does NOT modify Bundle (T2), Route (T3), or Node (T8). References them via FK.
+
+---
+Task ID: 14D-doc
+Agent: Architecture Documentation Agent
+Task: Write docs/architecture/PHASE-14D-TRANSPORT-CONTRACT.md
+
+Work Log:
+- Read worklog Task ID: 14D-audit (lines 4852-4877) for frozen design decisions.
+- Read ARCHITECTURE-CONSTITUTION.md §8 (DATA PLANE BOUNDARY, line 302) for the contract placeholder being operationalized.
+- Read PHASE-14B-DATA-PLANE-CONTRACT.md and PHASE-14C-ROUTING-CONTRACT.md for structure, style, and the immutability / anti-drift conventions to mirror.
+- Read prisma/schema.prisma lines 2402-2491: confirmed model TransportExecution (id, tenantId, routeId FK, bundleId FK, idempotencyKey, status, attemptNumber, failureReason, createdAt/startedAt/completedAt/cancelledAt, metadataJson; @@unique([tenantId, routeId, bundleId, idempotencyKey])), model TransportAttempt (executionId FK, fromNodeId, toNodeId, status created|sent|acknowledged|failed, startedAt/completedAt, errorCode, createdAt), model TransportCapability (nodeId, capability, status, @@unique([nodeId, capability])).
+- Read src/lib/services/transport.service.ts (full, 554 lines): confirmed createTransportExecution (P2002 catch + re-read for T6 idempotency), start/complete/fail/cancel lifecycle (T4 enforcement), createTransportAttempt (Node active validation — Phase 14A integration), markAttemptSent/acknowledgeAttempt/failAttempt (T5 — failed attempt does NOT fail execution), declareTransportCapability/listTransportCapabilities (T8 idempotent declaration). Confirmed imports: db, errors, audit, getNode, getBundle, getRoute — no routing-internals, no economic, no kernel imports.
+- Read src/lib/kernel/adapters/transport-adapter.ts (full, 189 lines): confirmed TransportAdapter interface (executeTransportAttempt, getCapabilities, validate), TransportAttemptInput (transport-neutral: executionId/bundleId/routeId/fromNodeId/toNodeId/attemptNumber), TransportAttemptResult (success/status/errorCode?/metadata? — does NOT throw on failure), MockTransportAdapter (failMode flag, no network calls).
+- Read src/lib/domain/audit.ts lines 1-90 + grep for Transport: confirmed 8 Transport audit events (TransportExecutionCreated/Started/Completed/Failed/Cancelled + TransportAttemptCreated/Acknowledged/Failed).
+- Wrote /home/z/my-project/docs/architecture/PHASE-14D-TRANSPORT-CONTRACT.md (927 lines, 16 sections, FROZEN). Section structure: 1 Purpose (incl. FINAL RULE), 2 Transport Definition (service-layer vs kernel interface; InfrastructureAdapter distinction), 3 Relationship to Bundle (T2 immutability, multi-execution per Bundle), 4 Relationship to Route (T3 immutability, bundleId consistency check), 5 Relationship to Node (hop endpoints, lifecycle enforcement, no Node creation T8), 6 Execution Lifecycle (created→started→completed|failed|cancelled, T4 enforcement, T5 recoverable), 7 Attempt Model (per-hop, append-only T7, created→sent→acknowledged|failed, failed attempt does NOT cascade T5), 8 Capability Model (generic allowed set, NOT-allowed protocol list, T8 isolation, idempotent declaration), 9 Adapter Boundary (interface methods, transport-neutral input, no-throw result, MockTransportAdapter, NEVER list), 10 Failure Semantics (recoverable, no cascade, terminal-not-reversible T4, FACTS not guarantees, result-not-throw), 11 Idempotency (cuid identity, deterministic key, P2002 convergence T6, capability idempotency), 12 Security Boundary (Node identity, capability-as-declaration, no encryption/auth, tenant isolation T1, adapter boundary is the security seam), 13 Future Extensions (DTN/TransitNet/Cloudlet/LocalInternet adapters, marketplace, congestion control), 14 Explicit Non-goals (DTN/real-networking/marketplace/SDK/TransitNet/congestion/radio-selection), 15 Acceptance Gate (Architecture/Implementation/Testing/Quality, includes baselineEngine carve-out + T1-T8 + 12 anti-drift rules + Phase 13/14A/14B/14C contract tests), 16 Anti-Drift Rules (12 rules enforced by tests/phase-14d-architecture-contract.test.ts).
+- Verified file: 16 ## section headings present at the correct line numbers; 927 lines total.
+
+Stage Summary:
+- Created the FROZEN Phase 14D Transport Execution contract document at docs/architecture/PHASE-14D-TRANSPORT-CONTRACT.md (927 lines, 16 sections).
+- Document is the authoritative contract for TransportExecution / TransportAttempt / TransportCapability / TransportAdapter.
+- All frozen design decisions from Task ID: 14D-audit are encoded: T1 tenant isolation, T2 Bundle immutability, T3 Route immutability, T4 lifecycle enforcement (terminal non-reversible), T5 recoverable failure (new execution/attempt, not transition-back), T6 idempotency via P2002 catch+re-read, T7 attempt ordering via createdAt, T8 capability isolation (declaration, not network ownership).
+- Dependency direction encoded: Bundle → Route → TransportExecution → TransportAdapter. Transport executes routing decisions; does NOT make them. Transport references Node identity (Phase 14A), Bundle (Phase 14B), Route (Phase 14C) via FK; modifies none.
+- Explicitly defers: DTN, TransitNet, Cloudlet, Local-first Internet, adapter marketplace, SDK, congestion control, radio selection, bandwidth marketplace. All future-extension, none in 14D.
+- 12 anti-drift rules documented (transport exists / service-layer / no kernel primitive beyond adapter / no routing-internals import / no network protocols / no Bundle mutation / no Route mutation / no Node creation / generic capability / no DTN / no marketplace / no SDK).
+- Acceptance gate includes baselineEngine TypeScript carve-out (confirmed pre-existing at src/lib/services/vpp.service.ts:820-822).
+- Documentation-only task: no code, tests, or schema changes. Only the single markdown file created. No other files modified.
+
+---
+Task ID: 14D-verified
+Agent: Principal Architect (verification run)
+Task: PHASE 14D — Transport Execution Foundation — verification
+
+Work Log:
+- Schema: added TransportExecution (cuid, tenant-scoped, route-linked, bundle-linked, lifecycle created|started|completed|failed|cancelled, deterministic idempotency via @@unique([tenantId, routeId, bundleId, idempotencyKey]), attemptNumber, failureReason), TransportAttempt (ordered by createdAt, fromNodeId/toNodeId with Node lifecycle enforcement, lifecycle created|sent|acknowledged|failed), TransportCapability (declaration, @@unique([nodeId, capability]), generic capabilities STORE_AND_FORWARD|BUNDLE_TRANSFER|TRANSPORT_EXECUTION|generic — NO protocol-specific fields). Reverse relations on Tenant.transportExecutions, Node.transportCapabilities/transportAttemptsFrom/transportAttemptsTo, Bundle.transportExecutions, Route.transportExecutions. prisma validate PASSED, db push to Neon SUCCESS.
+- Created src/lib/kernel/adapters/transport-adapter.ts: TransportAdapter interface (executeTransportAttempt, getCapabilities, validate) + MockTransportAdapter. DISTINCT from InfrastructureAdapter (physical asset execution). NO TCP/UDP/sockets/network calls.
+- Created src/lib/services/transport.service.ts: createTransportExecution (idempotent, P2002 convergence T6), getTransportExecution, listTransportExecutions (tenant-scoped T1), startTransportExecution (T4 lifecycle), completeTransportExecution, failTransportExecution, cancelTransportExecution, createTransportAttempt (T7 ordering, Node lifecycle), markAttemptSent, acknowledgeAttempt, failAttempt (T5 — does NOT fail execution), declareTransportCapability (idempotent, T8), listTransportCapabilities.
+- Audit events: TransportExecutionCreated/Started/Completed/Failed/Cancelled, TransportAttemptCreated/Acknowledged/Failed.
+- Created tests/phase-14d-transport.test.ts: T1-T8 (12 test cases). ALL PASS against Neon.
+- Created tests/phase-14d-architecture-contract.test.ts: 16 static contract tests (12 Step-9 rules + 4 additional). ALL PASS.
+- Updated tests/phase-14c-architecture-contract.test.ts #3: no protocol-specific transport (TCP/UDP/Bluetooth/WiFi) exists; generic transport.service.ts now allowed (Phase 14D). routing.service must not import transport (no reverse dep).
+- Created docs/architecture/PHASE-14D-TRANSPORT-CONTRACT.md (927 lines, 16 sections, FROZEN).
+
+Verified test results (real PostgreSQL/Neon, no mocks):
+- Phase 14D Transport (T1-T8): 12/12 PASS (sampled individually due to Neon latency ~12-15s/test).
+- Phase 14D Architecture Contract: 16/16 PASS (static).
+- Phase 14C Architecture Contract: 13/13 PASS (static, updated #3).
+- Phase 14B Architecture Contract: 17/17 PASS (static).
+- Phase 14A Architecture Contract: 19/19 PASS (static).
+- Phase 13 Architecture Contract: 19/19 PASS (static).
+- Total static architecture tests: 85/85 PASS.
+- Phase 14C Routing (R1 sampled): PASS (unchanged — transport.service imports getRoute, no reverse dep).
+- ESLint: clean (0 errors).
+- TypeScript: transport.service.ts + transport-adapter.ts ZERO errors; baselineEngine namespace error at vpp.service.ts:822 CONFIRMED pre-existing (unchanged from 7fc10d2).
+- Diff scope: ONLY Transport artifacts (schema +3 models, audit +8 events, transport.service.ts, transport-adapter.ts, contract doc, 2 test files, Phase 14C test update, worklog). ZERO TCP/UDP/DTN/transform/extension/marketplace/SDK/cloudlet/transitnet leakage.
+
+Stage Summary:
+- TransportExecution = service-layer primitive (src/lib/services/transport.service.ts), NOT a kernel contract.
+- TransportAdapter = kernel interface (src/lib/kernel/adapters/transport-adapter.ts) — the boundary future networks implement.
+- TransportExecution references Bundle + Route (does NOT modify them — T2/T3). References Node via TransportAttempt (does NOT create Nodes — T8).
+- Lifecycle enforcement (T4): created → started → completed|failed|cancelled. Terminal cannot revert.
+- Failure recovery (T5): failed execution can create another execution; failed attempt does NOT fail execution.
+- Concurrent convergence (T6): P2002 catch + re-read.
+- Attempt ordering (T7): deterministic via createdAt (append-only).
+- Capability isolation (T8): declaration, NOT network ownership/bandwidth/pricing.
+- NO TCP/UDP/QUIC/Bluetooth/WiFi/LoRa/satellite/DTN forwarding/congestion control/routing algorithm/radio selection/bandwidth marketplace.
+- ProtocolRuntime NOT modified. HybridRuntime NOT modified. Economic pipeline NOT modified.
+- TARGETED/SAMPLED REGRESSION (not full suite) due to Neon runtime limits. Strong evidence: 12/12 Transport tests, 85/85 static tests, sampled Routing pass.

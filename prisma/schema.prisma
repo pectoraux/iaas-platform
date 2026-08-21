@@ -96,6 +96,8 @@ model Tenant {
   bundles          Bundle[]
   // Phase 14C: Route — tenant-scoped routing plan.
   routes           Route[]
+  // Phase 14D: TransportExecution — tenant-scoped transport execution.
+  transportExecutions TransportExecution[]
 
   @@index([slug])
 }
@@ -2041,6 +2043,10 @@ model Node {
   routeHopsTo             RouteHop[]            @relation("RouteHopToNode")
   capabilities            NodeCapability[]
   reachability            NodeReachability?
+  // Phase 14D: transport capabilities + attempts where this Node is from/to.
+  transportCapabilities   TransportCapability[]
+  transportAttemptsFrom   TransportAttempt[]    @relation("TransportAttemptFromNode")
+  transportAttemptsTo     TransportAttempt[]    @relation("TransportAttemptToNode")
 
   @@unique([tenantId, participantId, nodeKind, idempotencyKey]) // deterministic registration identity
   @@index([tenantId])
@@ -2178,6 +2184,9 @@ model Bundle {
   // Phase 14C: routes planned for this Bundle. Route ATTACHES to the Bundle —
   // it does NOT modify Bundle identity/payload/destination (Step 7).
   routes                  Route[]
+  // Phase 14D: transport executions for this Bundle. TransportExecution
+  // references the Bundle — it does NOT modify Bundle identity/payload (T2).
+  transportExecutions     TransportExecution[]
 
   @@index([tenantId])
   @@index([sourceNodeId])
@@ -2261,6 +2270,9 @@ model Route {
   sourceNode              Node     @relation("RouteSourceNode", fields: [sourceNodeId], references: [id], onDelete: Cascade)
   destinationNode         Node     @relation("RouteDestinationNode", fields: [destinationNodeId], references: [id], onDelete: Cascade)
   hops                    RouteHop[]
+  // Phase 14D: transport executions that execute this Route. TransportExecution
+  // references the Route — it does NOT modify Route (T3).
+  transportExecutions     TransportExecution[]
 
   @@index([tenantId])
   @@index([bundleId])
@@ -2355,4 +2367,124 @@ model NodeReachability {
   @@index([tenantId])
   @@index([reachable])
   @@index([expiresAt])
+}
+
+// -----------------------------------------------------------------------------
+// Phase 14D: TransportExecution — one attempt to execute a Route.
+// -----------------------------------------------------------------------------
+// A TransportExecution represents one attempt to execute a Route (move a Bundle
+// along its planned path). It is DISTINCT from:
+//   - Bundle (the data-plane object — TransportExecution references it, does NOT
+//     modify Bundle identity/payload, per T2).
+//   - Route (the planned path — TransportExecution references it, does NOT
+//     modify Route, per T3).
+//   - InfrastructureAdapter (physical asset execution — TransportExecution is
+//     data-plane transport, not asset telemetry/execute).
+//
+// TransportExecution is immutable in identity (cuid). Lifecycle:
+//   created → started → completed | failed | cancelled
+// A failed execution can create another execution attempt (T5 — failure recovery).
+// Terminal states (completed, failed, cancelled) cannot transition back.
+//
+// IDENTITY: cuid (immutable). NOT derived from Bundle or Route identity — a
+// TransportExecution is a distinct execution artifact. Multiple executions may
+// exist for the same Route+Bundle (retries produce NEW executions).
+//
+// IDEMPOTENCY (T6): deterministic key (tenantId, routeId, bundleId,
+// idempotencyKey) → concurrent createTransportExecution calls converge.
+//
+// TENANCY: tenant-scoped (the Route's tenant). Cross-tenant transport is a
+// future concern — NOT in Phase 14D.
+//
+// The TransportExecution does NOT contain: TCP/UDP/sockets/network calls. It
+// records execution STATE, not network behavior.
+// -----------------------------------------------------------------------------
+model TransportExecution {
+  id                      String   @id @default(cuid())
+  tenantId                String
+  routeId                 String   // FK to Route — the planned path being executed
+  bundleId                String   // FK to Bundle — the data-plane object being moved
+  idempotencyKey          String   // caller-supplied, for deterministic identity
+  status                  String   @default("created") // created | started | completed | failed | cancelled
+  attemptNumber           Int      @default(1) // which attempt (1-based)
+  failureReason           String?  // set when status → failed
+  createdAt               DateTime @default(now())
+  startedAt               DateTime? // set when status → started
+  completedAt             DateTime? // set when status → completed or failed
+  cancelledAt             DateTime? // set when status → cancelled
+  metadataJson            String   @default("{}")
+  updatedAt               DateTime @updatedAt
+
+  tenant                  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  route                   Route    @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  bundle                  Bundle   @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  attempts                TransportAttempt[]
+
+  @@unique([tenantId, routeId, bundleId, idempotencyKey]) // deterministic registration identity
+  @@index([tenantId])
+  @@index([routeId])
+  @@index([bundleId])
+  @@index([status])
+  @@index([attemptNumber])
+}
+
+/// Phase 14D: TransportAttempt — an individual transport attempt within an
+/// execution. An execution may have multiple attempts (retries).
+///
+/// Attempts maintain deterministic ordering via `createdAt` (append-only).
+/// Each attempt references fromNodeId + toNodeId (the hop being attempted).
+///
+/// Lifecycle: created → sent → acknowledged | failed
+/// A failed attempt does NOT fail the execution (T5 — the execution can create
+/// another attempt). The execution status is managed separately.
+model TransportAttempt {
+  id                      String   @id @default(cuid())
+  executionId             String   // FK to TransportExecution
+  fromNodeId              String   // FK to Node — hop source
+  toNodeId                String   // FK to Node — hop destination
+  status                  String   @default("created") // created | sent | acknowledged | failed
+  startedAt               DateTime @default(now())
+  completedAt             DateTime? // set when acknowledged or failed
+  errorCode               String?  // set when status → failed
+  metadataJson            String   @default("{}")
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  execution               TransportExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  fromNode                Node     @relation("TransportAttemptFromNode", fields: [fromNodeId], references: [id], onDelete: Cascade)
+  toNode                  Node     @relation("TransportAttemptToNode", fields: [toNodeId], references: [id], onDelete: Cascade)
+
+  @@index([executionId])
+  @@index([fromNodeId])
+  @@index([toNodeId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+/// Phase 14D: TransportCapability — node capability declaration for transport.
+/// Similar to NodeCapability (Phase 14C) but specifically transport-oriented.
+///
+/// Allowed capabilities (generic, NOT transport-protocol-specific):
+///   STORE_AND_FORWARD | BUNDLE_TRANSFER | TRANSPORT_EXECUTION | generic
+///
+/// NOT allowed (future adapter details):
+///   WIFI | BLUETOOTH | LTE | SATELLITE | TCP | UDP | QUIC
+///
+/// A Node MAY have multiple transport capability declarations. This is a
+/// declaration, NOT network ownership/bandwidth/pricing/connectivity (T8).
+model TransportCapability {
+  id                      String   @id @default(cuid())
+  tenantId                String
+  nodeId                  String   // FK to Node
+  capability              String   // STORE_AND_FORWARD | BUNDLE_TRANSFER | TRANSPORT_EXECUTION | generic
+  status                  String   @default("active") // active | suspended | revoked
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  node                    Node     @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@unique([nodeId, capability]) // one declaration per capability per node
+  @@index([nodeId])
+  @@index([capability])
+  @@index([status])
 }
