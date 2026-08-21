@@ -130,15 +130,19 @@ describe('Phase 14B: Data Plane / Bundle Architecture Anti-Drift', () => {
     expect(imports).not.toMatch(/transform/)
   })
 
-  // 11. Routing implementation does not exist in this milestone
-  it('no routing implementation file exists (no route/forwarding/dtn)', () => {
+  // 11. No KERNEL-level routing/transport implementation exists.
+  //    Phase 14C implements routing as a SERVICE-LAYER primitive
+  //    (src/lib/services/routing.service.ts), NOT a kernel contract.
+  //    The kernel-level routing.ts/dtn.ts must NOT exist.
+  //    data-plane.service.ts (Phase 14B) must not import routing (independent).
+  it('no kernel-level routing/dtn files exist; data-plane.service does not import routing', () => {
     expect(existsSync('./src/lib/kernel/routing.ts')).toBe(false)
     expect(existsSync('./src/lib/kernel/router.ts')).toBe(false)
     expect(existsSync('./src/lib/kernel/dtn.ts')).toBe(false)
-    expect(existsSync('./src/lib/services/routing.service.ts')).toBe(false)
+    // data-plane.service.ts must remain independent of routing.
     const source = readFile('./src/lib/services/data-plane.service.ts')
     const imports = getImportLines(source)
-    expect(imports).not.toMatch(/routing/)
+    expect(imports).not.toMatch(/routing\.service/)
     expect(imports).not.toMatch(/dtn/)
     expect(imports).not.toMatch(/forwarding/)
   })

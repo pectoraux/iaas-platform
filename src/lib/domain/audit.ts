@@ -44,6 +44,13 @@ export const AuditEvents = {
   BundleReceived: 'bundle.received',
   BundleDelivered: 'bundle.delivered',
   BundleExpired: 'bundle.expired',
+  // Phase 14C: Route lifecycle audit events.
+  RoutePlanned: 'route.planned',
+  RouteActivated: 'route.activated',
+  RouteCompleted: 'route.completed',
+  RouteFailed: 'route.failed',
+  RouteExpired: 'route.expired',
+  RouteHopAdded: 'route.hop_added',
 } as const
 
 export type AuditEventType = (typeof AuditEvents)[keyof typeof AuditEvents]

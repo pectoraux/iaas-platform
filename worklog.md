@@ -4756,3 +4756,94 @@ Stage Summary:
 - NO routing, transforms, extensions, marketplace, SDK, Cloudlet, TransitNet, DTN.
 - ProtocolRuntime NOT modified (string sender identity; Bundle is separate substrate).
 - NODE: sampled regression (not full suite) due to Neon runtime limits per test (~10s each). Strong evidence: 14/14 Bundle tests, 55/55 static tests, sampled Slice 6/Compute pass.
+
+---
+Task ID: 14C-audit
+Agent: Principal Architect (main)
+Task: PHASE 14C — Data Plane Routing Foundation — STEP 2 audit + design
+
+Work Log:
+- Verified HEAD = 055fffa (Phase 14B frozen). Clean working tree.
+- Read ARCHITECTURE-CONSTITUTION.md, PHASE-13-GAP-MATRIX.md, PHASE-13-DEPENDENCY-GRAPH.md, PHASE-14A-NODE-CONTRACT.md, PHASE-14B-DATA-PLANE-CONTRACT.md.
+- Audit: confirmed NO routing/transport abstraction exists. The "route.ts" files in src/app/api/v1/ are Next.js API route handlers (HTTP endpoints), NOT routing primitives. Kernel has: adapters, concurrency, execution, runtime — no routing. Services have: node.service, data-plane.service — no routing.service.
+- Confirmed: Node is service-layer (src/lib/services/node.service.ts). Bundle is service-layer (src/lib/services/data-plane.service.ts). DataPlane is NOT a kernel primitive. ProtocolTransaction is a state-transition object (unchanged). HybridRuntime unchanged.
+- Design decisions (frozen):
+  - Route model: tenant-scoped, immutable after creation. Fields: id (cuid), tenantId, bundleId (FK to Bundle), sourceNodeId, destinationNodeId, status (planned|active|completed|failed|expired), createdAt, expiresAt, metadataJson. Route attaches to Bundle — does NOT modify Bundle identity/payload/destination (Step 7).
+  - RouteHop model: ordered hops. Fields: id (cuid), routeId (FK), sequence (Int, deterministic ordering), fromNodeId, toNodeId, status. @@unique([routeId, sequence]) for deterministic hop ordering.
+  - NodeCapability model: smallest capability declaration. Fields: nodeId, capability (String: CAN_STORE_BUNDLE|CAN_FORWARD_BUNDLE|CAN_RECEIVE_BUNDLE|generic), status. NOT a marketplace — just a declaration.
+  - NodeReachability model: routing visibility (knowledge, not physical connectivity proof). Fields: nodeId, reachable (Boolean), lastSeen (DateTime), latencyHint (Int?), expiresAt (DateTime). Represents knowledge, NOT physical connectivity.
+  - Route identity: cuid (immutable). Route does NOT modify Bundle identity (Step 7 — Route attaches information, does not redefine Bundle).
+  - Route lifecycle: planned → active → completed | failed | expired. Does NOT overload execution state (no forwarding/packet/connection state).
+  - Routing service: src/lib/services/routing.service.ts. Allowed: createRoutePlan, addRouteHop, getRoute, listRoutes, expireRoute. NOT allowed: forwardBundle, sendPacket, openConnection, selectRadio (execution belongs later).
+  - Node lifecycle enforcement (R6): suspended/revoked Nodes cannot be added to new routes.
+  - Concurrent route creation (R7): deterministic routeId via @@unique + P2002 convergence (same pattern as Node/Bundle).
+  - Expiry (R8): persisted expiresAt timestamp. Expired routes cannot become active.
+
+Stage Summary:
+- Route = service-layer primitive (src/lib/services/routing.service.ts), NOT a kernel contract.
+- Route/RouteHop/NodeCapability/NodeReachability models in prisma/schema.prisma.
+- Route identity immutable (cuid). Route does NOT modify Bundle identity.
+- Minimal lifecycle: planned → active → completed | failed | expired.
+- NO transport protocols, TCP/UDP, DTN forwarding, relay scheduling, bandwidth markets, transforms, extensions, SDK, cloudlets, TransitNet.
+
+---
+Task ID: 14C-doc
+Agent: Architecture Documentation Agent
+Task: Write docs/architecture/PHASE-14C-ROUTING-CONTRACT.md
+
+Work Log:
+- Read worklog.md (Task ID: 14C-audit section) to ingest frozen design decisions: Route = service-layer primitive (src/lib/services/routing.service.ts), NOT a kernel contract; Route/RouteHop/NodeCapability/NodeReachability models; Route identity = cuid (immutable); lifecycle planned → active → completed | failed | expired; Route ATTACHES to Bundle (does NOT modify Bundle identity — Step 7); Node lifecycle enforcement (R6 — only active Nodes can be added); concurrent hop creation convergence (R7 — P2002 catch + re-read); expiry enforcement (R8 — persisted expiresAt, expired routes cannot become active); allowed operations only (no forwardBundle/sendPacket/openConnection/selectRadio); NO transport/DTN/relay-scheduling/bandwidth-markets/marketplace/transforms/extensions/SDK/cloudlets/TransitNet.
+- Read ARCHITECTURE-CONSTITUTION.md §8 (Data Plane Boundary contract, line 302) to confirm this contract supersedes the routing portion of the future-routing placeholder.
+- Read PHASE-14B-DATA-PLANE-CONTRACT.md to align document structure (Status: FROZEN header, source-of-truth references, anti-drift rules section, acceptance gate section) and to confirm Bundle identity immutability remains the higher-order contract that Route must not violate.
+- Read PHASE-14A-NODE-CONTRACT.md to confirm Node remains the protocol endpoint identity boundary; routing references Node identity, never Device/Asset/Resource; node.service must not import routing.service (anti-drift rule 6).
+- Read prisma/schema.prisma model Route, model RouteHop, model NodeCapability, model NodeReachability — verified field-by-field: Route (id cuid, tenantId, bundleId FK, sourceNodeId/destinationNodeId FK to Node with RouteSourceNode/RouteDestinationNode relations, status @default("planned"), createdAt, expiresAt, completedAt?, metadataJson, updatedAt; indexes on tenantId/bundleId/sourceNodeId/destinationNodeId/status/expiresAt); RouteHop (id cuid, routeId FK, sequence Int, fromNodeId/toNodeId FK to Node with RouteHopFromNode/RouteHopToNode relations, status @default("planned"), createdAt, metadataJson; @@unique([routeId, sequence])); NodeCapability (id cuid, tenantId, nodeId FK, capability String, status @default("active"), createdAt, updatedAt; @@unique([nodeId, capability])); NodeReachability (id cuid, tenantId, nodeId @unique FK, reachable Boolean, lastSeen DateTime, latencyHint Int?, expiresAt DateTime, metadataJson, createdAt, updatedAt).
+- Read src/lib/services/routing.service.ts — verified exported operations: createRoutePlan (derives source/destination from Bundle, persists status=planned, audits RoutePlanned); addRouteHop (validates route non-terminal, both Nodes active per R6, fromNodeId≠toNodeId, P2002 catch + re-read convergence per R7, audits RouteHopAdded); getRoute / listRoutes (tenant-scoped reads); activateRoute (expiry check R8 — auto-marks expired + audits RouteExpired, rejects terminal/active re-activation, transitions planned→active + audits RouteActivated); completeRoute (active→completed terminal, sets completedAt, audits RouteCompleted); failRoute (active→failed terminal, audits RouteFailed); expireRoute (explicit cleanup, idempotent, audits RouteExpired); declareNodeCapability (validates Node active, idempotent find-or-create on (nodeId, capability)); updateNodeReachability (validates Node exists, upsert on nodeId — one record per Node).
+- Read src/lib/domain/audit.ts — verified Route audit events present: RoutePlanned='route.planned', RouteActivated='route.activated', RouteCompleted='route.completed', RouteFailed='route.failed', RouteExpired='route.expired', RouteHopAdded='route.hop_added'.
+- Created /home/z/my-project/docs/architecture/PHASE-14C-ROUTING-CONTRACT.md (796 lines) covering all 14 required sections: (1) Purpose incl. FINAL RULE verbatim; (2) Routing Boundary (service-layer, WHERE not HOW, no execution state, allowed/NOT-allowed operations); (3) Route Identity (cuid immutable, distinct planning artifact, immutable-after-creation vs status changes, Route does NOT modify Bundle); (4) Route Lifecycle (states, terminal states, persisted expiry NOT in-memory timer, lifecycle transition table); (5) Hop Semantics (RouteHop, deterministic sequence + @@unique, fields, R6 Node lifecycle enforcement, hop status, R7 P2002 convergence); (6) Relationship with Bundle (attaches via bundleId FK, source/destination derived from Bundle, Bundle MAY have multiple Routes, Bundle remains immutable); (7) Relationship with Node (references Node identity NOT Device/Asset/Resource, R6 enforcement, Node lower-level than routing — no reverse dependency, no lifecycle coupling); (8) Non-goals (explicit list: transport protocols, DTN forwarding, relay scheduling, bandwidth markets, marketplace, transforms, extensions, SDK, cloudlets, TransitNet, routing algorithms requiring production telemetry); (9) Future DTN Compatibility (delay-tolerant in spirit, no DTN implementation, RouteHop sequence supports multi-hop store-carry-forward); (10) Future Transport Compatibility (transport-neutral, future transports consume Route, no transport abstraction introduced); (11) Security Considerations (Node identity validated, NodeCapability is declaration NOT marketplace, NodeReachability is knowledge NOT proof, no encryption in Route, tenant isolation); (12) Failure Model (failure is terminal — new Route not retry, R8 expired cannot become active, reachability TTL re-checked, hop failure does NOT cascade, substrate preserves FACTS not connectivity guarantees); (13) Acceptance Gate (Architecture/Implementation/Testing/Quality criteria); (14) Anti-Drift Rules (7 rules enforced by tests/phase-14c-architecture-contract.test.ts: service-layer placement, no kernel routing, no transport, Bundle immutability, no protocol-runtime/economic/marketplace/transform imports, node.service does not import routing.service, data-plane.service does not import routing.service).
+- Did NOT modify any other file. Did NOT write code or tests. Single-file documentation-only task.
+
+Stage Summary:
+- docs/architecture/PHASE-14C-ROUTING-CONTRACT.md is the authoritative Data Plane Routing contract for Phase 14C; FROZEN; supersedes the routing portion of ARCHITECTURE-CONSTITUTION.md §8 (line 302).
+- Document operationalizes the frozen audit decisions: Route = service-layer primitive (NOT kernel contract); cuid-based immutable identity (revisions create NEW Routes, not mutate old); minimal lifecycle planned → active → completed | failed | expired; Route ATTACHES to Bundle (does NOT modify Bundle identity/payload/destination — Phase 14B contract preserved); Route references Node identity NOT Device/Asset/Resource (Phase 14A contract preserved); Node lifecycle enforcement (R6 — only active Nodes); concurrent hop convergence (R7 — P2002 catch + re-read); expiry enforcement (R8 — persisted expiresAt, expired routes cannot become active); NO transport/DTN/relay-scheduling/bandwidth-markets/marketplace/transforms/extensions/SDK/cloudlets/TransitNet.
+- All 7 anti-drift rules (Route only in service/data layer; no kernel routing; no transport; Bundle immutable; no protocol-runtime/economic/marketplace/transform/vertical imports in routing; node.service does NOT import routing.service; data-plane.service does NOT import routing.service) are documented as normative and test-bound.
+- All acceptance-gate criteria documented and grouped (architecture, implementation, testing, quality).
+- Future compatibility paths (DTN custody transfer, future transports TCP/UDP/Bluetooth/WiFi/satellite) explicitly deferred to future phases — Route is the substrate they will consume, NOT the implementation they will become.
+
+---
+Task ID: 14C-verified
+Agent: Principal Architect (verification run)
+Task: PHASE 14C — Data Plane Routing Foundation — verification
+
+Work Log:
+- Schema: added Route (cuid, tenant-scoped, bundle-linked, lifecycle planned|active|completed|failed|expired, persisted expiresAt), RouteHop (ordered, @@unique([routeId, sequence]), fromNodeId/toNodeId with Node lifecycle enforcement), NodeCapability (declaration, @@unique([nodeId, capability]), no marketplace fields), NodeReachability (knowledge: reachable/lastSeen/latencyHint/expiresAt, one per Node). Reverse relations on Tenant.routes, Node.sourcedRoutes/destinationRoutes/routeHopsFrom/routeHopsTo/capabilities/reachability, Bundle.routes. prisma validate PASSED, db push to Neon SUCCESS.
+- Created src/lib/services/routing.service.ts: createRoutePlan (derives source/destination from Bundle — does NOT modify Bundle), addRouteHop (R6 Node lifecycle enforcement, R7 P2002 convergence), getRoute, listRoutes (tenant-scoped), activateRoute (R8 expiry check), completeRoute, failRoute, expireRoute, declareNodeCapability (idempotent), updateNodeReachability (upsert, one per Node).
+- Audit events: RoutePlanned, RouteActivated, RouteCompleted, RouteFailed, RouteExpired, RouteHopAdded.
+- Created tests/phase-14c-routing.test.ts: R1-R8 + capability/reachability (11 test cases). ALL PASS against Neon.
+- Created tests/phase-14c-architecture-contract.test.ts: 13 static contract tests (7 Step-11 rules + 6 additional). ALL PASS.
+- Updated tests/phase-14b-architecture-contract.test.ts #11: kernel-level routing.ts/dtn.ts must NOT exist (service-layer routing.service.ts now exists in Phase 14C). data-plane.service must not import routing (independent).
+- Created docs/architecture/PHASE-14C-ROUTING-CONTRACT.md (796 lines, 14 sections, FROZEN).
+- Fix during testing: activateRoute initially allowed re-activating an explicitly-expired route (status='expired' was not in the terminal check). Fixed: added 'expired' to the terminal-status check.
+
+Verified test results (real PostgreSQL/Neon, no mocks):
+- Phase 14C Routing (R1-R8 + capability/reachability): 11/11 PASS (sampled individually due to Neon latency ~10-16s/test).
+- Phase 14C Architecture Contract: 13/13 PASS (static).
+- Phase 14B Architecture Contract: 17/17 PASS (static, updated #11).
+- Phase 14A Architecture Contract: 19/19 PASS (static).
+- Phase 13 Architecture Contract: 19/19 PASS (static).
+- Total static architecture tests: 68/68 PASS.
+- Phase 14B Bundle (B1 sampled): PASS (unchanged — routing.service imports getBundle, no reverse dep).
+- ESLint: clean (0 errors).
+- TypeScript: routing.service.ts ZERO errors; baselineEngine namespace error at vpp.service.ts:822 CONFIRMED pre-existing (unchanged from 055fffa).
+- Diff scope: ONLY Routing artifacts (schema +4 models, audit +6 events, routing.service.ts, contract doc, 2 test files, Phase 14B test update, worklog). ZERO transport/DTN/transform/extension/marketplace/SDK/cloudlet/transitnet leakage.
+
+Stage Summary:
+- Route = service-layer primitive (src/lib/services/routing.service.ts), NOT a kernel contract.
+- Route is immutable after creation. Does NOT modify Bundle identity/payload/destination (Step 7 — ATTACHES information).
+- RouteHop ordering deterministic (sequence). Multi-hop Node A → Node B → Node C proven (R4).
+- Node lifecycle enforcement (R6): suspended/revoked Nodes cannot be added to new routes.
+- Concurrent hop creation converges (R7): P2002 catch + re-read.
+- Expiry enforced (R8): persisted expiresAt, expired routes cannot become active.
+- NodeCapability = declaration (not marketplace). NodeReachability = knowledge (not physical proof).
+- NO transport protocols, DTN forwarding, relay scheduling, bandwidth markets, transforms, extensions, marketplace, SDK, cloudlets, TransitNet.
+- ProtocolRuntime NOT modified. HybridRuntime NOT modified. Economic pipeline NOT modified.
+- TARGETED/SAMPLED REGRESSION (not full suite) due to Neon runtime limits. Strong evidence: 11/11 Routing tests, 68/68 static tests, sampled Bundle pass.

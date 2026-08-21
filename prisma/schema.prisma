@@ -94,6 +94,8 @@ model Tenant {
   nodes            Node[]
   // Phase 14B: Bundle — tenant-scoped data-plane primitive.
   bundles          Bundle[]
+  // Phase 14C: Route — tenant-scoped routing plan.
+  routes           Route[]
 
   @@index([slug])
 }
@@ -2031,6 +2033,14 @@ model Node {
   sentBundles             Bundle[]              @relation("BundleSourceNode")
   receivedBundles         Bundle[]              @relation("BundleDestinationNode")
   deliveries              BundleDelivery[]      @relation("BundleDeliveryNode")
+  // Phase 14C: routes where this Node is source/destination + hops where this
+  // Node is from/to + capability declarations + reachability state.
+  sourcedRoutes           Route[]               @relation("RouteSourceNode")
+  destinationRoutes       Route[]               @relation("RouteDestinationNode")
+  routeHopsFrom           RouteHop[]            @relation("RouteHopFromNode")
+  routeHopsTo             RouteHop[]            @relation("RouteHopToNode")
+  capabilities            NodeCapability[]
+  reachability            NodeReachability?
 
   @@unique([tenantId, participantId, nodeKind, idempotencyKey]) // deterministic registration identity
   @@index([tenantId])
@@ -2165,6 +2175,9 @@ model Bundle {
   sourceNode              Node     @relation("BundleSourceNode", fields: [sourceNodeId], references: [id], onDelete: Cascade)
   destinationNode         Node     @relation("BundleDestinationNode", fields: [destinationNodeId], references: [id], onDelete: Cascade)
   deliveries              BundleDelivery[]
+  // Phase 14C: routes planned for this Bundle. Route ATTACHES to the Bundle —
+  // it does NOT modify Bundle identity/payload/destination (Step 7).
+  routes                  Route[]
 
   @@index([tenantId])
   @@index([sourceNodeId])
@@ -2204,4 +2217,142 @@ model BundleDelivery {
   @@index([receiverNodeId])
   @@index([tenantId])
   @@index([status])
+}
+
+// -----------------------------------------------------------------------------
+// Phase 14C: Route — a planned path from source Node to destination Node.
+// -----------------------------------------------------------------------------
+// A Route is a routing plan ATTACHED to a Bundle. It represents WHERE a Bundle
+// should go, NOT how it gets there physically. It is DISTINCT from:
+//   - Bundle (the data-plane primitive — Route attaches to it, does NOT modify
+//     Bundle identity/payload/destination, per Step 7).
+//   - Node (the protocol endpoint — Route references Nodes, does not redefine
+//     them).
+//   - Transport (no TCP/UDP/Bluetooth/WiFi/satellite/DTN forwarding — Step 5).
+//
+// Route is immutable after creation (Step 6.1). Lifecycle:
+//   planned → active → completed | failed | expired
+// Route does NOT overload execution state (no forwarding/packet/connection).
+//
+// IDENTITY: cuid (immutable). NOT derived from Bundle or Node identity — a
+// Route is a distinct planning artifact that may be revised by creating a new
+// Route (the old one is NOT mutated).
+//
+// TENANCY: tenant-scoped (the Bundle's tenant). Cross-tenant routing is a
+// future concern — NOT in Phase 14C.
+//
+// EXPIRY: persisted expiresAt timestamp. Expired routes cannot become active.
+// -----------------------------------------------------------------------------
+model Route {
+  id                      String   @id @default(cuid())
+  tenantId                String
+  bundleId                String   // FK to Bundle — the Bundle this route plans for
+  sourceNodeId            String   // FK to Node — route source (must match Bundle.sourceNodeId)
+  destinationNodeId       String   // FK to Node — route destination (must match Bundle.destinationNodeId)
+  status                  String   @default("planned") // planned | active | completed | failed | expired
+  createdAt               DateTime @default(now())
+  expiresAt               DateTime // persisted — after this, cannot become active
+  completedAt             DateTime? // set when status → completed
+  metadataJson            String   @default("{}")
+  updatedAt               DateTime @updatedAt
+
+  tenant                  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  bundle                  Bundle   @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  sourceNode              Node     @relation("RouteSourceNode", fields: [sourceNodeId], references: [id], onDelete: Cascade)
+  destinationNode         Node     @relation("RouteDestinationNode", fields: [destinationNodeId], references: [id], onDelete: Cascade)
+  hops                    RouteHop[]
+
+  @@index([tenantId])
+  @@index([bundleId])
+  @@index([sourceNodeId])
+  @@index([destinationNodeId])
+  @@index([status])
+  @@index([expiresAt])
+}
+
+/// Phase 14C: RouteHop — an ordered hop in a route. A route consists of a
+/// sequence of hops: Node A → Node B → Node C → Destination.
+///
+/// Hop ordering is deterministic via `sequence` (Int). @@unique([routeId,
+/// sequence]) enforces no duplicate sequence numbers per route.
+///
+/// Each hop references fromNodeId + toNodeId (both must be active Nodes in the
+/// tenant — R6: suspended/revoked Nodes cannot be added to new routes).
+model RouteHop {
+  id                      String   @id @default(cuid())
+  routeId                 String   // FK to Route
+  sequence                Int      // deterministic ordering (0, 1, 2, ...)
+  fromNodeId              String   // FK to Node
+  toNodeId                String   // FK to Node
+  status                  String   @default("planned") // planned | active | completed | failed
+  createdAt               DateTime @default(now())
+  metadataJson            String   @default("{}")
+
+  route                   Route    @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  fromNode                Node     @relation("RouteHopFromNode", fields: [fromNodeId], references: [id], onDelete: Cascade)
+  toNode                  Node     @relation("RouteHopToNode", fields: [toNodeId], references: [id], onDelete: Cascade)
+
+  @@unique([routeId, sequence]) // deterministic hop ordering
+  @@index([routeId])
+  @@index([fromNodeId])
+  @@index([toNodeId])
+  @@index([status])
+}
+
+/// Phase 14C: NodeCapability — the smallest capability declaration. Allows
+/// future routing decisions to know what Nodes can participate in data-plane
+/// operations. NOT a marketplace — just a declaration of capability.
+///
+/// Generic data-plane capabilities:
+///   CAN_STORE_BUNDLE | CAN_FORWARD_BUNDLE | CAN_RECEIVE_BUNDLE | generic
+///
+/// A Node MAY have multiple capability declarations. This is knowledge, not
+/// a capacity reservation or a marketplace listing.
+model NodeCapability {
+  id                      String   @id @default(cuid())
+  tenantId                String
+  nodeId                  String   // FK to Node
+  capability              String   // CAN_STORE_BUNDLE | CAN_FORWARD_BUNDLE | CAN_RECEIVE_BUNDLE | generic
+  status                  String   @default("active") // active | suspended | revoked
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  node                    Node     @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@unique([nodeId, capability]) // one declaration per capability per node
+  @@index([nodeId])
+  @@index([capability])
+  @@index([status])
+}
+
+/// Phase 14C: NodeReachability — routing visibility. Represents KNOWLEDGE
+/// about whether a Node is reachable, NOT proof of physical connectivity.
+///
+/// This is NOT a complete network graph. NOT topology discovery. Only enough
+/// state to support future routing decisions.
+///
+/// Fields:
+///   reachable: Boolean — best-effort reachability knowledge.
+///   lastSeen: DateTime — when reachability was last confirmed.
+///   latencyHint: Int? — optional generic latency hint (ms). NOT a measurement.
+///   expiresAt: DateTime — when this knowledge expires (stale → re-check).
+///
+/// One reachability record per Node (@@unique([nodeId])).
+model NodeReachability {
+  id                      String   @id @default(cuid())
+  tenantId                String
+  nodeId                  String   @unique // FK to Node — one reachability record per node
+  reachable               Boolean  @default(false)
+  lastSeen                DateTime @default(now())
+  latencyHint             Int?     // optional generic latency hint (ms)
+  expiresAt               DateTime // when this knowledge expires
+  metadataJson            String   @default("{}")
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  node                    Node     @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([reachable])
+  @@index([expiresAt])
 }
