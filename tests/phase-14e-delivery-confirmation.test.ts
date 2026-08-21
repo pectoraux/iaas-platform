@@ -207,23 +207,25 @@ describeOrSkip('Phase 14E: D2 — Bundle immutability', () => {
 })
 
 // ===========================================================================
-// D3 — Immutability (confirmation is never updated)
+// D3 — Immutability + Idempotency/Conflict contract (adversarial)
 // ===========================================================================
 
-describeOrSkip('Phase 14E: D3 — Immutability', () => {
-  it('duplicate confirmation returns the existing receipt (idempotent, not updated)', async () => {
-    const f = await createConfirmationFixture('D3')
+describeOrSkip('Phase 14E: D3 — Immutability + Idempotency/Conflict contract', () => {
+  it('Case A — exact replay: same key + same attempt returns canonical receipt', async () => {
+    const f = await createConfirmationFixture('D3a')
 
     const c1 = await createDeliveryConfirmation(f.tenantId, {
       bundleId: f.bundleId,
       receiverNodeId: f.destinationNodeId,
-      idempotencyKey: 'd3-key',
+      idempotencyKey: 'd3a-key',
+      transportAttemptId: f.attemptId,
     })
 
     const c2 = await createDeliveryConfirmation(f.tenantId, {
       bundleId: f.bundleId,
       receiverNodeId: f.destinationNodeId,
-      idempotencyKey: 'd3-key', // SAME key
+      idempotencyKey: 'd3a-key', // SAME key
+      transportAttemptId: f.attemptId, // SAME attempt
     })
 
     // Both return the SAME confirmation (idempotent — not a new row).
@@ -231,15 +233,23 @@ describeOrSkip('Phase 14E: D3 — Immutability', () => {
 
     // Exactly one confirmation row.
     const count = await db.deliveryConfirmation.count({
-      where: { tenantId: f.tenantId, idempotencyKey: 'd3-key' },
+      where: { tenantId: f.tenantId, idempotencyKey: 'd3a-key' },
     })
     expect(count).toBe(1)
   })
 
-  it('same key with different payload (different confirmationHash) raises ConflictError', async () => {
+  it('Case B — same key + DIFFERENT attempt raises ConflictError (not silent convergence)', async () => {
     const f = await createConfirmationFixture('D3b')
 
-    // First confirmation with attempt link.
+    // Create a second attempt on the same execution (different attemptNumber).
+    const attempt2 = await createTransportAttempt(f.tenantId, {
+      executionId: f.executionId,
+      fromNodeId: f.sourceNodeId,
+      toNodeId: f.destinationNodeId,
+    })
+    expect(attempt2.id).not.toBe(f.attemptId)
+
+    // First confirmation with attempt 1.
     await createDeliveryConfirmation(f.tenantId, {
       bundleId: f.bundleId,
       receiverNodeId: f.destinationNodeId,
@@ -247,23 +257,121 @@ describeOrSkip('Phase 14E: D3 — Immutability', () => {
       transportAttemptId: f.attemptId,
     })
 
-    // Second with same key but the Bundle's payloadHash is part of the
-    // confirmationHash — different transportAttemptId changes nothing about
-    // the hash, but let's test the conflict path by using a different Bundle.
-    // Actually the conflict is on (tenantId, bundleId, receiverNodeId, idempotencyKey)
-    // and confirmationHash differs only if payloadHash differs. Since we use
-    // the same Bundle, the hash is the same → idempotent replay, not conflict.
-    // To test the conflict path, we need a scenario where the same key produces
-    // a different hash. This is architecturally impossible with the same Bundle
-    // (the hash is deterministic). So we verify the conflict guard exists by
-    // confirming the same key returns the same receipt (no conflict).
+    // Second with SAME key but DIFFERENT attempt → must NOT silently converge.
+    // The confirmationHash now includes transportAttemptId, so the fingerprints
+    // differ → ConflictError.
+    await expect(
+      createDeliveryConfirmation(f.tenantId, {
+        bundleId: f.bundleId,
+        receiverNodeId: f.destinationNodeId,
+        idempotencyKey: 'd3b-key', // SAME key
+        transportAttemptId: attempt2.id, // DIFFERENT attempt
+      }),
+    ).rejects.toBeInstanceOf(ConflictError)
+  })
+
+  it('Case C — metadata is non-identity-bearing: same key + different metadata replays', async () => {
+    const f = await createConfirmationFixture('D3c')
+
+    const c1 = await createDeliveryConfirmation(f.tenantId, {
+      bundleId: f.bundleId,
+      receiverNodeId: f.destinationNodeId,
+      idempotencyKey: 'd3c-key',
+      transportAttemptId: f.attemptId,
+      metadata: { sig: 'abc', version: 1 },
+    })
+
+    // Same key + same attempt + DIFFERENT metadata → idempotent replay.
+    // Metadata is NOT part of the fingerprint — it does NOT cause a conflict.
     const c2 = await createDeliveryConfirmation(f.tenantId, {
       bundleId: f.bundleId,
       receiverNodeId: f.destinationNodeId,
-      idempotencyKey: 'd3b-key',
+      idempotencyKey: 'd3c-key',
+      transportAttemptId: f.attemptId,
+      metadata: { sig: 'xyz', version: 999 }, // different metadata
+    })
+
+    // Same receipt returned (metadata is non-identity-bearing).
+    expect(c2.id).toBe(c1.id)
+  })
+
+  it('Case D — concurrent exact replay converges to one row', async () => {
+    const f = await createConfirmationFixture('D3d')
+
+    const input = {
+      bundleId: f.bundleId,
+      receiverNodeId: f.destinationNodeId,
+      idempotencyKey: 'd3d-concurrent',
+      transportAttemptId: f.attemptId,
+    }
+
+    const results = await Promise.allSettled([
+      createDeliveryConfirmation(f.tenantId, input),
+      createDeliveryConfirmation(f.tenantId, input),
+      createDeliveryConfirmation(f.tenantId, input),
+    ])
+
+    const fulfilled = results.filter(
+      (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof createDeliveryConfirmation>>> =>
+        r.status === 'fulfilled',
+    )
+    expect(fulfilled.length).toBe(3)
+
+    // All resolved IDs are identical.
+    const ids = new Set(fulfilled.map((r) => r.value.id))
+    expect(ids.size).toBe(1)
+
+    // Exactly one confirmation row.
+    const count = await db.deliveryConfirmation.count({
+      where: { tenantId: f.tenantId, idempotencyKey: 'd3d-concurrent' },
+    })
+    expect(count).toBe(1)
+  })
+
+  it('Case E — verifyDeliveryConfirmation uses the same fingerprint as creation', async () => {
+    const f = await createConfirmationFixture('D3e')
+
+    const confirmation = await createDeliveryConfirmation(f.tenantId, {
+      bundleId: f.bundleId,
+      receiverNodeId: f.destinationNodeId,
+      idempotencyKey: 'd3e-key',
       transportAttemptId: f.attemptId,
     })
-    expect(c2.id).toBe((await listDeliveryConfirmations(f.tenantId, { bundleId: f.bundleId }))[0].id)
+
+    // verifyDeliveryConfirmation must return true — it uses the SAME derivation.
+    const verified = await verifyDeliveryConfirmation(f.tenantId, confirmation.id)
+    expect(verified).toBe(true)
+  })
+
+  it('P2002 from transportAttemptId @unique is NOT treated as idempotent replay', async () => {
+    const f = await createConfirmationFixture('D3f')
+
+    // Create a second attempt on the same execution.
+    const attempt2 = await createTransportAttempt(f.tenantId, {
+      executionId: f.executionId,
+      fromNodeId: f.sourceNodeId,
+      toNodeId: f.destinationNodeId,
+    })
+
+    // First confirmation links to attempt1, with key-A.
+    await createDeliveryConfirmation(f.tenantId, {
+      bundleId: f.bundleId,
+      receiverNodeId: f.destinationNodeId,
+      idempotencyKey: 'd3f-key-a',
+      transportAttemptId: f.attemptId,
+    })
+
+    // Second confirmation with DIFFERENT key (key-B) but SAME attempt (attempt1)
+    // → P2002 from transportAttemptId @unique (not from idempotency key).
+    // This must NOT be treated as an idempotent replay of key-A.
+    await expect(
+      createDeliveryConfirmation(f.tenantId, {
+        bundleId: f.bundleId,
+        receiverNodeId: f.destinationNodeId,
+        idempotencyKey: 'd3f-key-b', // DIFFERENT key
+        transportAttemptId: f.attemptId, // SAME attempt (already linked to key-A)
+      }),
+    ).rejects.toBeInstanceOf(ConflictError)
   })
 })
 
@@ -403,7 +511,7 @@ describeOrSkip('Phase 14E: D6 — Concurrent confirmation convergence', () => {
 // ===========================================================================
 
 describeOrSkip('Phase 14E: D7 — Integrity proof', () => {
-  it('confirmationHash links to Bundle.payloadHash + receiverNodeId + idempotencyKey', async () => {
+  it('confirmationHash links to Bundle.payloadHash + receiverNodeId + transportAttemptId + idempotencyKey', async () => {
     const f = await createConfirmationFixture('D7')
 
     const bundle = await getBundle(f.tenantId, f.bundleId)
@@ -412,6 +520,7 @@ describeOrSkip('Phase 14E: D7 — Integrity proof', () => {
         bundleId: f.bundleId,
         payloadHash: bundle.payloadHash,
         receiverNodeId: f.destinationNodeId,
+        transportAttemptId: null, // no attempt linked in this test
         idempotencyKey: 'd7-key',
       }),
     )
@@ -424,7 +533,7 @@ describeOrSkip('Phase 14E: D7 — Integrity proof', () => {
 
     expect(confirmation.confirmationHash).toBe(expectedHash)
 
-    // verifyDeliveryConfirmation recomputes and compares.
+    // verifyDeliveryConfirmation recomputes and compares using the SAME derivation.
     const verified = await verifyDeliveryConfirmation(f.tenantId, confirmation.id)
     expect(verified).toBe(true)
   })
@@ -447,8 +556,9 @@ describeOrSkip('Phase 14E: D8 — TransportAttempt link', () => {
 
     expect(confirmation.transportAttemptId).toBe(f.attemptId)
 
-    // The link is 1:1 — a second confirmation for the same attempt is rejected
-    // (unique constraint on transportAttemptId).
+    // The link is 1:1 — a second confirmation for the same attempt (different key)
+    // is rejected with ConflictError (P2002 from transportAttemptId @unique,
+    // correctly distinguished from an idempotency-key replay).
     await expect(
       createDeliveryConfirmation(f.tenantId, {
         bundleId: f.bundleId,
@@ -456,7 +566,7 @@ describeOrSkip('Phase 14E: D8 — TransportAttempt link', () => {
         idempotencyKey: 'd8-key-2', // different key, but same attempt
         transportAttemptId: f.attemptId,
       }),
-    ).rejects.toBeDefined() // unique constraint violation
+    ).rejects.toBeInstanceOf(ConflictError)
   })
 
   it('attempt with mismatched toNode is rejected', async () => {

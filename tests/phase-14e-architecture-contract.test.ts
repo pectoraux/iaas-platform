@@ -165,4 +165,47 @@ describe('Phase 14E: Delivery Confirmation Architecture Anti-Drift', () => {
   it('Phase 14E Delivery Confirmation contract document exists', () => {
     expect(existsSync('./docs/architecture/PHASE-14E-DELIVERY-CONFIRMATION-CONTRACT.md')).toBe(true)
   })
+
+  // ADVERSARIAL: confirmationHash MUST include transportAttemptId in the fingerprint
+  it('confirmationHash derivation includes transportAttemptId (fingerprint is material)', () => {
+    const source = readFile('./src/lib/services/delivery-confirmation.service.ts')
+    // The computeConfirmationHash function must include transportAttemptId.
+    const hashFnStart = source.indexOf('function computeConfirmationHash')
+    const hashFnEnd = source.indexOf('\n}', hashFnStart)
+    const hashFn = source.slice(hashFnStart, hashFnEnd)
+    expect(hashFn).toMatch(/transportAttemptId/)
+  })
+
+  // ADVERSARIAL: P2002 handler MUST distinguish transportAttemptId @unique from idempotency key
+  it('P2002 handler distinguishes transportAttemptId @unique from idempotency key (via meta.target)', () => {
+    const source = readFile('./src/lib/services/delivery-confirmation.service.ts')
+    // The handler must inspect meta.target, not just check code === 'P2002'.
+    expect(source).toMatch(/getP2002Target/)
+    expect(source).toMatch(/meta\?.target/)
+    // Must check for 'transportAttemptId' in the target.
+    expect(source).toMatch(/target\.includes\(['"]transportAttemptId['"]\)/)
+    // Must NOT use the old isPrismaUniqueConstraintError that blindly treats all P2002 as replay.
+    expect(source).not.toMatch(/isPrismaUniqueConstraintError/)
+  })
+
+  // ADVERSARIAL: verifyDeliveryConfirmation MUST use the same hash derivation as creation
+  it('verifyDeliveryConfirmation uses computeConfirmationHash (single canonical derivation)', () => {
+    const source = readFile('./src/lib/services/delivery-confirmation.service.ts')
+    const verifyStart = source.indexOf('export async function verifyDeliveryConfirmation')
+    const verifyEnd = source.indexOf('\n}', verifyStart)
+    const verifyFn = source.slice(verifyStart, verifyEnd)
+    // Must call computeConfirmationHash, not inline a different sha256/JSON.stringify.
+    expect(verifyFn).toMatch(/computeConfirmationHash/)
+    // Must NOT have a duplicated inline sha256(JSON.stringify(...)) that differs from creation.
+    expect(verifyFn).not.toMatch(/sha256\(\s*JSON\.stringify/)
+  })
+
+  // ADVERSARIAL: metadata is NOT in the hash (non-identity-bearing)
+  it('confirmationHash does NOT include metadata (metadata is non-identity-bearing)', () => {
+    const source = readFile('./src/lib/services/delivery-confirmation.service.ts')
+    const hashFnStart = source.indexOf('function computeConfirmationHash')
+    const hashFnEnd = source.indexOf('\n}', hashFnStart)
+    const hashFn = source.slice(hashFnStart, hashFnEnd)
+    expect(hashFn).not.toMatch(/metadata/)
+  })
 })

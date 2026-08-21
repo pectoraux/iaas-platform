@@ -172,10 +172,43 @@ There is no "expired," "revoked," or "superseded" state. Once issued, the receip
 
 ## 12. Idempotency/Concurrency Semantics
 
-- **Identity:** DeliveryConfirmation's primary key is a `cuid` (immutable). The idempotent creation key is `(tenantId, bundleId, receiverNodeId, idempotencyKey)` — enforced by `@@unique([tenantId, bundleId, receiverNodeId, idempotencyKey])`.
-- **Convergence under concurrency (D6):** two concurrent `createDeliveryConfirmation` calls with the same identity key converge. The loser of the insert race receives a Prisma `P2002` (unique constraint violation); the service catches it, re-reads the existing confirmation, and returns it.
-- **Idempotency conflict detection:** if the loser's recomputed `confirmationHash` differs from the persisted one (same key, different Bundle content / receiver / proof), the service throws `ConflictError`. This is the "same key, different fact" failure mode — it cannot silently succeed.
-- **`verifyDeliveryConfirmation()`** recomputes the expected hash from the current Bundle state and compares. It is **read-only** — no mutation. It returns `true` if the receipt matches the Bundle's current `payloadHash`, `false` otherwise. (If the Bundle's payload were ever mutated — which Phase 14E never does — verification would fail and surface the inconsistency.)
+### Identity Key vs Request Fingerprint
+
+Phase 14E distinguishes two concepts:
+
+- **Identity key** (the database uniqueness tuple): `(tenantId, bundleId, receiverNodeId, idempotencyKey)`. This is enforced by `@@unique([tenantId, bundleId, receiverNodeId, idempotencyKey])`. It determines which requests are "the same confirmation" for durability purposes.
+
+- **Request fingerprint** (the `confirmationHash`): `SHA-256({bundleId, payloadHash, receiverNodeId, transportAttemptId, idempotencyKey})`. This is the material content of the request. It includes `transportAttemptId` because the attempt being confirmed is material to the receipt's meaning. It does NOT include `metadata` — metadata is non-identity-bearing.
+
+### Idempotent Replay vs Idempotency Conflict
+
+- **Idempotent replay:** same identity key + same fingerprint → return the existing receipt. The caller's request is materially identical to the prior request; the receipt already exists.
+
+- **Idempotency conflict:** same identity key + DIFFERENT fingerprint → throw `ConflictError`. The caller reused an identity key with a materially different request (e.g. different `transportAttemptId`). This cannot silently converge — the existing receipt is NOT returned, and no new receipt is created.
+
+- **Metadata is non-identity-bearing:** the same identity key + same fingerprint but different `metadata` → idempotent replay (returns the existing receipt). Metadata changes do NOT cause a conflict because metadata is NOT part of the fingerprint. This is a deliberate architectural choice: metadata is observational, not identity.
+
+### P2002 Source Distinction
+
+There are TWO unique constraints on `DeliveryConfirmation`:
+
+1. `@@unique([tenantId, bundleId, receiverNodeId, idempotencyKey])` — the idempotency identity key.
+2. `transportAttemptId @unique` — the 1:1 link to a TransportAttempt.
+
+When both constraints are violated simultaneously (exact replay: same key + same attempt), Prisma reports only ONE violation — it may report either constraint. The handler must not assume which one. The correct approach (implemented in the service):
+
+1. **Always re-read by the idempotency key FIRST.** If a confirmation with that key exists → it's either an idempotent replay (same fingerprint → return) or a conflict (different fingerprint → ConflictError).
+2. **If no confirmation with that key exists** → the P2002 must be from `transportAttemptId @unique` (a DIFFERENT confirmation already linked this attempt). This is a 1:1 link conflict → ConflictError. This is NOT an idempotent replay.
+
+The handler inspects `err.meta.target` to distinguish the constraint source when the idempotency key doesn't match.
+
+### Convergence Under Concurrency (D6)
+
+Two concurrent `createDeliveryConfirmation` calls with the same identity key + same fingerprint converge. The loser of the insert race receives a Prisma `P2002`; the service catches it, re-reads by the idempotency key, checks the fingerprint, and returns the existing receipt.
+
+### Verification
+
+`verifyDeliveryConfirmation()` recomputes the expected hash using the SAME `computeConfirmationHash()` function used at creation — there is ONE canonical derivation, not duplicated logic. It returns `true` if the receipt matches, `false` otherwise.
 
 ---
 

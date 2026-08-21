@@ -138,19 +138,22 @@ export async function createDeliveryConfirmation(
     }
   }
 
-  // Compute the confirmationHash — integrity proof linking the Bundle content
-  // to the receiver's acknowledgment.
-  const confirmationHash = sha256(
-    JSON.stringify({
-      bundleId: input.bundleId,
-      payloadHash: bundle.payloadHash,
-      receiverNodeId: input.receiverNodeId,
-      idempotencyKey: input.idempotencyKey,
-    }),
-  )
+  // Compute the confirmationHash — the request FINGERPRINT. This is distinct
+  // from the idempotency IDENTITY KEY (tenantId + bundleId + receiverNodeId +
+  // idempotencyKey). The fingerprint includes transportAttemptId so that:
+  //   - same key + same attempt → same hash → idempotent replay
+  //   - same key + different attempt → different hash → ConflictError
+  // Metadata is deliberately NON-identity-bearing — it is not in the hash.
+  const confirmationHash = computeConfirmationHash({
+    bundleId: input.bundleId,
+    payloadHash: bundle.payloadHash,
+    receiverNodeId: input.receiverNodeId,
+    transportAttemptId: input.transportAttemptId ?? null,
+    idempotencyKey: input.idempotencyKey,
+  })
 
-  // Idempotent insert: try to create, catch P2002, re-read. This handles
-  // concurrent confirmation creation convergence (D6).
+  // Idempotent insert: try to create, catch P2002, distinguish the constraint
+  // source. This handles concurrent confirmation creation convergence (D6).
   try {
     const confirmation = await db.deliveryConfirmation.create({
       data: {
@@ -179,8 +182,25 @@ export async function createDeliveryConfirmation(
 
     return confirmation
   } catch (err: unknown) {
-    // P2002: concurrent createDeliveryConfirmation won the insert race.
-    if (isPrismaUniqueConstraintError(err)) {
+    // P2002: a unique constraint was violated. There are TWO unique constraints
+    // on DeliveryConfirmation:
+    //   1. @@unique([tenantId, bundleId, receiverNodeId, idempotencyKey]) — the
+    //      idempotency identity key.
+    //   2. transportAttemptId @unique — the 1:1 link to a TransportAttempt.
+    //
+    // When BOTH constraints are violated simultaneously (exact replay: same
+    // key + same attempt), Prisma reports only ONE violation — it may report
+    // either constraint. We must not assume which one. The correct approach:
+    //   1. ALWAYS re-read by the idempotency key FIRST.
+    //   2. If a confirmation with that key exists → it's either an idempotent
+    //      replay (same fingerprint) or a conflict (different fingerprint).
+    //   3. If NO confirmation with that key exists → the P2002 must be from
+    //      transportAttemptId @unique (a different key reused the same attempt)
+    //      → that's a real 1:1 conflict → ConflictError.
+    const target = getP2002Target(err)
+    if (target) {
+      // Always check the idempotency key first — this handles the case where
+      // both constraints are violated (exact replay).
       const existing = await db.deliveryConfirmation.findFirst({
         where: {
           tenantId,
@@ -189,16 +209,30 @@ export async function createDeliveryConfirmation(
           idempotencyKey: input.idempotencyKey,
         },
       })
-      if (!existing) throw err
-      // Idempotency conflict check: same key, different confirmationHash → conflict.
-      if (existing.confirmationHash !== confirmationHash) {
+      if (existing) {
+        // A confirmation with this idempotency key already exists.
+        // Idempotency conflict check: same key, different fingerprint → conflict.
+        if (existing.confirmationHash !== confirmationHash) {
+          throw new ConflictError(
+            'DeliveryConfirmation idempotency conflict: same identity key but different request fingerprint (transportAttemptId or payloadHash differs)',
+            { idempotencyKey: input.idempotencyKey, confirmationId: existing.id },
+          )
+        }
+        // Idempotent replay — same identity key + same fingerprint → return the
+        // existing confirmation (D6). Metadata differences are non-identity-bearing.
+        return existing
+      }
+      // No confirmation with this idempotency key exists. The P2002 must be
+      // from transportAttemptId @unique — a DIFFERENT confirmation already
+      // linked this attempt. This is NOT an idempotent replay.
+      if (target.includes('transportAttemptId') && input.transportAttemptId) {
         throw new ConflictError(
-          'DeliveryConfirmation idempotency conflict: same identity key but different confirmationHash',
-          { idempotencyKey: input.idempotencyKey, confirmationId: existing.id },
+          `TransportAttempt ${input.transportAttemptId} already has a DeliveryConfirmation (1:1 link violation — different idempotency key)`,
+          { transportAttemptId: input.transportAttemptId },
         )
       }
-      // Idempotent replay — return the existing confirmation (D6).
-      return existing
+      // Unexpected: P2002 on an unknown constraint. Re-throw the original error.
+      throw err
     }
     throw err
   }
@@ -249,9 +283,11 @@ export async function listDeliveryConfirmations(
 
 /**
  * Verify a delivery confirmation's integrity. The confirmationHash should
- * match the Bundle's payloadHash + receiverNodeId + idempotencyKey.
+ * match the same fingerprint derivation used at creation:
+ *   SHA-256({bundleId, payloadHash, receiverNodeId, transportAttemptId, idempotencyKey})
  *
  * This is a read-only verification — it does NOT mutate anything.
+ * There is ONE canonical derivation, shared with createDeliveryConfirmation.
  */
 export async function verifyDeliveryConfirmation(
   tenantId: string,
@@ -260,14 +296,13 @@ export async function verifyDeliveryConfirmation(
   const confirmation = await getDeliveryConfirmation(tenantId, confirmationId)
   const bundle = await getBundle(tenantId, confirmation.bundleId)
 
-  const expectedHash = sha256(
-    JSON.stringify({
-      bundleId: confirmation.bundleId,
-      payloadHash: bundle.payloadHash,
-      receiverNodeId: confirmation.receiverNodeId,
-      idempotencyKey: confirmation.idempotencyKey,
-    }),
-  )
+  const expectedHash = computeConfirmationHash({
+    bundleId: confirmation.bundleId,
+    payloadHash: bundle.payloadHash,
+    receiverNodeId: confirmation.receiverNodeId,
+    transportAttemptId: confirmation.transportAttemptId,
+    idempotencyKey: confirmation.idempotencyKey,
+  })
 
   return confirmation.confirmationHash === expectedHash
 }
@@ -277,11 +312,45 @@ export async function verifyDeliveryConfirmation(
 // ---------------------------------------------------------------------------
 
 /**
- * Type guard for Prisma unique-constraint violation (P2002).
- * Used to handle concurrent-operation convergence.
+ * The canonical confirmationHash derivation. Used by BOTH createDeliveryConfirmation
+ * and verifyDeliveryConfirmation so there is ONE derivation, not duplicated logic.
+ *
+ * The fingerprint includes transportAttemptId (material to the request) but
+ * does NOT include metadata (non-identity-bearing).
  */
-function isPrismaUniqueConstraintError(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false
-  const e = err as { code?: string }
-  return e.code === 'P2002'
+function computeConfirmationHash(input: {
+  bundleId: string
+  payloadHash: string
+  receiverNodeId: string
+  transportAttemptId: string | null
+  idempotencyKey: string
+}): string {
+  return sha256(
+    JSON.stringify({
+      bundleId: input.bundleId,
+      payloadHash: input.payloadHash,
+      receiverNodeId: input.receiverNodeId,
+      transportAttemptId: input.transportAttemptId,
+      idempotencyKey: input.idempotencyKey,
+    }),
+  )
+}
+
+/**
+ * Extract the target field names from a Prisma P2002 (unique constraint
+ * violation) error. Returns null if the error is not a P2002.
+ *
+ * Prisma's P2002 error includes `meta.target` — the list of field names that
+ * caused the violation. This lets us distinguish:
+ *   - ['transportAttemptId'] → the 1:1 link constraint (attempt already confirmed)
+ *   - ['tenantId', 'bundleId', 'receiverNodeId', 'idempotencyKey'] → the idempotency key
+ *
+ * This distinction is critical: a transportAttemptId @unique violation is NOT
+ * an idempotent replay and must NOT be treated as one.
+ */
+function getP2002Target(err: unknown): string[] | null {
+  if (!err || typeof err !== 'object') return null
+  const e = err as { code?: string; meta?: { target?: string[] } }
+  if (e.code !== 'P2002') return null
+  return e.meta?.target ?? []
 }

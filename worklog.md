@@ -5083,3 +5083,28 @@ Stage Summary:
 - Receiver must be active Node + Bundle's destination (authorization).
 - NO retransmission timers, sliding windows, custody transfer, DTN, marketplace, SDK, transforms, extensions.
 - TARGETED/SAMPLED REGRESSION for legacy suites (Slice 6/7) due to Neon runtime limits. Strong evidence: 10/10 confirmation tests, 223/223 static tests, 14D freeze intact, sampled Slice 6/7 pass.
+
+---
+Task ID: 14E-idempotency-correction
+Agent: Implementation agent (adversarial correction)
+Task: PHASE 14E — DeliveryConfirmation idempotency/conflict correction
+
+Work Log:
+- Independent audit of 8979d9c. Found 2 defects:
+  1. confirmationHash omitted transportAttemptId → same key + different attempt silently converged instead of raising ConflictError. The D3b test explicitly acknowledged this was "architecturally impossible" to conflict.
+  2. P2002 handler treated ALL P2002 as idempotency races, without distinguishing transportAttemptId @unique from the idempotency key constraint.
+- FIX 1: Added transportAttemptId to computeConfirmationHash(). Extracted a single canonical computeConfirmationHash() function used by BOTH createDeliveryConfirmation and verifyDeliveryConfirmation (one derivation, not duplicated logic).
+- FIX 2: Replaced isPrismaUniqueConstraintError (blind P2002 check) with getP2002Target (extracts err.meta.target). The handler now: (a) always re-reads by idempotency key FIRST, (b) if found → check fingerprint → replay or conflict, (c) if not found + target includes transportAttemptId → 1:1 link conflict → ConflictError. This correctly handles the case where both constraints are violated simultaneously (exact replay).
+- FIX 3: Metadata is explicitly non-identity-bearing — NOT in the hash. Same key + same fingerprint + different metadata → idempotent replay (returns existing receipt).
+- Replaced D3b test (which acknowledged the conflict was impossible) with 6 adversarial tests: Case A (exact replay), Case B (same key + different attempt → ConflictError), Case C (metadata non-bearing), Case D (concurrent convergence), Case E (verify uses same derivation), P2002 distinction (different key + same attempt → ConflictError, not replay).
+- Updated D7 test to include transportAttemptId:null in expected hash. Updated D8 test to expect ConflictError specifically (not just any rejection).
+- Added 4 adversarial architecture tests: hash includes transportAttemptId, P2002 handler uses getP2002Target, verifyDeliveryConfirmation uses computeConfirmationHash, metadata not in hash.
+- Updated PHASE-14E-DELIVERY-CONFIRMATION-CONTRACT.md §12 to distinguish identity key vs request fingerprint, define idempotent replay vs conflict, and document the P2002 source distinction logic.
+
+Verified results (real PostgreSQL/Neon):
+- Phase 14E architecture: 19/19 PASS (15 original + 4 adversarial).
+- Phase 14E integration: 14/14 PASS individually (D1, D2, D3 Cases A-E + P2002 distinction, D4, D5, D6, D7, D8 ×2).
+- Phase 13/14A/14B/14C/14D architecture: 93/93 PASS. Total static: 112/112.
+- Phase 14D T11: PASS (14D freeze intact).
+- ESLint: clean. TypeScript: only pre-existing baselineEngine.
+- Diff scope: ONLY delivery-confirmation.service.ts, phase-14e tests, PHASE-14E contract doc, worklog. No Bundle/Route/Node/TransportExecution/TransportAttempt/TransportAdapter changes.
