@@ -98,6 +98,8 @@ model Tenant {
   routes           Route[]
   // Phase 14D: TransportExecution — tenant-scoped transport execution.
   transportExecutions TransportExecution[]
+  // Phase 14E: DeliveryConfirmation — tenant-scoped delivery receipts.
+  deliveryConfirmations DeliveryConfirmation[]
 
   @@index([slug])
 }
@@ -2047,6 +2049,8 @@ model Node {
   transportCapabilities   TransportCapability[]
   transportAttemptsFrom   TransportAttempt[]    @relation("TransportAttemptFromNode")
   transportAttemptsTo     TransportAttempt[]    @relation("TransportAttemptToNode")
+  // Phase 14E: delivery confirmations issued by this Node (as receiver).
+  deliveryConfirmations   DeliveryConfirmation[] @relation("DeliveryConfirmationReceiver")
 
   @@unique([tenantId, participantId, nodeKind, idempotencyKey]) // deterministic registration identity
   @@index([tenantId])
@@ -2187,6 +2191,9 @@ model Bundle {
   // Phase 14D: transport executions for this Bundle. TransportExecution
   // references the Bundle — it does NOT modify Bundle identity/payload (T2).
   transportExecutions     TransportExecution[]
+  // Phase 14E: delivery confirmations for this Bundle. DeliveryConfirmation
+  // references the Bundle — it does NOT modify Bundle identity/payload.
+  deliveryConfirmations    DeliveryConfirmation[]
 
   @@index([tenantId])
   @@index([sourceNodeId])
@@ -2454,6 +2461,8 @@ model TransportAttempt {
   execution               TransportExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
   fromNode                Node     @relation("TransportAttemptFromNode", fields: [fromNodeId], references: [id], onDelete: Cascade)
   toNode                  Node     @relation("TransportAttemptToNode", fields: [toNodeId], references: [id], onDelete: Cascade)
+  // Phase 14E: optional delivery confirmation for this attempt.
+  confirmation            DeliveryConfirmation?
 
   @@unique([executionId, attemptNumber]) // deterministic ordering — one attempt per number per execution
   @@index([executionId])
@@ -2489,4 +2498,56 @@ model TransportCapability {
   @@index([nodeId])
   @@index([capability])
   @@index([status])
+}
+
+// -----------------------------------------------------------------------------
+// Phase 14E: DeliveryConfirmation — durable, immutable receipt that records
+// receiver acknowledgment of a Bundle delivery / TransportAttempt.
+// -----------------------------------------------------------------------------
+// DeliveryConfirmation is the "acknowledge" data-plane operation from
+// constitution §8, made real. It is DISTINCT from:
+//   - TransportAttempt.acknowledged (a status flag — mutated).
+//   - BundleDelivery.acknowledged (a status flag — reserved in 14B, not exercised).
+//
+// DeliveryConfirmation is an IMMUTABLE RECEIPT — it IS the acknowledgment fact.
+// It records:
+//   - WHO acknowledged (receiverNodeId)
+//   - WHEN (confirmedAt — deterministic, persisted)
+//   - WHAT (bundleId + optional transportAttemptId)
+//   - PROOF (confirmationHash — integrity, links to the Bundle payloadHash)
+//
+// It does NOT replace the status flags — it ADDS a durable receipt layer on top.
+// It does NOT modify Bundle, Route, Node, TransportExecution, or TransportAttempt.
+//
+// IDENTITY: cuid (immutable). Idempotent creation via deterministic key
+// (tenantId, bundleId, receiverNodeId, idempotencyKey) → concurrent
+// createDeliveryConfirmation calls converge.
+//
+// This is the hook for future reliability layers (retransmission, sliding
+// windows, custody transfer — all future phases).
+// -----------------------------------------------------------------------------
+model DeliveryConfirmation {
+  id                      String   @id @default(cuid())
+  tenantId                String
+  bundleId                String   // FK to Bundle — WHAT was confirmed
+  transportAttemptId      String?  @unique // FK to TransportAttempt — optional 1:1 link to the attempt
+  receiverNodeId          String   // FK to Node — WHO confirmed
+  idempotencyKey          String   // caller-supplied, for deterministic identity
+  confirmationHash        String   // integrity proof (links to Bundle.payloadHash)
+  confirmedAt             DateTime @default(now()) // WHEN — deterministic, persisted
+  metadataJson            String   @default("{}")
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  tenant                  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  bundle                  Bundle   @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  transportAttempt        TransportAttempt? @relation(fields: [transportAttemptId], references: [id], onDelete: SetNull)
+  receiverNode            Node     @relation("DeliveryConfirmationReceiver", fields: [receiverNodeId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, bundleId, receiverNodeId, idempotencyKey]) // deterministic registration identity
+  @@index([tenantId])
+  @@index([bundleId])
+  @@index([transportAttemptId])
+  @@index([receiverNodeId])
+  @@index([confirmedAt])
 }

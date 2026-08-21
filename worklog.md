@@ -4987,3 +4987,99 @@ Verified test results (real PostgreSQL/Neon, no mocks):
 - Slice 6 Economic A: PASS (Neon). Slice 7 Compute C1: PASS (Neon).
 - ESLint: clean. TypeScript: transport.service.ts + transport-adapter.ts ZERO errors. baselineEngine pre-existing.
 - Diff scope: ONLY Transport corrections (schema attemptNumber + @@unique, transport.service wiring + state machine, transport-adapter unchanged, tests added, contract doc updated, worklog). No Bundle/Route/Node/kernel/redesign leakage.
+
+---
+Task ID: 14E-audit
+Agent: Principal Architect (main)
+Task: PHASE 14E — audit + scope determination
+
+Work Log:
+- Verified HEAD = 646d6c8 (14D frozen). Clean tree. 14D freeze verified: 93/93 static architecture tests pass; 14D T11 adapter test passes against Neon.
+- Read all frozen contracts (constitution, 14B, 14C, 14D, gap matrix, dependency graph). No explicit "14E" reference exists — phases are numbered post-hoc.
+- Determined Phase 14E scope from the repository's own architecture:
+  - Constitution §8 DATA PLANE operations: receive, store, route, forward, deliver, deduplicate, fragment, reassemble, expire, acknowledge, transform.
+  - Built so far: 14B (receive/store/expire/deliver), 14C (route), 14D (forward/execute).
+  - MISSING: acknowledge (as a durable receipt, not just a status flag).
+  - 14B contract §17.8: "Acknowledgement layer: the `acknowledged` delivery status is reserved but not exercised in Phase 14B. A future receiver-acknowledgement layer will populate it."
+  - 14D contract §13: "Per-hop ACK/NACK, retransmission timers, sliding windows — future phase. Phase 14D records attempt outcomes; future phases may build reliability on top."
+  - Constitution §8 Bundle contract: "Deduplication, acknowledgement, resumability" are required Bundle attributes.
+- FINDING: `acknowledged` is currently just a status flag on TransportAttempt/BundleDelivery — it's MUTATED, not a durable receipt. There is no DeliveryConfirmation primitive that records WHO acknowledged, WHEN, WHAT, and proof. This is the actual missing primitive.
+- DESIGN DECISION (frozen): Phase 14E introduces DeliveryConfirmation — a durable, immutable receipt that records receiver acknowledgment of a Bundle delivery / TransportAttempt. It is the "acknowledge" data-plane operation from constitution §8, made real.
+  - DeliveryConfirmation model: immutable (no status mutation — it IS the receipt). Fields: id (cuid), tenantId, bundleId, transportAttemptId (optional FK — links to the attempt being confirmed), receiverNodeId (WHO), confirmedAt (WHEN), confirmationHash (integrity proof), idempotencyKey (deterministic identity for concurrent convergence), metadataJson. @@unique([tenantId, bundleId, receiverNodeId, idempotencyKey]) for idempotent creation.
+  - It does NOT replace TransportAttempt.acknowledged or BundleDelivery.acknowledged (those remain status flags). It ADDS a durable receipt layer on top.
+  - It does NOT modify Bundle, Route, Node, TransportExecution, or TransportAttempt (immutability preserved).
+  - It is the hook for future reliability layers (retransmission, sliding windows, custody transfer — all future phases).
+- Dependency direction: Bundle → BundleDelivery/TransportAttempt → DeliveryConfirmation. Future: retransmission/custody-transfer layers consume DeliveryConfirmation.
+- NOT in scope: retransmission timers, sliding windows, custody transfer, DTN, congestion control, radio selection, marketplace, SDK, transforms, extensions, TransitNet, Cloudlet.
+
+---
+Task ID: 14E-doc
+Agent: Architecture Documentation Agent
+Task: Write docs/architecture/PHASE-14E-DELIVERY-CONFIRMATION-CONTRACT.md
+
+Work Log:
+- Read worklog 14E-audit section (lines 4991-5013): design decision = DeliveryConfirmation as immutable receipt primitive; "acknowledge" data-plane op made real.
+- Read ARCHITECTURE-CONSTITUTION.md §8 (DATA PLANE performs: ...acknowledge, transform) — Phase 14E supersedes the "acknowledge" placeholder.
+- Read PHASE-14B-DATA-PLANE-CONTRACT.md §17.8 ("acknowledged delivery status is reserved but not exercised in Phase 14B. A future receiver-acknowledgement layer will populate it.")
+- Read PHASE-14D-TRANSPORT-CONTRACT.md §13 ("Per-hop ACK/NACK, retransmission timers, sliding windows — future phase. Phase 14D records attempt outcomes; future phases may build reliability on top.")
+- Read prisma/schema.prisma model DeliveryConfirmation (lines 2529-2553): id/tenantId/bundleId/transportAttemptId(@unique)/receiverNodeId/idempotencyKey/confirmationHash/confirmedAt/metadataJson; @@unique([tenantId, bundleId, receiverNodeId, idempotencyKey]); onDelete: Cascade from Bundle.
+- Read src/lib/services/delivery-confirmation.service.ts (287 lines): createDeliveryConfirmation (idempotent P2002 catch + re-read; ConflictError on hash mismatch; ValidationError on wrong receiver/inactive node/attempt mismatch), getDeliveryConfirmation, listDeliveryConfirmations, verifyDeliveryConfirmation (read-only hash recompute). Imports only getBundle + getNode for validation.
+- Read src/lib/domain/audit.ts: DeliveryConfirmationCreated = 'delivery.confirmation_created' event exists.
+- Wrote /home/z/my-project/docs/architecture/PHASE-14E-DELIVERY-CONFIRMATION-CONTRACT.md (268 lines, 16 sections):
+  1. Purpose — DeliveryConfirmation as durable immutable receipt; architectural rule quoted.
+  2. Architectural Definition — service-layer primitive, IMMUTABLE RECEIPT, distinct from TransportAttempt.acknowledged and BundleDelivery.acknowledged flags.
+  3. Relationship to Node — receiverNodeId, D4 active, D5 destination, Node identity boundary preserved.
+  4. Relationship to Bundle — bundleId FK, confirmationHash derivation, multi-confirmation per Bundle schema-permitted.
+  5. Relationship to Route — no direct reference; Route immutable.
+  6. Relationship to TransportExecution — no direct reference; execution immutable.
+  7. Relationship to TransportAttempt — optional 1:1 @unique transportAttemptId; attempt.toNodeId must match receiver; flag NOT replaced.
+  8. Lifecycle/State Model — NO lifecycle, immutable, no status field, confirmedAt deterministic.
+  9. Invariants — 6 invariants (immutability, tenant isolation, receiver authorization, integrity, idempotency, no mutation of related entities).
+  10. Tenant/Security Boundary — D1, D4, D5; confirmationHash is integrity proof NOT signature; receipt is security seam.
+  11. Failure Semantics — ValidationError / ConflictError / NotFoundError; does not fail TransportAttempt; expired-Bundle confirmation permitted.
+  12. Idempotency/Concurrency — cuid PK; (tenantId,bundleId,receiverNodeId,idempotencyKey) idempotent key; P2002 catch + re-read (D6); hash-mismatch ConflictError; verify is read-only.
+  13. Future Extensions — retransmission timers, sliding windows, custody transfer, signatures, multi-recipient, economic attribution, automatic flag mutation.
+  14. Explicit Non-goals — no retransmission, no DTN, no marketplace, no SDK, no signatures, no mutation of related entities, no replacement of status flags, no auto-coupling.
+  15. Acceptance Gate — architecture / implementation / testing / quality criteria.
+  16. Anti-Drift Rules — 12 rules enforced by tests/phase-14e-architecture-contract.test.ts.
+- Verified: only the single markdown file was created. No other files modified. No code, tests, or schema changes.
+
+Stage Summary:
+- Created /home/z/my-project/docs/architecture/PHASE-14E-DELIVERY-CONFIRMATION-CONTRACT.md (268 lines, 16 sections, FROZEN).
+- Document is the authoritative Delivery Confirmation contract; supersedes the "acknowledge" placeholder in ARCHITECTURE-CONSTITUTION.md §8.
+- Aligns with 14E-audit design decision: immutable receipt primitive, distinct from TransportAttempt.acknowledged / BundleDelivery.acknowledged status flags; does NOT modify Bundle/Route/Node/TransportExecution/TransportAttempt; receipt is the seam for future reliability layers.
+- Document structure mirrors Phase 14B/14D contract conventions (Purpose → Relationships → Lifecycle → Invariants → Tenant/Security → Failure → Idempotency → Future Extensions → Non-goals → Acceptance Gate → Anti-Drift Rules).
+
+---
+Task ID: 14E-verified
+Agent: Principal Architect (verification run)
+Task: PHASE 14E — Delivery Confirmation Foundation — verification
+
+Work Log:
+- Schema: added DeliveryConfirmation model (cuid, tenant-scoped, bundle-linked, optional transportAttemptId @unique 1:1, receiverNodeId, confirmationHash, confirmedAt, idempotencyKey, @@unique([tenantId, bundleId, receiverNodeId, idempotencyKey])). Reverse relations on Tenant.deliveryConfirmations, Node.deliveryConfirmations, Bundle.deliveryConfirmations, TransportAttempt.confirmation. prisma validate PASSED, db push to Neon SUCCESS.
+- Created src/lib/services/delivery-confirmation.service.ts: createDeliveryConfirmation (idempotent, P2002 convergence, receiver validation, destination authorization, confirmationHash integrity proof), getDeliveryConfirmation, listDeliveryConfirmations (tenant-scoped), verifyDeliveryConfirmation (read-only integrity check).
+- Audit events: DeliveryConfirmationCreated.
+- Created tests/phase-14e-delivery-confirmation.test.ts: D1-D8 (10 test cases). ALL PASS against Neon.
+- Created tests/phase-14e-architecture-contract.test.ts: 15 static contract tests (12 Step-7 rules + 3 additional). ALL PASS.
+- Created docs/architecture/PHASE-14E-DELIVERY-CONFIRMATION-CONTRACT.md (268 lines, 16 sections, FROZEN).
+
+Verified test results (real PostgreSQL/Neon, no mocks):
+- Phase 14E DeliveryConfirmation (D1-D8): 10/10 PASS (individually verified — D1 tenant isolation, D2 Bundle immutability, D3 immutability/idempotency, D4 receiver validation, D5 destination authorization, D6 concurrent convergence, D7 integrity proof, D8 TransportAttempt link).
+- Phase 14E Architecture Contract: 15/15 PASS (static).
+- Total static + in-memory: 223/223 PASS (Phase 13/14A/14B/14C/14D/14E arch + 9A/9C/10/runtime).
+- Phase 14D Transport (T11 sampled): PASS (14D freeze intact).
+- Slice 6 Economic A: PASS (Neon, representative).
+- Slice 7 Compute C1: PASS (Neon, representative).
+- ESLint: clean (0 errors).
+- TypeScript: delivery-confirmation.service.ts ZERO errors; baselineEngine namespace error at vpp.service.ts:822 CONFIRMED pre-existing (unchanged from 646d6c8).
+- Diff scope: ONLY DeliveryConfirmation artifacts (schema +1 model, audit +1 event, delivery-confirmation.service.ts, contract doc, 2 test files, worklog). ZERO retransmission/DTN/marketplace/SDK/transform/extension leakage.
+
+Stage Summary:
+- DeliveryConfirmation = service-layer primitive (src/lib/services/delivery-confirmation.service.ts), NOT a kernel contract.
+- IMMUTABLE receipt — no status field, no lifecycle. Created once, never updated.
+- Does NOT modify Bundle/Route/Node/TransportExecution/TransportAttempt (references only).
+- Idempotent creation via deterministic key + P2002 convergence.
+- confirmationHash links receipt to Bundle.payloadHash + receiverNodeId + idempotencyKey (integrity proof).
+- Receiver must be active Node + Bundle's destination (authorization).
+- NO retransmission timers, sliding windows, custody transfer, DTN, marketplace, SDK, transforms, extensions.
+- TARGETED/SAMPLED REGRESSION for legacy suites (Slice 6/7) due to Neon runtime limits. Strong evidence: 10/10 confirmation tests, 223/223 static tests, 14D freeze intact, sampled Slice 6/7 pass.
