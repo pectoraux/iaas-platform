@@ -100,6 +100,8 @@ model Tenant {
   transportExecutions TransportExecution[]
   // Phase 14E: DeliveryConfirmation — tenant-scoped delivery receipts.
   deliveryConfirmations DeliveryConfirmation[]
+  // Phase 14F: TransformRecord — tenant-scoped transform provenance records.
+  transformRecords       TransformRecord[]
 
   @@index([slug])
 }
@@ -2051,6 +2053,8 @@ model Node {
   transportAttemptsTo     TransportAttempt[]    @relation("TransportAttemptToNode")
   // Phase 14E: delivery confirmations issued by this Node (as receiver).
   deliveryConfirmations   DeliveryConfirmation[] @relation("DeliveryConfirmationReceiver")
+  // Phase 14F: transform records applied by this Node.
+  transformRecords        TransformRecord[]     @relation("TransformRecordNode")
 
   @@unique([tenantId, participantId, nodeKind, idempotencyKey]) // deterministic registration identity
   @@index([tenantId])
@@ -2194,6 +2198,9 @@ model Bundle {
   // Phase 14E: delivery confirmations for this Bundle. DeliveryConfirmation
   // references the Bundle — it does NOT modify Bundle identity/payload.
   deliveryConfirmations    DeliveryConfirmation[]
+  // Phase 14F: transform records for this Bundle. TransformRecord references
+  // the Bundle — it does NOT modify Bundle identity/payload.
+  transformRecords         TransformRecord[]
 
   @@index([tenantId])
   @@index([sourceNodeId])
@@ -2550,4 +2557,69 @@ model DeliveryConfirmation {
   @@index([transportAttemptId])
   @@index([receiverNodeId])
   @@index([confirmedAt])
+}
+
+// -----------------------------------------------------------------------------
+// Phase 14F: TransformRecord — immutable provenance record that a specific
+// transform was applied to a Bundle's payload, producing an output.
+// -----------------------------------------------------------------------------
+// TransformRecord is the "transform chain" from the dependency graph
+// (Bundle → Transform chain → Delivery), made real as a durable provenance
+// record. It is DISTINCT from:
+//   - TransformRegistry (catalog of available transforms — future phase).
+//   - TransformRuntime (execution engine that calls execute/reverse/verify —
+//     future phase).
+//   - Bundle (the data-plane object — TransformRecord references it, does NOT
+//     modify Bundle identity/payload).
+//
+// TransformRecord IS the provenance fact — it records that a transform
+// happened, not how to execute it. It captures (constitution §9 Transform
+// Provenance):
+//   - input hash + output hash + transform identity + transform version
+//   + parameters + node + result
+//
+// It is IMMUTABLE (like DeliveryConfirmation). It is created once; it is
+// never updated. It records:
+//   - WHAT was transformed (bundleId + inputHash)
+//   - WHAT transform was applied (transformType + transformVersion)
+//   - WHO applied it (nodeId — optional, the Node that performed the transform)
+//   - WHAT was produced (outputHash)
+//   - WITH what parameters (parametersJson)
+//   - WHAT was the result (resultStatus + resultMetadataJson)
+//
+// IDENTITY: cuid (immutable). Idempotent creation via deterministic key
+// (tenantId, bundleId, nodeId, transformType, idempotencyKey) → concurrent
+// calls converge.
+//
+// This is the hook for future TransformRegistry (catalog) and TransformRuntime
+// (execution) layers — they will consume/produce TransformRecords but do NOT
+// exist in Phase 14F.
+// -----------------------------------------------------------------------------
+model TransformRecord {
+  id                      String   @id @default(cuid())
+  tenantId                String
+  bundleId                String   // FK to Bundle — WHAT was transformed
+  nodeId                  String?  // FK to Node — WHO applied the transform (optional)
+  transformType           String   // generic transform identity (e.g. "compression", "encryption_proxy")
+  transformVersion        String   // transform version (semantic versioning string)
+  inputHash               String   // SHA-256 of the input payload
+  outputHash              String   // SHA-256 of the output payload
+  parametersJson          String   @default("{}") // transform parameters (canonical JSON)
+  resultStatus            String   @default("success") // success | failed
+  resultMetadataJson      String   @default("{}") // result details (e.g. compression ratio, error code)
+  idempotencyKey          String   // caller-supplied, for deterministic identity
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  tenant                  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  bundle                  Bundle   @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  node                    Node?    @relation("TransformRecordNode", fields: [nodeId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, bundleId, nodeId, transformType, idempotencyKey]) // deterministic registration identity
+  @@index([tenantId])
+  @@index([bundleId])
+  @@index([nodeId])
+  @@index([transformType])
+  @@index([resultStatus])
+  @@index([createdAt])
 }

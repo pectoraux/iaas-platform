@@ -5133,3 +5133,84 @@ Stage Summary:
 - Repository is clean and structurally correct (HEAD 0acfc97, parent 8979d9c, remote in sync).
 - Process violation (local reset) recorded; no history was rewritten (0acfc97 is a new commit on top of 8979d9c, not a force-push or amend).
 - Phase 14E remains: ARCHITECTURALLY CORRECTED / FROZEN PENDING ENVIRONMENTAL CI GREENING.
+
+---
+Task ID: 14F-audit
+Agent: Principal Architect (main)
+Task: PHASE 14F — audit + missing primitive identification
+
+Work Log:
+- Verified HEAD = f0a33ac, clean tree, on main, in sync with origin/main. Chain f0a33ac → 0acfc97 → 8979d9c → 646d6c8 confirmed.
+- Audited constitution §8 data-plane operations: receive, store, route, forward, deliver, deduplicate, fragment, reassemble, expire, acknowledge, transform.
+- Mapped implemented vs unimplemented:
+  - 14B: receive, store, expire, deliver (BundleDelivery) + deduplicate (Bundle @@unique on deterministic bundleId)
+  - 14C: route (Route/RouteHop)
+  - 14D: forward (TransportExecution/TransportAttempt)
+  - 14E: acknowledge (DeliveryConfirmation)
+  - NOT implemented: fragment, reassemble, transform
+- Audited dependency graph: explicitly shows `Bundle → Transform chain → Delivery`. The "Transform chain" is MISSING from the implemented chain.
+- Audited constitution §8 Bundle contract: lists "Transform chain" as a required Bundle attribute.
+- Audited constitution §9 TRANSFORM BOUNDARY: defines Transform (execute/reverse/estimateCost/verify), Transform Provenance (input hash + output hash + transform identity + version + parameters + node/runtime + resource cost + result), TransformRegistry (catalog), TransformRuntime (execution).
+- Design gate (Step 5): challenged whether the full Transform stack (Transform + TransformRegistry + TransformRuntime) belongs in 14F. Conclusion: NO — that's 3 concepts, too large for one phase per Step 9 discipline.
+- Smallest primitive that unlocks the same future capability: TransformRecord — an immutable provenance record that a specific transform was applied to a Bundle's payload, producing an output. This is the "Transform chain" from the dependency graph, made real as a durable record (analogous to DeliveryConfirmation).
+  - NOT the TransformRegistry (catalog of available transforms — future phase).
+  - NOT the TransformRuntime (execution engine — future phase).
+  - IS the provenance record: input hash + output hash + transform identity + version + parameters + node + result.
+- Confirmed no Transform model exists in schema.
+- Design decisions (frozen):
+  - TransformRecord model: immutable provenance record. Fields: id (cuid), tenantId, bundleId (FK), nodeId (optional FK — which Node applied the transform), transformType (generic string, e.g. "compression", "encryption_proxy" — NOT a registry reference), transformVersion (string), inputHash (SHA-256 of input), outputHash (SHA-256 of output), parametersJson, resultStatus (success|failed), resultMetadataJson, idempotencyKey, @@unique([tenantId, bundleId, nodeId, transformType, idempotencyKey]) for deterministic identity.
+  - Identity key: (tenantId, bundleId, nodeId, transformType, idempotencyKey).
+  - Request fingerprint: the TransformRecord IS the fingerprint — it records the transform that was applied. No separate hash needed (the record itself is the provenance).
+  - Does NOT modify Bundle, Route, Node, TransportExecution, TransportAttempt, DeliveryConfirmation.
+  - Does NOT implement execute/reverse/estimateCost — those are TransformRuntime (future). TransformRecord records that a transform happened, not how to execute it.
+  - Does NOT implement a registry — TransformRegistry is future.
+  - Service: src/lib/services/transform-record.service.ts. createTransformRecord (idempotent), getTransformRecord, listTransformRecords (tenant-scoped).
+- NOT in scope: TransformRegistry, TransformRuntime, execute/reverse/verify, marketplace, SDK, DTN, custody transfer, signatures, congestion control, radio selection.
+
+---
+Task ID: 14F-doc
+Agent: Architecture Documentation Agent
+Task: Write docs/architecture/PHASE-14F-TRANSFORM-RECORD-CONTRACT.md
+
+Work Log:
+- Read worklog.md Task ID 14F-audit section to absorb the audit findings and frozen design decisions (TransformRecord as immutable provenance record; 3-concept Transform stack reduced to smallest primitive; identity key (tenantId, bundleId, nodeId, transformType, idempotencyKey); request fingerprint includes payloadHash and excludes resultMetadata).
+- Read ARCHITECTURE-CONSTITUTION.md §8 (DATA PLANE — transform operation) and §9 (TRANSFORM BOUNDARY — Transform Provenance seven-element formula) to ground the contract in constitutional authority.
+- Read PHASE-13-DEPENDENCY-GRAPH.md — confirmed `Bundle → Transform chain → Delivery` arrow that TransformRecord makes real, and the future TRANSFORM section (Transform → TransformRegistry → TransformRuntime, with TransformRegistry ✗→ TransitNet).
+- Read PHASE-14B-DATA-PLANE-CONTRACT.md to inherit the Bundle-as-immutable-data-plane-object pattern that TransformRecord references (read-only).
+- Read PHASE-14E-DELIVERY-CONFIRMATION-CONTRACT.md to inherit the analogous immutable-receipt pattern (lifecycle, invariants, idempotency/conflict semantics, anti-drift rules, future extensions structure) — TransformRecord follows the same shape with one crucial delta: only ONE unique constraint, so P2002 source is unambiguous.
+- Read prisma/schema.prisma `model TransformRecord` (lines 2598–2625) — confirmed fields (inputHash/outputHash/transformType/transformVersion/parametersJson/resultStatus/resultMetadataJson/idempotencyKey), the single @@unique([tenantId, bundleId, nodeId, transformType, idempotencyKey]), the named Node relation `TransformRecordNode` with onDelete: SetNull, and the Bundle FK with onDelete: Cascade.
+- Read src/lib/services/transform-record.service.ts (300 lines) — confirmed service-layer ownership, the four exported functions (createTransformRecord/getTransformRecord/listTransformRecords + internal computeTransformFingerprint), imports limited to getBundle + getNode (read-only), ValidationError/ConflictError/NotFoundError semantics, the P2002 catch + re-read convergence pattern, and the resultMetadata-is-non-identity-bearing choice.
+- Read src/lib/domain/audit.ts — confirmed `TransformRecordCreated: 'transform.record_created'` event is registered (Phase 14F audit event already wired).
+- Wrote /home/z/my-project/docs/architecture/PHASE-14F-TRANSFORM-RECORD-CONTRACT.md (313 lines) — FROZEN contract covering all 16 required sections: Purpose, Architectural Definition, Architectural Ownership, Dependency Direction, Relationship to Node, Relationship to Bundle, Relationship to Route, Relationship to TransportExecution, Relationship to TransportAdapter, Lifecycle, Invariants, Security/Tenant Boundary, Failure Semantics, Idempotency/Concurrency, Future Extensions, Explicit Non-goals. Used authoritative contract language; cited schema fields, service functions, and audit events by exact name; mirrored the Phase 14E structure for cross-phase consistency while explicitly calling out the single-unique-constraint delta vs Phase 14E's two-constraint ambiguity.
+- Verified the file was written (313 lines, FROZEN header intact, all 16 sections present).
+
+Stage Summary:
+- Created /home/z/my-project/docs/architecture/PHASE-14F-TRANSFORM-RECORD-CONTRACT.md — FROZEN Phase 14F contract document (313 lines, 16 sections).
+- The contract operationalizes constitution §8 (transform operation) and §9 (Transform Provenance seven-element formula) and supersedes those placeholders.
+- It positions TransformRecord as the smallest of the three Transform-stack concepts (Transform + TransformRegistry + TransformRuntime), explicitly deferring the registry and runtime to future phases — matching the audit's Step 9 design-gate conclusion.
+- It documents the one crucial delta from the Phase 14E pattern: TransformRecord has only ONE unique constraint (the idempotency key), so P2002 source is unambiguous — no err.meta.target inspection required.
+- It records the seven-element provenance-to-field mapping table (input hash → inputHash, output hash → outputHash, transform identity → transformType, transform version → transformVersion, parameters → parametersJson, node → nodeId, result → resultStatus + resultMetadataJson).
+- It explicitly preserves the immutability and decoupling invariants: TransformRecord does NOT modify Bundle, Route, Node, TransportExecution, TransportAttempt, or DeliveryConfirmation.
+- No code, tests, or schema changes were made — documentation-only task, as required.
+
+---
+Task ID: 14F-verified
+Agent: Principal Architect (verification run)
+Task: PHASE 14F — Transform Record Foundation — verification
+
+Work Log:
+- Schema: added TransformRecord model (cuid, tenant-scoped, bundleId FK, optional nodeId FK, transformType, transformVersion, inputHash, outputHash, parametersJson, resultStatus, resultMetadataJson, idempotencyKey, @@unique([tenantId, bundleId, nodeId, transformType, idempotencyKey])). Reverse relations on Tenant.transformRecords, Node.transformRecords, Bundle.transformRecords. prisma validate PASSED, db push to Neon SUCCESS.
+- Created src/lib/services/transform-record.service.ts: createTransformRecord (idempotent, P2002 convergence, fingerprint conflict detection, Node validation), getTransformRecord, listTransformRecords (tenant-scoped), computeTransformFingerprint (single canonical derivation, resultMetadata excluded).
+- Audit events: TransformRecordCreated.
+- Created tests/phase-14f-transform-record.test.ts: T1-T8 (9 test cases). ALL PASS against Neon.
+- Created tests/phase-14f-architecture-contract.test.ts: 18 static contract tests. ALL PASS.
+- Created docs/architecture/PHASE-14F-TRANSFORM-RECORD-CONTRACT.md (313 lines, 16 sections, FROZEN).
+- Fix during testing: T6b initially tested same key + different transformType, but transformType is part of the identity key — different transformType = different identity = new record (not a conflict). Fixed to test different transformVersion (in fingerprint, NOT in identity key) → ConflictError.
+
+Verified results (real PostgreSQL/Neon):
+- Phase 14F TransformRecord (T1-T8): 9/9 PASS.
+- Phase 14F Architecture Contract: 18/18 PASS (static).
+- Total static (Phase 13-14F): 130/130 PASS.
+- Phase 14E integration (Case A+B sampled): PASS (14E freeze intact).
+- ESLint: clean. TypeScript: only pre-existing baselineEngine.
+- Diff scope: ONLY TransformRecord artifacts (schema +1 model, audit +1 event, transform-record.service.ts, contract doc, 2 test files, worklog). ZERO TransformRegistry/TransformRuntime/execute/reverse/marketplace/SDK/DTN leakage.

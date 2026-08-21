@@ -62,6 +62,8 @@ export const AuditEvents = {
   TransportAttemptFailed: 'transport.attempt_failed',
   // Phase 14E: DeliveryConfirmation lifecycle audit events.
   DeliveryConfirmationCreated: 'delivery.confirmation_created',
+  // Phase 14F: TransformRecord lifecycle audit events.
+  TransformRecordCreated: 'transform.record_created',
 } as const
 
 export type AuditEventType = (typeof AuditEvents)[keyof typeof AuditEvents]
