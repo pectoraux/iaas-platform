@@ -5239,3 +5239,35 @@ Verified results (real PostgreSQL/Neon):
 - Total static (Phase 13-14F): 132/132 PASS.
 - ESLint: clean. TypeScript: only pre-existing baselineEngine.
 - Diff scope: ONLY Phase 14F files (schema, transform-record.service.ts, 2 test files, contract doc, worklog).
+
+---
+Task ID: 14F-migration-correction
+Agent: Implementation agent (final schema/migration audit)
+Task: PHASE 14F — production-safe migration + namespaced nodeIdentity
+
+Work Log:
+- Found NO migration file existed for any Phase 14A-F model — all were deployed via `db push` (development mode). The repository uses `prisma migrate` (prisma/migrations/ exists with migration_lock.toml).
+- Created prisma/migrations/20260822000000_phase_14_data_plane_foundation/migration.sql — production-safe migration covering ALL Phase 14A-F models using CREATE TABLE IF NOT EXISTS + ALTER TABLE ADD COLUMN IF NOT EXISTS + conditional backfill.
+- TransformRecord migration is production-safe:
+  1. CREATE TABLE IF NOT EXISTS (for fresh deployments)
+  2. ADD COLUMN nodeIdentity IF NOT EXISTS (for existing db push deployments)
+  3. BACKFILL from existing data: nodeId → 'node:' || nodeId, NULL → 'system:__unattributed__'
+  4. DETECT duplicates: raises exception if duplicate identities found (no silent deletion)
+  5. SET NOT NULL (after backfill)
+  6. CREATE corrected unique index on nodeIdentity
+- Replaced bare sentinel '__system__' with namespaced encoding:
+  - 'node:<nodeId>' for Node-backed records
+  - 'system:__unattributed__' for system-applied records
+  - The namespace prefix guarantees disjointness from any Node ID format (CUID, UUID, or future).
+- Backfilled 19 existing TransformRecord rows on Neon: 16 Node-backed (→ 'node:<id>'), 3 system-applied (→ 'system:__unattributed__'). NO data deleted.
+- Added 3 migration preservation tests (T-MIGRATION): existing Node-backed records have correct encoding, existing system-applied records have correct encoding, collision-safety proof.
+- Updated T-New-A and T-New-G to verify namespaced encoding.
+- Updated architecture test to verify namespaced encoding (not bare sentinel).
+- Updated contract doc §14 to document namespaced encoding + production-safe migration.
+
+Verified results (real PostgreSQL/Neon):
+- Phase 14F architecture: 20/20 PASS.
+- Phase 14F integration: 20/20 PASS (9 original T1-T8 + 8 adversarial T-New-A-H + 3 migration T-MIGRATION).
+- Total static (Phase 13-14F): 132/132 PASS.
+- Existing data: 19 records preserved, all with valid namespaced encoding.
+- ESLint: clean. TypeScript: only pre-existing baselineEngine.

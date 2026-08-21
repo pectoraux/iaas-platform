@@ -244,7 +244,15 @@ The service exposes `createTransformRecord`, `getTransformRecord`, `listTransfor
 
 Phase 14F distinguishes two concepts (mirroring the Phase 14E pattern):
 
-- **Identity key** (the database uniqueness tuple): `(tenantId, bundleId, nodeIdentity, transformType, idempotencyKey)`. This is enforced by `@@unique([tenantId, bundleId, nodeIdentity, transformType, idempotencyKey])`. The `nodeIdentity` column is **NON-NULL**: it is `nodeId` when a Node is specified, or `'__system__'` when no Node is attributable (system-applied transform). This corrects the Phase 14F initial implementation's use of nullable `nodeId` in the unique constraint — PostgreSQL allows multiple NULL values in a UNIQUE constraint, which broke idempotency for system-applied records. The `nodeIdentity` column makes the identity key non-null at the database level, so PostgreSQL enforces idempotency even for `nodeId = NULL`.
+- **Identity key** (the database uniqueness tuple): `(tenantId, bundleId, nodeIdentity, transformType, idempotencyKey)`. This is enforced by `@@unique([tenantId, bundleId, nodeIdentity, transformType, idempotencyKey])`. The `nodeIdentity` column is **NON-NULL** and uses **namespaced encoding** to be unambiguously disjoint from real Node IDs:
+  - `node:<nodeId>` when a Node is specified (e.g. `node:cmt1u2w8c001ijx1otizncr5v`)
+  - `system:__unattributed__` when no Node is attributable (system-applied transform)
+  
+  This corrects two issues from the initial Phase 14F implementation:
+  1. PostgreSQL allows multiple NULL values in a UNIQUE constraint — the nullable `nodeId` in the old `@@unique` broke idempotency for system-applied records. `nodeIdentity` is non-null, so PostgreSQL enforces idempotency even for `nodeId = NULL`.
+  2. The old sentinel `'__system__'` could theoretically collide with a future Node ID generator. The namespaced prefix (`node:` / `system:`) guarantees disjointness regardless of the Node ID format.
+
+  The `nodeId` column remains `String?` (nullable FK to Node) — it records which Node applied the transform. `nodeIdentity` is the identity representation used in the unique constraint. The migration is **production-safe**: existing rows are backfilled (not deleted) — Node-backed rows get `node:<nodeId>`, system-applied rows get `system:__unattributed__`.
 
 - **Request fingerprint** (`computeTransformFingerprint`): `SHA-256({bundleId, payloadHash, nodeIdentity, transformType, transformVersion, inputHash, outputHash, canonicalize(parameters), resultStatus, idempotencyKey})`. This is the material content of the record. It includes:
   - `nodeIdentity` (not `nodeId`) — the non-null identity representation.

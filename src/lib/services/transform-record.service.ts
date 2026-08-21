@@ -120,12 +120,15 @@ export async function createTransformRecord(
   }
 
   // Compute nodeIdentity — the non-null identity representation.
-  // This is nodeId when a Node is specified, or '__system__' when no Node is
-  // attributable (system-applied transform). This makes the @@unique constraint
-  // non-null, so PostgreSQL enforces idempotency even for system-applied records
-  // (nodeId = NULL). PostgreSQL UNIQUE allows multiple NULLs; nodeIdentity
-  // replaces nodeId in the unique constraint to fix this.
-  const nodeIdentity = input.nodeId ?? '__system__'
+  // Uses namespaced encoding to be unambiguously disjoint from real Node IDs:
+  //   - 'node:<nodeId>' when a Node is specified
+  //   - 'system:__unattributed__' when no Node is attributable (system-applied)
+  // This makes the @@unique constraint non-null, so PostgreSQL enforces
+  // idempotency even for system-applied records (nodeId = NULL). PostgreSQL
+  // UNIQUE allows multiple NULLs; nodeIdentity replaces nodeId in the unique
+  // constraint to fix this. The namespaced prefix prevents collision with any
+  // future Node ID generator that might produce a value matching the sentinel.
+  const nodeIdentity = input.nodeId ? `node:${input.nodeId}` : 'system:__unattributed__'
 
   // Compute the request fingerprint — the material content of the record.
   // This is used for idempotency conflict detection: same key + different

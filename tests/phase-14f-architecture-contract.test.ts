@@ -224,9 +224,11 @@ describe('Phase 14F: Transform Record Architecture Anti-Drift', () => {
   })
 
   // Additional: service computes nodeIdentity (non-null identity representation)
-  it('transform-record service computes nodeIdentity from nodeId (or __system__ sentinel)', () => {
+  it('transform-record service computes nodeIdentity from nodeId (namespaced: node:<id> or system:__unattributed__)', () => {
     const source = readFile('./src/lib/services/transform-record.service.ts')
-    expect(source).toMatch(/nodeIdentity\s*=\s*input\.nodeId\s*\?\?\s*['"]__system__['"]/)
+    // Must use namespaced encoding — not bare nodeId or bare sentinel.
+    expect(source).toMatch(/`node:\$\{input\.nodeId\}`/)
+    expect(source).toMatch(/'system:__unattributed__'/)
     // The create data must include nodeIdentity.
     expect(source).toMatch(/nodeIdentity,/)
   })

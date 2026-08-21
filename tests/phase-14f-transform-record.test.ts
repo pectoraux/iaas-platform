@@ -487,7 +487,7 @@ describeOrSkip('Phase 14F: T-New-A — System transform idempotency (nodeId=null
 
     const input = {
       bundleId: f.bundleId,
-      // nodeId omitted → system-applied (nodeId=null, nodeIdentity='__system__')
+      // nodeId omitted → system-applied (nodeId=null, nodeIdentity='system:__unattributed__')
       transformType: 'system_transform',
       transformVersion: '1.0.0',
       inputHash: sha256('input'),
@@ -510,16 +510,16 @@ describeOrSkip('Phase 14F: T-New-A — System transform idempotency (nodeId=null
     const ids = new Set(fulfilled.map((r) => r.value.id))
     expect(ids.size).toBe(1)
 
-    // Exactly one record row — the database enforces this (nodeIdentity='__system__' is non-null).
+    // Exactly one record row — the database enforces this (nodeIdentity='system:__unattributed__' is non-null).
     const count = await db.transformRecord.count({
-      where: { tenantId: f.tenantId, idempotencyKey: 'tna-concurrent', nodeIdentity: '__system__' },
+      where: { tenantId: f.tenantId, idempotencyKey: 'tna-concurrent', nodeIdentity: 'system:__unattributed__' },
     })
     expect(count).toBe(1)
 
-    // The record has nodeId=null but nodeIdentity='__system__'.
+    // The record has nodeId=null but nodeIdentity='system:__unattributed__' (namespaced encoding).
     const record = fulfilled[0].value
     expect(record.nodeId).toBeNull()
-    expect(record.nodeIdentity).toBe('__system__')
+    expect(record.nodeIdentity).toBe('system:__unattributed__')
   })
 })
 
@@ -717,7 +717,7 @@ describeOrSkip('Phase 14F: T-New-G — Node-backed idempotency + concurrency', (
     const r2 = await createTransformRecord(f.tenantId, input)
     expect(r2.id).toBe(r1.id)
     expect(r2.nodeId).toBe(f.sourceNodeId)
-    expect(r2.nodeIdentity).toBe(f.sourceNodeId)
+    expect(r2.nodeIdentity).toBe(`node:${f.sourceNodeId}`)
 
     // Concurrent.
     const input2 = { ...input, idempotencyKey: 'tng-concurrent' }
@@ -771,5 +771,86 @@ describeOrSkip('Phase 14F: T-New-H — Cross-tenant isolation', () => {
         idempotencyKey: 'tnh-key',
       }),
     ).rejects.toBeInstanceOf(NotFoundError)
+  })
+})
+
+// ===========================================================================
+// T-MIGRATION — Migration preserves existing records (production-safe)
+// ===========================================================================
+
+describeOrSkip('Phase 14F: T-MIGRATION — Migration preserves existing records', () => {
+  it('existing Node-backed records have correct namespaced nodeIdentity encoding', async () => {
+    const f = await createTransformFixture('TMIG1')
+
+    // Create a Node-backed record.
+    const record = await createTransformRecord(f.tenantId, {
+      bundleId: f.bundleId,
+      nodeId: f.sourceNodeId,
+      transformType: 'compression',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      idempotencyKey: 'tmig1-key',
+    })
+
+    // The record must have the namespaced encoding.
+    expect(record.nodeId).toBe(f.sourceNodeId)
+    expect(record.nodeIdentity).toBe(`node:${f.sourceNodeId}`)
+    // The encoding is unambiguously disjoint from the bare Node ID.
+    expect(record.nodeIdentity).not.toBe(f.sourceNodeId)
+    expect(record.nodeIdentity.startsWith('node:')).toBe(true)
+  })
+
+  it('existing system-applied records have correct namespaced nodeIdentity encoding', async () => {
+    const f = await createTransformFixture('TMIG2')
+
+    // Create a system-applied record (no nodeId).
+    const record = await createTransformRecord(f.tenantId, {
+      bundleId: f.bundleId,
+      transformType: 'system_transform',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      idempotencyKey: 'tmig2-key',
+    })
+
+    // The record must have the namespaced system sentinel.
+    expect(record.nodeId).toBeNull()
+    expect(record.nodeIdentity).toBe('system:__unattributed__')
+    // The encoding is unambiguously disjoint from any Node ID.
+    expect(record.nodeIdentity.startsWith('system:')).toBe(true)
+    expect(record.nodeIdentity).not.toBe('__system__') // old sentinel must not appear
+  })
+
+  it('nodeIdentity encoding is collision-safe: cannot match a real Node ID', async () => {
+    const f = await createTransformFixture('TMIG3')
+
+    // Even if a future Node ID generator produced 'system:__unattributed__',
+    // the nodeIdentity for a Node-backed record would be 'node:system:__unattributed__',
+    // which is distinct from 'system:__unattributed__'. The namespace prefix
+    // guarantees disjointness.
+    const nodeRecord = await createTransformRecord(f.tenantId, {
+      bundleId: f.bundleId,
+      nodeId: f.sourceNodeId,
+      transformType: 'compression',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      idempotencyKey: 'tmig3-node-key',
+    })
+
+    const systemRecord = await createTransformRecord(f.tenantId, {
+      bundleId: f.bundleId,
+      transformType: 'compression',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      idempotencyKey: 'tmig3-system-key',
+    })
+
+    // The two records have different nodeIdentity values — no collision.
+    expect(nodeRecord.nodeIdentity).not.toBe(systemRecord.nodeIdentity)
+    expect(nodeRecord.nodeIdentity.startsWith('node:')).toBe(true)
+    expect(systemRecord.nodeIdentity.startsWith('system:')).toBe(true)
   })
 })
