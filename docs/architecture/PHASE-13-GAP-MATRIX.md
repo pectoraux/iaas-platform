@@ -89,22 +89,34 @@
 
 ## FUTURE CONCEPTS
 
+> Updated by Phase 13R Reconciliation. See docs/architecture/PHASE-13-RECONCILIATION.md.
+
 | Concept | Status | Notes |
 |---------|--------|-------|
-| Node | MISSING | Protocol participant. Distinct from Asset/Device. Must be defined before ProtocolRuntime can support peer-to-peer networks. |
-| NodeAgent | MISSING | Software executing protocol participation. |
-| DataPlane | MISSING | Contract for receive/store/route/forward/deliver. |
-| Bundle | MISSING | Generic data-plane primitive. |
-| Transform | MISSING | Execute/reverse/verify with provenance. |
-| TransformRegistry | MISSING | Technical catalog + versioning + compatibility. |
-| TransformRuntime | MISSING | Execution of resolved transforms. |
-| Extension | MISSING | Pluggable behavior (routing, scheduling, etc.). |
-| ExtensionRegistry | MISSING | Publisher identity, signature, permissions. |
-| ExtensionRuntime | MISSING | Sandboxed execution (WASM/container/native — OPEN). |
-| Marketplace | MISSING | Discovery/publishing/licensing. MUST NOT execute. |
-| SDK | MISSING | Generic API domains. |
-| RemoteAPI | MISSING | Fleet management API. |
-| Sandbox | MISSING | Resource-limited extension execution. |
+| Node | EXISTS (Phase 14A) | Protocol participant. Distinct from Asset/Device. Service-layer primitive. |
+| NodeAgent | FUTURE | Software executing protocol participation. Not yet needed (YAGNI). |
+| DataPlane | EXISTS (Phase 14B) | Service-layer contract for receive/store/deliver/expire/deduplicate. |
+| Bundle | EXISTS (Phase 14B) | Generic data-plane primitive. Immutable identity, source/destination, expiry, priority, payload. |
+| BundleDelivery | EXISTS (Phase 14B) | Append-only delivery records. At-least-once + idempotent. |
+| Route | EXISTS (Phase 14C) | Planned path from source Node to destination Node. Attaches to Bundle. |
+| RouteHop | EXISTS (Phase 14C) | Ordered hops within a Route. @@unique([routeId, sequence]). |
+| NodeCapability | EXISTS (Phase 14C) | Generic data-plane capability declaration. Not a marketplace. |
+| NodeReachability | EXISTS (Phase 14C) | Reachability knowledge (reachable, lastSeen, expiresAt). Not physical proof. |
+| TransportExecution | EXISTS (Phase 14D) | Forward lifecycle (created → started → completed/failed/cancelled). |
+| TransportAttempt | EXISTS (Phase 14D) | Per-hop attempts with deterministic attemptNumber. |
+| TransportCapability | EXISTS (Phase 14D) | Transport capability declaration (STORE_AND_FORWARD, BUNDLE_TRANSFER, etc.). |
+| TransportAdapter | EXISTS (Phase 14D) | Kernel contract interface. MockTransportAdapter has no network calls. |
+| DeliveryConfirmation | EXISTS (Phase 14E) | Immutable receipt for "acknowledge" data-plane operation. |
+| Transform | PARTIALLY EXISTS (Phase 14F) | TransformRecord provenance only. Execute/reverse/verify NOT implemented. |
+| TransformRegistry | FUTURE | Technical catalog + versioning + compatibility. Not yet needed. |
+| TransformRuntime | FUTURE | Execution of resolved transforms. Not yet needed. |
+| Extension | FUTURE | Pluggable behavior (routing, scheduling, etc.). Not yet needed. |
+| ExtensionRegistry | FUTURE | Publisher identity, signature, permissions. Not yet needed. |
+| ExtensionRuntime | FUTURE | Sandboxed execution (WASM/container/native — OPEN). Not yet needed. |
+| Marketplace | FUTURE | Discovery/publishing/licensing. MUST NOT execute. Not yet needed. |
+| SDK | FUTURE | Generic API domains. Not yet needed. |
+| RemoteAPI | FUTURE | Fleet management API. Not yet needed. |
+| Sandbox | FUTURE | Resource-limited extension execution. Not yet needed. |
 
 ## VPP-SPECIFIC (LEGACY)
 

@@ -78,30 +78,41 @@ HybridRuntime
 PhysicalExecutionEvidence → ReconciliationAttempt → ProtocolOutcome → ReconciliationState
 ```
 
-## FUTURE: DATA PLANE
+## FUTURE: DATA PLANE (PARTIALLY IMPLEMENTED — Phase 14B-F)
 
 ```
 Control Plane (decides: who, what, where, why, policy)
   ↓
-Data Plane Contracts (receive, store, route, forward, deliver)
+Data Plane Contracts (receive[14B], store[14B], route[14C], forward[14D], deliver[14B])
   ↓
-Concrete Data Plane (implementation)
+Concrete Data Plane (implementation: data-plane.service, routing.service, transport.service)
 
-Bundle  →  Transform chain  →  Delivery
+Bundle(14B)  →  Transform chain(14F: TransformRecord provenance)  →  Delivery(14B: BundleDelivery + 14E: DeliveryConfirmation)
 Bundle  ✗→  TransitNet-specific semantics
 Bundle  ✗→  Any protocol-specific semantics
+
+Frozen dependency direction:
+  Node(14A) → Bundle(14B) → Route(14C) → TransportExecution(14D) → TransportAdapter(14D) → DeliveryConfirmation(14E) → TransformRecord(14F)
+
+  Node ✗→ Bundle/Route/Transport/DeliveryConfirmation/TransformRecord
+  Bundle ✗→ Route/Transport/DeliveryConfirmation/TransformRecord
+  Route ✗→ Transport/DeliveryConfirmation/TransformRecord
+  Transport ✗→ DeliveryConfirmation/TransformRecord
+  DeliveryConfirmation ✗→ TransformRecord
+  All Phase 14 services ✗→ economic pipeline, vertical services, ProtocolRuntime, HybridRuntime
+  Kernel ✗→ Phase 14 services (except TransportAdapter contract interface)
 ```
 
-## FUTURE: TRANSFORM
+## FUTURE: TRANSFORM (PARTIALLY IMPLEMENTED — Phase 14F: TransformRecord provenance)
 
 ```
-Transform
-  → TransformRegistry (catalog + versioning + compatibility)
-  → TransformRuntime (execution)
+TransformRecord(14F) — immutable provenance record (input hash + output hash + transform identity + version + parameters + node + result)
 
 TransformRegistry  ✗→  TransformRuntime
 TransformRegistry  ✗→  Marketplace
 TransformRegistry  ✗→  TransitNet
+TransformRegistry  →  FUTURE
+TransformRuntime    →  FUTURE
 ```
 
 ## FUTURE: EXTENSION
@@ -156,27 +167,28 @@ Tenant
   → Asset → Device → DeviceCredential
   → Operator → Asset
 
-Asset  ≠  Device  ≠  Node (future)  ≠  ParticipantIdentity  ≠  ResourceIdentity
+Asset  ≠  Device  ≠  Node (IMPLEMENTED — Phase 14A)  ≠  ParticipantIdentity  ≠  ResourceIdentity
 
 Control Plane  →  ResourceIdentity (via CapacityProvider)
 Control Plane  ✗→  Asset (directly)
 ```
 
-## NODE BOUNDARY (FUTURE — CONTRACT ONLY)
+## NODE BOUNDARY (IMPLEMENTED — Phase 14A; NodeAgent FUTURE)
 
 ```
 Asset (physical thing)
   ↓
 Device (technical interface)
   ↓
-NodeAgent (software)
+NodeAgent (software) — FUTURE
   ↓
-Node (protocol participant)
+Node (protocol participant) — IMPLEMENTED (Phase 14A)
   ↓
-NetworkMembership (participation)
+NodeNetworkMembership (participation) — IMPLEMENTED (Phase 14A)
 
 Node  ≠  Asset
 Node  ≠  Device
 Node  MAY be backed by Asset+Device
 Node  MAY exist without an Asset (pure protocol node)
+NodeAgent  →  FUTURE (no evidence requires it)
 ```

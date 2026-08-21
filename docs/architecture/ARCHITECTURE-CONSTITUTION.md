@@ -3,6 +3,11 @@
 > The authoritative architectural contract for the IAAS platform.
 > All implementation MUST conform to this document.
 > Changes require explicit architectural review.
+>
+> Phase 13R Reconciliation: Phase 14A-F implementations are formally admitted
+> by explicit architectural review (see docs/architecture/PHASE-13-RECONCILIATION.md).
+> Per-phase contracts operationalize constitutional sections but do NOT supersede
+> the Constitution without formal amendment.
 
 ---
 
@@ -42,7 +47,7 @@ Asset ≠ Device ≠ Node ≠ ParticipantIdentity ≠ ResourceIdentity
 - **Device**: The technical interface to an asset (controller, smart meter, gateway).
 - **ParticipantIdentity**: The economic/network participant identity.
 - **ResourceIdentity**: The universal resource abstraction (generalizes Asset).
-- **Node** (FUTURE — not yet implemented): A protocol participant. Distinct from Asset/Device.
+- **Node** (IMPLEMENTED — Phase 14A): A protocol participant. Distinct from Asset/Device. A Node is a service-layer primitive (`src/lib/services/node.service.ts`), tenant-scoped, optionally backed by Device/ParticipantIdentity/ResourceIdentity. NodeNetworkMembership provides network-scoped participation (analogous to ParticipantMembership). NodeAgent remains future (no evidence requires it).
 
 An Asset MAY have multiple Devices. A ResourceIdentity MAY map to an Asset (via metadata). A Node (future) MAY be backed by an Asset+Device but is a separate concept.
 
@@ -299,7 +304,7 @@ Four-primitive model:
 
 ---
 
-## 8. DATA PLANE BOUNDARY (contract — NOT YET IMPLEMENTED)
+## 8. DATA PLANE BOUNDARY (PARTIALLY IMPLEMENTED — Phase 14B-F)
 
 ### Control Plane vs Data Plane
 
@@ -308,13 +313,15 @@ CONTROL PLANE decides:
   who, what, where, why, policy, resource, capability, allocation, route constraints
 
 DATA PLANE performs:
-  receive, store, route, forward, deliver, deduplicate, fragment,
-  reassemble, expire, acknowledge, transform
+  receive (14B), store (14B), route (14C), forward (14D), deliver (14B),
+  deduplicate (14B), fragment (FUTURE), reassemble (FUTURE),
+  expire (14B), acknowledge (14E), transform (14F: provenance only;
+    TransformRegistry/Runtime FUTURE)
 ```
 
 The kernel exposes contracts/enforcement boundaries. It does NOT become a complete networking stack.
 
-### Bundle (contract — NOT YET IMPLEMENTED)
+### Bundle (IMPLEMENTED — Phase 14B)
 
 A Bundle is a generic data-plane primitive:
 - Immutable identity
@@ -332,7 +339,7 @@ Bundle must be reusable by: TransitNet, Local-first Internet, DTN, future protoc
 
 ---
 
-## 9. TRANSFORM BOUNDARY (contract — NOT YET IMPLEMENTED)
+## 9. TRANSFORM BOUNDARY (PARTIALLY IMPLEMENTED — Phase 14F: TransformRecord provenance. TransformRegistry and TransformRuntime remain future.)
 
 ### Transform
 
@@ -451,7 +458,7 @@ Fix: Not in scope for Phase 13 (architecture contracts). Should be fixed in a fu
 
 ## 16. ARCHITECTURAL ANTI-DRIFT RULES
 
-These rules are enforced by static tests in `tests/architecture-contract.test.ts` and `tests/phase-12b-slice-7-vpp.test.ts`:
+These rules are enforced by static tests in `tests/architecture-contract.test.ts`, `tests/phase-12b-slice-7-vpp.test.ts`, and `tests/phase-13r-reconciliation-contract.test.ts`:
 
 1. Generic economic pipeline imports NO vertical service.
 2. VPP/Compute import the generic pipeline (not vice versa).
@@ -462,3 +469,7 @@ These rules are enforced by static tests in `tests/architecture-contract.test.ts
 7. TransformRegistry (future) MUST NOT depend on TransitNet.
 8. Protocol contract MUST NOT import TransitNet implementation.
 9. Future protocol code MUST NOT be required by kernel code.
+10. Phase 14 data-plane services (data-plane, routing, transport, delivery-confirmation, transform-record) MUST NOT import vertical services (VPP, Compute, Storage, Wireless).
+11. Phase 14 data-plane services MUST NOT import the generic economic pipeline.
+12. Phase 14 data-plane services MUST NOT import ProtocolRuntime or HybridRuntime.
+13. The kernel MUST NOT import Phase 14 data-plane services (except TransportAdapter which is a kernel contract interface).
