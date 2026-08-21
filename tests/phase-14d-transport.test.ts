@@ -39,9 +39,13 @@ import {
   markAttemptSent,
   acknowledgeAttempt,
   failAttempt,
+  executeAttemptViaAdapter,
+  getTransportAdapter,
+  registerTransportAdapter,
   declareTransportCapability,
   listTransportCapabilities,
 } from '../src/lib/services/transport.service'
+import { MockTransportAdapter } from '../src/lib/kernel/adapters/transport-adapter'
 import { initializeBootstrap } from '../src/lib/bootstrap'
 import { NotFoundError, ValidationError } from '../src/lib/domain/errors'
 
@@ -501,3 +505,202 @@ describeOrSkip('Phase 14D: T8 — Capability isolation', () => {
     ).rejects.toBeInstanceOf(ValidationError)
   })
 })
+
+// ===========================================================================
+// T9 — Attempt state machine (Step 6 adversarial — tightened transitions)
+// ===========================================================================
+
+describeOrSkip('Phase 14D: T9 — Attempt state machine (adversarial)', () => {
+  it('created → acknowledged is REJECTED (must go through sent)', async () => {
+    const f = await createTransportFixture('T9a')
+
+    const execution = await createTransportExecution(f.tenantId, {
+      routeId: f.routeId,
+      bundleId: f.bundleId,
+      idempotencyKey: 't9a-key',
+    })
+    await startTransportExecution(f.tenantId, execution.id)
+
+    const attempt = await createTransportAttempt(f.tenantId, {
+      executionId: execution.id,
+      fromNodeId: f.sourceNodeId,
+      toNodeId: f.intermediateNodeId,
+    })
+
+    // created → acknowledged is REJECTED.
+    await expect(acknowledgeAttempt(f.tenantId, attempt.id)).rejects.toBeInstanceOf(ValidationError)
+
+    // created → failed is REJECTED.
+    await expect(failAttempt(f.tenantId, attempt.id, 'cannot_fail_unsent')).rejects.toBeInstanceOf(ValidationError)
+  })
+
+  it('created → sent → acknowledged is valid; acknowledged → sent/failed is rejected', async () => {
+    const f = await createTransportFixture('T9b')
+
+    const execution = await createTransportExecution(f.tenantId, {
+      routeId: f.routeId,
+      bundleId: f.bundleId,
+      idempotencyKey: 't9b-key',
+    })
+    await startTransportExecution(f.tenantId, execution.id)
+
+    const attempt = await createTransportAttempt(f.tenantId, {
+      executionId: execution.id,
+      fromNodeId: f.sourceNodeId,
+      toNodeId: f.intermediateNodeId,
+    })
+
+    // created → sent (valid).
+    await markAttemptSent(f.tenantId, attempt.id)
+
+    // sent → acknowledged (valid).
+    const acked = await acknowledgeAttempt(f.tenantId, attempt.id)
+    expect(acked.status).toBe('acknowledged')
+
+    // acknowledged → sent (rejected — terminal).
+    await expect(markAttemptSent(f.tenantId, attempt.id)).rejects.toBeInstanceOf(ValidationError)
+    // acknowledged → failed (rejected — terminal).
+    await expect(failAttempt(f.tenantId, attempt.id, 'too_late')).rejects.toBeInstanceOf(ValidationError)
+  })
+
+  it('failed → sent/acknowledged is rejected (terminal)', async () => {
+    const f = await createTransportFixture('T9c')
+
+    const execution = await createTransportExecution(f.tenantId, {
+      routeId: f.routeId,
+      bundleId: f.bundleId,
+      idempotencyKey: 't9c-key',
+    })
+    await startTransportExecution(f.tenantId, execution.id)
+
+    const attempt = await createTransportAttempt(f.tenantId, {
+      executionId: execution.id,
+      fromNodeId: f.sourceNodeId,
+      toNodeId: f.intermediateNodeId,
+    })
+    await markAttemptSent(f.tenantId, attempt.id)
+    const failed = await failAttempt(f.tenantId, attempt.id, 'timeout')
+    expect(failed.status).toBe('failed')
+
+    // failed → sent (rejected — terminal).
+    await expect(markAttemptSent(f.tenantId, attempt.id)).rejects.toBeInstanceOf(ValidationError)
+    // failed → acknowledged (rejected — terminal).
+    await expect(acknowledgeAttempt(f.tenantId, attempt.id)).rejects.toBeInstanceOf(ValidationError)
+  })
+})
+
+// ===========================================================================
+// T10 — Concurrent attempt ordering (Step 4 adversarial — deterministic)
+// ===========================================================================
+
+describeOrSkip('Phase 14D: T10 — Concurrent attempt ordering (adversarial)', () => {
+  it('concurrent createTransportAttempt calls produce deterministic unique attemptNumbers', async () => {
+    const f = await createTransportFixture('T10')
+
+    const execution = await createTransportExecution(f.tenantId, {
+      routeId: f.routeId,
+      bundleId: f.bundleId,
+      idempotencyKey: 't10-key',
+    })
+    await startTransportExecution(f.tenantId, execution.id)
+
+    // 3 concurrent attempt creations — they must NOT collide on attemptNumber.
+    const results = await Promise.allSettled([
+      createTransportAttempt(f.tenantId, {
+        executionId: execution.id,
+        fromNodeId: f.sourceNodeId,
+        toNodeId: f.intermediateNodeId,
+      }),
+      createTransportAttempt(f.tenantId, {
+        executionId: execution.id,
+        fromNodeId: f.sourceNodeId,
+        toNodeId: f.intermediateNodeId,
+      }),
+      createTransportAttempt(f.tenantId, {
+        executionId: execution.id,
+        fromNodeId: f.sourceNodeId,
+        toNodeId: f.intermediateNodeId,
+      }),
+    ])
+
+    const fulfilled = results.filter(
+      (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof createTransportAttempt>>> =>
+        r.status === 'fulfilled',
+    )
+    expect(fulfilled.length).toBe(3)
+
+    // All attemptNumbers are unique (1, 2, 3 in some order).
+    const numbers = fulfilled.map((r) => r.value.attemptNumber).sort((a, b) => a - b)
+    expect(numbers).toEqual([1, 2, 3])
+
+    // Re-read ordered by attemptNumber — deterministic.
+    const refetched = await getTransportExecution(f.tenantId, execution.id)
+    expect(refetched.attempts.length).toBe(3)
+    expect(refetched.attempts[0].attemptNumber).toBe(1)
+    expect(refetched.attempts[1].attemptNumber).toBe(2)
+    expect(refetched.attempts[2].attemptNumber).toBe(3)
+  })
+})
+
+// ===========================================================================
+// T11 — Adapter execution (Step 3 adversarial — dependency direction is real)
+// ===========================================================================
+
+describeOrSkip('Phase 14D: T11 — Adapter execution (dependency direction is real)', () => {
+  it('executeAttemptViaAdapter invokes the adapter and transitions created → sent → acknowledged', async () => {
+    const f = await createTransportFixture('T11a')
+
+    const execution = await createTransportExecution(f.tenantId, {
+      routeId: f.routeId,
+      bundleId: f.bundleId,
+      idempotencyKey: 't11a-key',
+    })
+    await startTransportExecution(f.tenantId, execution.id)
+
+    const attempt = await createTransportAttempt(f.tenantId, {
+      executionId: execution.id,
+      fromNodeId: f.sourceNodeId,
+      toNodeId: f.intermediateNodeId,
+    })
+
+    // Execute via the (default MockTransportAdapter — succeeds).
+    const result = await executeAttemptViaAdapter(f.tenantId, attempt.id)
+    expect(result.status).toBe('acknowledged')
+    expect(result.completedAt).toBeDefined()
+  })
+
+  it('a failing MockTransportAdapter transitions created → sent → failed', async () => {
+    const f = await createTransportFixture('T11b')
+
+    // Register a failing adapter.
+    const originalAdapter = getTransportAdapter()
+    registerTransportAdapter(new MockTransportAdapter({ failMode: true }))
+
+    try {
+      const execution = await createTransportExecution(f.tenantId, {
+        routeId: f.routeId,
+        bundleId: f.bundleId,
+        idempotencyKey: 't11b-key',
+      })
+      await startTransportExecution(f.tenantId, execution.id)
+
+      const attempt = await createTransportAttempt(f.tenantId, {
+        executionId: execution.id,
+        fromNodeId: f.sourceNodeId,
+        toNodeId: f.intermediateNodeId,
+      })
+
+      const result = await executeAttemptViaAdapter(f.tenantId, attempt.id)
+      expect(result.status).toBe('failed')
+      expect(result.errorCode).toBe('MOCK_FAILURE')
+
+      // The execution is NOT failed by the failed attempt (T5 recovery).
+      const exec = await getTransportExecution(f.tenantId, execution.id)
+      expect(exec.status).toBe('started')
+    } finally {
+      // Restore the original adapter.
+      registerTransportAdapter(originalAdapter)
+    }
+  })
+})
+

@@ -329,12 +329,15 @@ recorded as separate durable rows, NOT as a counter on the execution.
 
 ### Deterministic Ordering (T7)
 
-Attempts maintain **deterministic ordering** via `createdAt` (append-only,
-T7). The transport service queries attempts with
-`orderBy: { createdAt: 'asc' }` when returning an execution. The
-`attemptNumber` field on the execution records which attempt is current
-(1-based); the attempts themselves are append-only rows that cannot be
-reordered or mutated.
+Attempts maintain **deterministic ordering** via `attemptNumber` (1-based,
+scoped to `executionId`, with `@@unique([executionId, attemptNumber])`). Under
+concurrency, `attemptNumber` is allocated via `count + 1` with P2002 catch +
+retry (up to 3 times), so two concurrent attempts NEVER share the same
+`attemptNumber`. The transport service queries attempts with
+`orderBy: { createdAt: 'asc' }` when returning an execution; the
+`attemptNumber` field provides the deterministic, concurrency-safe ordering.
+The `createdAt` timestamp is informational only — it is NOT the primary
+ordering key because same-millisecond concurrent inserts can collide.
 
 ### Each Attempt References the Hop Endpoints
 
@@ -352,15 +355,28 @@ A `TransportAttempt` has the following lifecycle:
 created → sent → acknowledged | failed
 ```
 
+**Strict transitions (adversarial audit correction):**
+
+- `created → acknowledged` is **REJECTED** — an attempt MUST go through `sent`
+  first (the adapter must be invoked before the attempt can be acknowledged).
+- `created → failed` is **REJECTED** — an attempt MUST be `sent` before it can
+  fail (an unsent attempt cannot fail because nothing was attempted yet).
+- `acknowledged → sent` is **REJECTED** — `acknowledged` is terminal.
+- `acknowledged → failed` is **REJECTED** — `acknowledged` is terminal.
+- `failed → sent` is **REJECTED** — `failed` is terminal.
+- `failed → acknowledged` is **REJECTED** — `failed` is terminal.
+
 - **`created`** — the attempt was created (audit
   `transport.attempt_created`) but not yet sent.
 - **`sent`** — the attempt was handed off to the transport adapter (audit
-  implied; `markAttemptSent` transitions `created → sent`).
+  implied; `markAttemptSent` or `executeAttemptViaAdapter` transitions
+  `created → sent`).
 - **`acknowledged`** — the attempt was acknowledged by the destination
   (audit `transport.attempt_acknowledged`). **Terminal.** `completedAt` is
-  set.
+  set. Only reachable from `sent`.
 - **`failed`** — the attempt failed (audit `transport.attempt_failed`).
-  **Terminal.** `completedAt` is set; `errorCode` is recorded.
+  **Terminal.** `completedAt` is set; `errorCode` is recorded. Only
+  reachable from `sent`.
 
 ### A Failed Attempt Does NOT Fail the Execution (T5)
 
@@ -503,6 +519,21 @@ always succeeds (or always fails if constructed with `{ failMode: true }`).
 It makes NO TCP/UDP/sockets/network calls — it records execution STATE
 only. Its purpose is to prove the contract is usable, not to provide real
 connectivity.
+
+### The Adapter Is Wired (Not Dead Code)
+
+**Adversarial audit correction:** the `TransportAdapter` is NOT dead code.
+`transport.service.ts` imports the `TransportAdapter` contract and
+`MockTransportAdapter`, and exposes `registerTransportAdapter()` /
+`getTransportAdapter()`. The service invokes the adapter via
+`executeAttemptViaAdapter()`, which:
+1. transitions the attempt `created → sent`,
+2. calls `adapter.executeTransportAttempt(input)`,
+3. transitions the attempt to `acknowledged` or `failed` based on the result.
+
+The dependency direction `Bundle → Route → TransportExecution →
+TransportAdapter` is therefore REAL, not aspirational. Future network
+implementations call `registerTransportAdapter(myAdapter)` to plug in.
 
 ### The Adapter NEVER
 

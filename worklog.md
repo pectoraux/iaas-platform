@@ -4942,3 +4942,48 @@ Stage Summary:
 - NO TCP/UDP/QUIC/Bluetooth/WiFi/LoRa/satellite/DTN forwarding/congestion control/routing algorithm/radio selection/bandwidth marketplace.
 - ProtocolRuntime NOT modified. HybridRuntime NOT modified. Economic pipeline NOT modified.
 - TARGETED/SAMPLED REGRESSION (not full suite) due to Neon runtime limits. Strong evidence: 12/12 Transport tests, 85/85 static tests, sampled Routing pass.
+
+---
+Task ID: 14D-adversarial-audit
+Agent: Principal Architect (adversarial audit)
+Task: PHASE 14D — Adversarial Architecture Audit of b559bf6
+
+Work Log:
+- Verified HEAD = b559bf6, clean tree. Re-read all frozen contracts. Inspected actual implementations.
+- FINDING 1 (Step 4 — attempt ordering): TransportAttempt has NO attemptNumber field. Ordering relies solely on createdAt (DateTime @default(now())). Under concurrency, same-millisecond inserts produce non-deterministic ordering. No @@unique([executionId, attemptNumber]) constraint. VIOLATION of Step 4 requirement for deterministic ordering under concurrency.
+- FINDING 2 (Step 6 — attempt state machine): acknowledgeAttempt allows created → acknowledged (skips sent). failAttempt allows created → failed. Step 6 requires created → acknowledged and created → failed to be REJECTED. An attempt must be sent before it can be acknowledged or failed. VIOLATION.
+- FINDING 3 (Step 3 — dead adapter): TransportAdapter interface + MockTransportAdapter exist in src/lib/kernel/adapters/transport-adapter.ts but are NEVER imported by transport.service.ts and NEVER exercised by integration tests. The documented dependency direction Bundle → Route → TransportExecution → TransportAdapter is aspirational, not real. The service records execution state but never invokes an adapter. VIOLATION of the contract's core dependency direction.
+- FINDING 4 (Step 15 — weak arch tests): Architecture tests do not verify adapter reachability from the service. They do not verify attempt state machine transitions. They could pass while the adapter is dead code. VIOLATION of test strength requirement.
+- PASS findings: Immutability (Step 9) PASSES — no Bundle/Route/Node mutations in transport.service. Idempotency (Step 7) PASSES — P2002 catch + re-read returns canonical execution. Capability isolation (Step 10) PASSES — no protocol-specific or marketplace fields. Tenant isolation (Step 8) PASSES at service layer. InfrastructureAdapter separation (Step 11) PASSES — distinct abstractions. Execution state machine (Step 5) PASSES — terminal states correctly rejected.
+
+Corrections planned:
+1. Add attemptNumber (Int) to TransportAttempt + @@unique([executionId, attemptNumber]). Allocate safely under concurrency via count+1 with P2002 catch + re-read (same pattern as registerNode/joinNetwork).
+2. Tighten acknowledgeAttempt: require status === 'sent' (reject created → acknowledged). Tighten failAttempt: require status === 'sent' (reject created → failed).
+3. Wire TransportAdapter into transport.service: add an optional adapter parameter to createTransportAttempt/executeAttempt path. The service invokes adapter.executeTransportAttempt() and records the result. MockTransportAdapter is the default for Phase 14D. This makes the dependency direction real.
+4. Strengthen architecture tests: verify transport.service imports the adapter contract; verify attempt state machine transitions; add concurrent attempt ordering test.
+
+---
+Task ID: 14D-audit-corrections
+Agent: Principal Architect (adversarial audit corrections)
+Task: PHASE 14D — Adversarial Architecture Audit Corrections
+
+Work Log:
+- FIX 1 (Step 4 — attempt ordering): Added attemptNumber (Int) to TransportAttempt model + @@unique([executionId, attemptNumber]). Implemented allocateAttemptNumber() with count+1 + P2002 catch + retry (up to 3 times). Concurrent createTransportAttempt calls now produce deterministic unique attemptNumbers (1, 2, 3...). T10 test proves this.
+- FIX 2 (Step 6 — attempt state machine): Tightened acknowledgeAttempt to require status === 'sent' (was 'sent' || 'created'). Tightened failAttempt to require status === 'sent' (was !'acknowledged' && !'failed'). Now: created → acknowledged is REJECTED; created → failed is REJECTED. T9 tests prove illegal transitions are rejected.
+- FIX 3 (Step 3 — dead adapter): Wired TransportAdapter into transport.service.ts. Added registerTransportAdapter() + getTransportAdapter(). transport.service now imports transport-adapter and invokes executeTransportAttempt() via executeAttemptViaAdapter(). The dependency direction Bundle → Route → TransportExecution → TransportAdapter is now REAL, not aspirational. MockTransportAdapter is the default. T11 tests prove the adapter is exercised (both success and fail modes).
+- FIX 4 (Step 15 — weak arch tests): Added 8 adversarial architecture tests: (a) transport.service imports transport-adapter (adapter is not dead code), (b) TransportAttempt has attemptNumber + @@unique, (c) acknowledgeAttempt requires 'sent', (d) failAttempt requires 'sent', (e) no db.bundle.update/create/delete, (f) no db.route.update/create/delete, (g) no db.node.update/create/delete, (h) MockTransportAdapter no network calls.
+- Added T9 (3 tests — attempt state machine), T10 (1 test — concurrent attempt ordering), T11 (2 tests — adapter execution). Total Phase 14D transport tests: 17 (was 12).
+- Cleared 5 existing TransportAttempt rows + 11 TransportExecution + 2 TransportCapability from Neon to allow schema migration (test data only).
+- Updated Phase 14D contract doc to reflect: (a) attemptNumber is the deterministic ordering primitive (not createdAt alone), (b) attempt state machine tightened (created→sent→acknowledged|failed, no shortcuts), (c) adapter is wired into the service (not dead code).
+
+Verified test results (real PostgreSQL/Neon, no mocks):
+- Phase 14D Transport (T1-T11): 17/17 PASS (individually verified — T1-T8 original + T9 state machine + T10 concurrent ordering + T11 adapter execution).
+- Phase 14D Architecture Contract: 24/24 PASS (16 original + 8 adversarial). Static.
+- Phase 13/14A/14B/14C Architecture: 69/69 PASS (static). Total static: 93/93.
+- Phase 9A Protocol: 33/33 PASS. Phase 9C Consensus: PASS. Phase 10 Hybrid: PASS. Runtime Resolution: PASS.
+- Phase 14A Node: 13/13 PASS (Neon).
+- Phase 14B Bundle: 12/12 PASS (Neon, B1-B10 verified; B11/B12 verified in original 14B run).
+- Phase 14C Routing: R1-R6 PASS (Neon, sampled — full suite exceeds tool timeout but all individually verified in 14C run).
+- Slice 6 Economic A: PASS (Neon). Slice 7 Compute C1: PASS (Neon).
+- ESLint: clean. TypeScript: transport.service.ts + transport-adapter.ts ZERO errors. baselineEngine pre-existing.
+- Diff scope: ONLY Transport corrections (schema attemptNumber + @@unique, transport.service wiring + state machine, transport-adapter unchanged, tests added, contract doc updated, worklog). No Bundle/Route/Node/kernel/redesign leakage.

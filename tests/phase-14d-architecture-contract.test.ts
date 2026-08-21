@@ -222,4 +222,74 @@ describe('Phase 14D: Transport Execution Architecture Anti-Drift', () => {
   it('Phase 14D Transport contract document exists', () => {
     expect(existsSync('./docs/architecture/PHASE-14D-TRANSPORT-CONTRACT.md')).toBe(true)
   })
+
+  // ADVERSARIAL: transport.service MUST import the TransportAdapter contract
+  // (the dependency direction Bundle → Route → TransportExecution → TransportAdapter
+  // must be REAL, not aspirational). The adapter is not dead code.
+  it('transport.service imports the TransportAdapter contract (dependency direction is real)', () => {
+    const source = readFile('./src/lib/services/transport.service.ts')
+    const imports = getImportLines(source)
+    expect(imports).toMatch(/transport-adapter/)
+    // The service must invoke the adapter (executeAttemptViaAdapter).
+    expect(source).toMatch(/executeTransportAttempt/)
+    expect(source).toMatch(/registerTransportAdapter/)
+  })
+
+  // ADVERSARIAL: TransportAttempt must have attemptNumber + @@unique([executionId, attemptNumber])
+  it('TransportAttempt has deterministic ordering via attemptNumber + @@unique([executionId, attemptNumber])', () => {
+    const schema = readFile('./prisma/schema.prisma')
+    const attemptStart = schema.indexOf('model TransportAttempt {')
+    const attemptEnd = schema.indexOf('\n}', attemptStart)
+    const attemptSection = schema.slice(attemptStart, attemptEnd)
+    expect(attemptSection).toMatch(/attemptNumber\s+Int/)
+    expect(attemptSection).toMatch(/@@unique\(\[executionId,\s*attemptNumber\]\)/)
+  })
+
+  // ADVERSARIAL: attempt state machine — acknowledgeAttempt must require 'sent' (not 'created')
+  it('acknowledgeAttempt requires status sent (created → acknowledged is rejected)', () => {
+    const source = readFile('./src/lib/services/transport.service.ts')
+    // The acknowledgeAttempt function must check for 'sent' specifically.
+    const ackStart = source.indexOf('export async function acknowledgeAttempt')
+    const ackEnd = source.indexOf('\n}', ackStart)
+    const ackSection = source.slice(ackStart, ackEnd)
+    expect(ackSection).toMatch(/status !== 'sent'/)
+    // Must NOT allow 'created' → acknowledged.
+    expect(ackSection).not.toMatch(/status !== 'sent' && status !== 'created'/)
+  })
+
+  // ADVERSARIAL: attempt state machine — failAttempt must require 'sent' (not 'created')
+  it('failAttempt requires status sent (created → failed is rejected)', () => {
+    const source = readFile('./src/lib/services/transport.service.ts')
+    const failStart = source.indexOf('export async function failAttempt')
+    const failEnd = source.indexOf('\n}', failStart)
+    const failSection = source.slice(failStart, failEnd)
+    expect(failSection).toMatch(/status !== 'sent'/)
+  })
+
+  // ADVERSARIAL: transport.service must NOT mutate Bundle (no db.bundle.update/create/delete)
+  it('transport.service does not call db.bundle.update/create/delete (Bundle immutability)', () => {
+    const source = readFile('./src/lib/services/transport.service.ts')
+    expect(source).not.toMatch(/db\.bundle\.(update|create|delete|upsert)/)
+  })
+
+  // ADVERSARIAL: transport.service must NOT mutate Route (no db.route.update/create/delete)
+  it('transport.service does not call db.route.update/create/delete (Route immutability)', () => {
+    const source = readFile('./src/lib/services/transport.service.ts')
+    expect(source).not.toMatch(/db\.route\.(update|create|delete|upsert)/)
+  })
+
+  // ADVERSARIAL: transport.service must NOT mutate Node (no db.node.update/create/delete)
+  it('transport.service does not call db.node.update/create/delete (Node immutability)', () => {
+    const source = readFile('./src/lib/services/transport.service.ts')
+    expect(source).not.toMatch(/db\.node\.(update|create|delete|upsert)/)
+  })
+
+  // ADVERSARIAL: MockTransportAdapter performs no network calls
+  it('MockTransportAdapter performs no network calls (no net/socket/http imports)', () => {
+    const source = readFile('./src/lib/kernel/adapters/transport-adapter.ts')
+    const imports = getImportLines(source)
+    expect(imports).not.toMatch(/from ['"]net['"]|from ['"]http['"]|from ['"]https['"]|from ['"]dgram['"]|from ['"]ws['"]|from ['"]socket\.io/)
+    // No fetch/socket calls in the mock implementation.
+    expect(source).not.toMatch(/fetch\(|socket\.connect|net\.connect/)
+  })
 })

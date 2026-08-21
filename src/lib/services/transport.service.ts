@@ -50,6 +50,34 @@ import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import { getNode } from '@/lib/services/node.service'
 import { getBundle } from '@/lib/services/data-plane.service'
 import { getRoute } from '@/lib/services/routing.service'
+import type { TransportAdapter } from '@/lib/kernel/adapters/transport-adapter'
+import { MockTransportAdapter } from '@/lib/kernel/adapters/transport-adapter'
+
+// ---------------------------------------------------------------------------
+// Adapter registry — the dependency direction TransportExecution → TransportAdapter
+// is REAL: the service invokes the adapter to execute attempts. Future network
+// implementations (DTNTransportAdapter, TransitNetTransportAdapter, etc.) will
+// be registered here. The default for Phase 14D is MockTransportAdapter (no
+// network calls — records execution STATE only).
+// ---------------------------------------------------------------------------
+
+let transportAdapter: TransportAdapter = new MockTransportAdapter()
+
+/**
+ * Register a transport adapter. Future network implementations call this to
+ * plug into the transport execution layer. The adapter MUST implement the
+ * TransportAdapter contract (executeTransportAttempt, getCapabilities, validate).
+ */
+export function registerTransportAdapter(adapter: TransportAdapter): void {
+  transportAdapter = adapter
+}
+
+/**
+ * Get the currently registered transport adapter (for testing/inspection).
+ */
+export function getTransportAdapter(): TransportAdapter {
+  return transportAdapter
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -326,10 +354,24 @@ export async function cancelTransportExecution(
 // ---------------------------------------------------------------------------
 
 /**
- * Create a transport attempt. Attempts maintain deterministic ordering via
- * createdAt (append-only, T7).
+ * Create a transport attempt. Attempts maintain DETERMINISTIC ordering via
+ * attemptNumber (1-based, scoped to executionId). Under concurrency, the
+ * attemptNumber is allocated via count+1 with P2002 catch + retry, so two
+ * concurrent attempts never share the same attemptNumber (T7).
+ *
+ * The TransportAdapter is invoked to execute the attempt (the dependency
+ * direction TransportExecution → TransportAdapter is REAL). The adapter result
+ * is recorded as the attempt status. The MockTransportAdapter (default) makes
+ * no network calls — it records execution STATE only.
  *
  * Node lifecycle enforcement: fromNodeId + toNodeId must be active Nodes.
+ *
+ * Lifecycle (Step 6 — tightened):
+ *   created → sent → acknowledged | failed
+ *   The attempt is created in 'created' status. The adapter is invoked, which
+ *   transitions it to 'sent' then 'acknowledged' or 'failed'. The caller may
+ *   also use markAttemptSent() + acknowledgeAttempt()/failAttempt() for
+ *   explicit two-phase control.
  */
 export async function createTransportAttempt(
   tenantId: string,
@@ -348,6 +390,11 @@ export async function createTransportAttempt(
   if (execution.status === 'cancelled') {
     throw new ValidationError(`TransportExecution ${input.executionId} is cancelled`)
   }
+  if (execution.status === 'completed' || execution.status === 'failed') {
+    throw new ValidationError(
+      `TransportExecution ${input.executionId} is ${execution.status} (terminal); cannot create new attempts`,
+    )
+  }
 
   // Validate Nodes exist + are active.
   const fromNode = await getNode(tenantId, input.fromNodeId)
@@ -363,15 +410,21 @@ export async function createTransportAttempt(
     )
   }
 
-  const attempt = await db.transportAttempt.create({
-    data: {
-      executionId: input.executionId,
-      fromNodeId: input.fromNodeId,
-      toNodeId: input.toNodeId,
-      status: 'created',
-      startedAt: new Date(),
-      metadataJson: JSON.stringify(input.metadata ?? {}),
-    },
+  // Allocate attemptNumber deterministically under concurrency (T7).
+  // Count existing attempts + 1. If a concurrent insert wins the same number,
+  // P2002 fires → re-count and retry with the next number.
+  const attempt = await allocateAttemptNumber(tenantId, input.executionId, async (attemptNumber) => {
+    return db.transportAttempt.create({
+      data: {
+        executionId: input.executionId,
+        attemptNumber,
+        fromNodeId: input.fromNodeId,
+        toNodeId: input.toNodeId,
+        status: 'created',
+        startedAt: new Date(),
+        metadataJson: JSON.stringify(input.metadata ?? {}),
+      },
+    })
   })
 
   await appendAudit({
@@ -382,6 +435,7 @@ export async function createTransportAttempt(
     resourceId: attempt.id,
     metadata: {
       executionId: input.executionId,
+      attemptNumber: attempt.attemptNumber,
       fromNodeId: input.fromNodeId,
       toNodeId: input.toNodeId,
     },
@@ -391,7 +445,114 @@ export async function createTransportAttempt(
 }
 
 /**
+ * Execute a transport attempt via the registered TransportAdapter. This is the
+ * REAL dependency direction: TransportExecution → TransportAdapter. The adapter
+ * is invoked, and the result transitions the attempt status.
+ *
+ * The adapter does NOT throw on transport failure — it returns a failed result
+ * so the caller can record the attempt and decide whether to retry (T5).
+ *
+ * If the adapter returns 'acknowledged', the attempt is marked acknowledged.
+ * If the adapter returns 'failed', the attempt is marked failed (but the
+ * execution is NOT failed — T5 recovery).
+ */
+export async function executeAttemptViaAdapter(
+  tenantId: string,
+  attemptId: string,
+  actorId?: string,
+) {
+  const attempt = await db.transportAttempt.findUnique({
+    where: { id: attemptId },
+    include: { execution: true },
+  })
+  if (!attempt || attempt.execution.tenantId !== tenantId) {
+    throw new NotFoundError('transport_attempt', attemptId)
+  }
+  if (attempt.status !== 'created') {
+    throw new ValidationError(
+      `TransportAttempt ${attemptId} is ${attempt.status}; only created attempts can be executed`,
+    )
+  }
+
+  // Mark as sent (created → sent).
+  await db.transportAttempt.update({
+    where: { id: attemptId },
+    data: { status: 'sent' },
+  })
+
+  // Invoke the adapter (the dependency direction is REAL).
+  const result = await transportAdapter.executeTransportAttempt({
+    executionId: attempt.executionId,
+    bundleId: attempt.execution.bundleId,
+    routeId: attempt.execution.routeId,
+    fromNodeId: attempt.fromNodeId,
+    toNodeId: attempt.toNodeId,
+    attemptNumber: attempt.attemptNumber,
+  })
+
+  // Record the result.
+  if (result.status === 'acknowledged') {
+    const updated = await db.transportAttempt.update({
+      where: { id: attemptId },
+      data: { status: 'acknowledged', completedAt: new Date() },
+    })
+    await appendAudit({
+      tenantId,
+      actorId,
+      eventType: AuditEvents.TransportAttemptAcknowledged,
+      resourceType: 'transport_attempt',
+      resourceId: attemptId,
+    })
+    return updated
+  }
+
+  // result.status === 'failed'
+  const updated = await db.transportAttempt.update({
+    where: { id: attemptId },
+    data: { status: 'failed', completedAt: new Date(), errorCode: result.errorCode ?? 'unknown' },
+  })
+  await appendAudit({
+    tenantId,
+    actorId,
+    eventType: AuditEvents.TransportAttemptFailed,
+    resourceType: 'transport_attempt',
+    resourceId: attemptId,
+    metadata: { errorCode: result.errorCode ?? 'unknown' },
+  })
+  return updated
+}
+
+/**
+ * Allocate a deterministic attemptNumber under concurrency. Retries up to 3
+ * times if a concurrent insert wins the same number (P2002).
+ */
+async function allocateAttemptNumber<T>(
+  tenantId: string,
+  executionId: string,
+  createFn: (attemptNumber: number) => Promise<T>,
+): Promise<T> {
+  for (let i = 0; i < 3; i++) {
+    const count = await db.transportAttempt.count({ where: { executionId } })
+    const attemptNumber = count + 1
+    try {
+      return await createFn(attemptNumber)
+    } catch (err: unknown) {
+      if (isPrismaUniqueConstraintError(err)) {
+        // Concurrent insert won this number — retry with count+1.
+        continue
+      }
+      throw err
+    }
+  }
+  throw new ConflictError(
+    `Failed to allocate attemptNumber for execution ${executionId} after 3 retries (concurrency contention)`,
+  )
+}
+
+/**
  * Acknowledge a transport attempt (sent → acknowledged).
+ * Step 6: an attempt MUST be 'sent' before it can be acknowledged.
+ * 'created → acknowledged' is REJECTED (must go through 'sent' first).
  */
 export async function acknowledgeAttempt(
   tenantId: string,
@@ -405,9 +566,9 @@ export async function acknowledgeAttempt(
   if (!attempt || attempt.execution.tenantId !== tenantId) {
     throw new NotFoundError('transport_attempt', attemptId)
   }
-  if (attempt.status !== 'sent' && attempt.status !== 'created') {
+  if (attempt.status !== 'sent') {
     throw new ValidationError(
-      `TransportAttempt ${attemptId} is ${attempt.status}; only created/sent attempts can be acknowledged`,
+      `TransportAttempt ${attemptId} is ${attempt.status}; only sent attempts can be acknowledged (created → sent → acknowledged)`,
     )
   }
   const updated = await db.transportAttempt.update({
@@ -454,6 +615,10 @@ export async function markAttemptSent(
 /**
  * Fail a transport attempt (sent → failed). Does NOT fail the execution
  * (T5 — the execution can create another attempt).
+ *
+ * Step 6: an attempt MUST be 'sent' before it can fail.
+ * 'created → failed' is REJECTED (must go through 'sent' first).
+ * 'acknowledged → failed' is REJECTED (acknowledged is terminal).
  */
 export async function failAttempt(
   tenantId: string,
@@ -468,9 +633,9 @@ export async function failAttempt(
   if (!attempt || attempt.execution.tenantId !== tenantId) {
     throw new NotFoundError('transport_attempt', attemptId)
   }
-  if (attempt.status === 'acknowledged' || attempt.status === 'failed') {
+  if (attempt.status !== 'sent') {
     throw new ValidationError(
-      `TransportAttempt ${attemptId} is ${attempt.status} (terminal)`,
+      `TransportAttempt ${attemptId} is ${attempt.status}; only sent attempts can fail (created → sent → failed)`,
     )
   }
   const updated = await db.transportAttempt.update({

@@ -2440,6 +2440,7 @@ model TransportExecution {
 model TransportAttempt {
   id                      String   @id @default(cuid())
   executionId             String   // FK to TransportExecution
+  attemptNumber           Int      // deterministic ordering (1-based, scoped to executionId)
   fromNodeId              String   // FK to Node — hop source
   toNodeId                String   // FK to Node — hop destination
   status                  String   @default("created") // created | sent | acknowledged | failed
@@ -2454,6 +2455,7 @@ model TransportAttempt {
   fromNode                Node     @relation("TransportAttemptFromNode", fields: [fromNodeId], references: [id], onDelete: Cascade)
   toNode                  Node     @relation("TransportAttemptToNode", fields: [toNodeId], references: [id], onDelete: Cascade)
 
+  @@unique([executionId, attemptNumber]) // deterministic ordering — one attempt per number per execution
   @@index([executionId])
   @@index([fromNodeId])
   @@index([toNodeId])
