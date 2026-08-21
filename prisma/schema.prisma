@@ -2599,14 +2599,15 @@ model TransformRecord {
   id                      String   @id @default(cuid())
   tenantId                String
   bundleId                String   // FK to Bundle — WHAT was transformed
-  nodeId                  String?  // FK to Node — WHO applied the transform (optional)
+  nodeId                  String?  // FK to Node — WHO applied the transform (optional, nullable)
+  nodeIdentity            String   // non-null identity: nodeId if specified, else '__system__' — makes @@unique non-null
   transformType           String   // generic transform identity (e.g. "compression", "encryption_proxy")
   transformVersion        String   // transform version (semantic versioning string)
   inputHash               String   // SHA-256 of the input payload
   outputHash              String   // SHA-256 of the output payload
   parametersJson          String   @default("{}") // transform parameters (canonical JSON)
-  resultStatus            String   @default("success") // success | failed
-  resultMetadataJson      String   @default("{}") // result details (e.g. compression ratio, error code)
+  resultStatus            String   @default("success") // success | failed — MATERIAL to fingerprint
+  resultMetadataJson      String   @default("{}") // result details — NON-identity-bearing (observational)
   idempotencyKey          String   // caller-supplied, for deterministic identity
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
@@ -2615,10 +2616,16 @@ model TransformRecord {
   bundle                  Bundle   @relation(fields: [bundleId], references: [id], onDelete: Cascade)
   node                    Node?    @relation("TransformRecordNode", fields: [nodeId], references: [id], onDelete: SetNull)
 
-  @@unique([tenantId, bundleId, nodeId, transformType, idempotencyKey]) // deterministic registration identity
+  // nodeIdentity is NON-NULL: it is nodeId when a Node is specified, or
+  // '__system__' when no Node is attributable (system-applied transform).
+  // This makes the unique constraint non-null, so PostgreSQL enforces
+  // idempotency even for system-applied records (nodeId = NULL).
+  // See Phase 14F correction: NULL in a UNIQUE constraint allows duplicates.
+  @@unique([tenantId, bundleId, nodeIdentity, transformType, idempotencyKey]) // deterministic registration identity (non-null)
   @@index([tenantId])
   @@index([bundleId])
   @@index([nodeId])
+  @@index([nodeIdentity])
   @@index([transformType])
   @@index([resultStatus])
   @@index([createdAt])

@@ -5214,3 +5214,28 @@ Verified results (real PostgreSQL/Neon):
 - Phase 14E integration (Case A+B sampled): PASS (14E freeze intact).
 - ESLint: clean. TypeScript: only pre-existing baselineEngine.
 - Diff scope: ONLY TransformRecord artifacts (schema +1 model, audit +1 event, transform-record.service.ts, contract doc, 2 test files, worklog). ZERO TransformRegistry/TransformRuntime/execute/reverse/marketplace/SDK/DTN leakage.
+
+---
+Task ID: 14F-correction
+Agent: Implementation agent (corrective audit)
+Task: PHASE 14F — TransformRecord corrective audit (3 defects)
+
+Work Log:
+- Independent audit of 490dd84. Found 3 defects:
+  1. Defect A: nullable nodeId in @@unique([tenantId, bundleId, nodeId, transformType, idempotencyKey]). PostgreSQL allows multiple NULLs in UNIQUE → system-applied records (nodeId=NULL) could duplicate, breaking idempotency.
+  2. Defect B: resultStatus missing from fingerprint. Same identity + success vs failed would silently converge.
+  3. Defect C: non-canonical JSON.stringify for parameters. {a:1,b:2} vs {b:2,a:1} would produce different fingerprints (false conflict).
+- FIX A: Added non-null nodeIdentity column. nodeIdentity = nodeId when specified, '__system__' when not. @@unique now uses nodeIdentity (non-null). PostgreSQL enforces idempotency for system-applied records.
+- FIX B: Added resultStatus to computeTransformFingerprint. Same identity + different resultStatus → ConflictError.
+- FIX C: Added canonicalize() recursive key-sort helper (same pattern as control-plane/types.ts canonicalize, which is module-private). Parameters canonicalized in both fingerprint computation and stored parametersJson.
+- Added 8 adversarial tests: T-New-A (system transform idempotency), T-New-B (system transform conflict), T-New-C (resultStatus conflict), T-New-D (metadata replay), T-New-E (canonical parameter ordering), T-New-F (parameter difference), T-New-G (Node-backed concurrency), T-New-H (cross-tenant isolation).
+- Updated architecture tests: verify @@unique uses nodeIdentity (not nodeId), fingerprint includes resultStatus, canonicalize() exists, nodeIdentity computed from nodeId ?? '__system__'.
+- Updated contract doc §14: identity key uses nodeIdentity, fingerprint includes resultStatus, canonicalization documented, system-applied transforms section added.
+- Cleared 12 existing TransformRecord rows from Neon to allow schema migration.
+
+Verified results (real PostgreSQL/Neon):
+- Phase 14F architecture: 20/20 PASS (static).
+- Phase 14F integration: 17/17 PASS (9 original T1-T8 + 8 new T-New-A through T-New-H).
+- Total static (Phase 13-14F): 132/132 PASS.
+- ESLint: clean. TypeScript: only pre-existing baselineEngine.
+- Diff scope: ONLY Phase 14F files (schema, transform-record.service.ts, 2 test files, contract doc, worklog).

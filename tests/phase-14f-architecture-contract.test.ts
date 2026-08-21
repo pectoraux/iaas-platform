@@ -151,13 +151,20 @@ describe('Phase 14F: Transform Record Architecture Anti-Drift', () => {
     expect(recordSection).toMatch(/resultStatus\s+String\s+@default\("success"\)/)
   })
 
-  // 14. Idempotency semantics: @@unique + fingerprint
-  it('TransformRecord has @@unique([tenantId, bundleId, nodeId, transformType, idempotencyKey])', () => {
+  // 14. Idempotency semantics: @@unique uses nodeIdentity (non-null), NOT nodeId (nullable)
+  it('TransformRecord @@unique uses nodeIdentity (non-null), NOT nodeId (nullable) — fixes NULL-unique defect', () => {
     const schema = readFile('./prisma/schema.prisma')
     const recordStart = schema.indexOf('model TransformRecord {')
     const recordEnd = schema.indexOf('\n}', recordStart)
     const recordSection = schema.slice(recordStart, recordEnd)
-    expect(recordSection).toMatch(/@@unique\(\[tenantId,\s*bundleId,\s*nodeId,\s*transformType,\s*idempotencyKey\]\)/)
+    // nodeIdentity must be non-null String (not String?).
+    expect(recordSection).toMatch(/nodeIdentity\s+String\s/)
+    // @@unique must use nodeIdentity, NOT nodeId.
+    expect(recordSection).toMatch(/@@unique\(\[tenantId,\s*bundleId,\s*nodeIdentity,\s*transformType,\s*idempotencyKey\]\)/)
+    // nodeId remains nullable (optional FK).
+    expect(recordSection).toMatch(/nodeId\s+String\?/)
+    // The old @@unique with nodeId must NOT exist.
+    expect(recordSection).not.toMatch(/@@unique\(\[tenantId,\s*bundleId,\s*nodeId,\s*transformType/)
   })
 
   // Additional: TransformRecord has provenance fields (constitution §9)
@@ -188,20 +195,40 @@ describe('Phase 14F: Transform Record Architecture Anti-Drift', () => {
   })
 
   // Additional: fingerprint computation exists (idempotency conflict detection)
-  it('transform-record service has computeTransformFingerprint for idempotency conflict detection', () => {
+  it('transform-record service has computeTransformFingerprint with resultStatus + nodeIdentity + canonicalize', () => {
     const source = readFile('./src/lib/services/transform-record.service.ts')
     expect(source).toMatch(/computeTransformFingerprint/)
-    // The fingerprint must include material fields, NOT resultMetadata.
+    // Check the full source for the fingerprint's material fields (not just the
+    // function slice, because the type annotation closing brace confuses slicing).
+    expect(source).toMatch(/nodeIdentity: input\.nodeIdentity/)
+    expect(source).toMatch(/resultStatus: input\.resultStatus/)
+    expect(source).toMatch(/parameters: canonicalize\(input\.parameters\)/)
+    // resultMetadata must NOT be in the fingerprint.
+    // Check the function region (between computeTransformFingerprint and the next function).
     const fnStart = source.indexOf('function computeTransformFingerprint')
-    const fnEnd = source.indexOf('\n}', fnStart)
-    const fn = source.slice(fnStart, fnEnd)
-    expect(fn).toMatch(/transformType/)
-    expect(fn).toMatch(/transformVersion/)
-    expect(fn).toMatch(/inputHash/)
-    expect(fn).toMatch(/outputHash/)
-    expect(fn).toMatch(/parameters/)
-    // resultMetadata must NOT be in the fingerprint (non-identity-bearing).
-    expect(fn).not.toMatch(/resultMetadata/)
+    const canonStart = source.indexOf('function canonicalize')
+    const fnRegion = source.slice(fnStart, canonStart > fnStart ? canonStart : source.length)
+    expect(fnRegion).not.toMatch(/resultMetadata/)
+  })
+
+  // Additional: canonical serialization helper exists (Defect C fix)
+  it('transform-record service has canonicalize() for deterministic parameter serialization', () => {
+    const source = readFile('./src/lib/services/transform-record.service.ts')
+    expect(source).toMatch(/function canonicalize\(/)
+    // Must recursively sort keys.
+    const canonStart = source.indexOf('function canonicalize(')
+    const canonEnd = source.indexOf('\n}', canonStart)
+    const canonFn = source.slice(canonStart, canonEnd)
+    expect(canonFn).toMatch(/\.sort\(\)/)
+    expect(canonFn).toMatch(/Array\.isArray/)
+  })
+
+  // Additional: service computes nodeIdentity (non-null identity representation)
+  it('transform-record service computes nodeIdentity from nodeId (or __system__ sentinel)', () => {
+    const source = readFile('./src/lib/services/transform-record.service.ts')
+    expect(source).toMatch(/nodeIdentity\s*=\s*input\.nodeId\s*\?\?\s*['"]__system__['"]/)
+    // The create data must include nodeIdentity.
+    expect(source).toMatch(/nodeIdentity,/)
   })
 
   // Additional: Phase 14F contract document exists

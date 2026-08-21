@@ -476,3 +476,300 @@ describeOrSkip('Phase 14F: T8 — Concurrent convergence', () => {
     expect(count).toBe(1)
   })
 })
+
+// ===========================================================================
+// T-New-A — System transform idempotency (nodeId = null)
+// ===========================================================================
+
+describeOrSkip('Phase 14F: T-New-A — System transform idempotency (nodeId=null)', () => {
+  it('concurrent system-applied records (nodeId=null) converge to exactly one row', async () => {
+    const f = await createTransformFixture('TNA')
+
+    const input = {
+      bundleId: f.bundleId,
+      // nodeId omitted → system-applied (nodeId=null, nodeIdentity='__system__')
+      transformType: 'system_transform',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      idempotencyKey: 'tna-concurrent',
+    }
+
+    const results = await Promise.allSettled([
+      createTransformRecord(f.tenantId, input),
+      createTransformRecord(f.tenantId, input),
+      createTransformRecord(f.tenantId, input),
+    ])
+
+    const fulfilled = results.filter(
+      (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof createTransformRecord>>> =>
+        r.status === 'fulfilled',
+    )
+    expect(fulfilled.length).toBe(3)
+
+    const ids = new Set(fulfilled.map((r) => r.value.id))
+    expect(ids.size).toBe(1)
+
+    // Exactly one record row — the database enforces this (nodeIdentity='__system__' is non-null).
+    const count = await db.transformRecord.count({
+      where: { tenantId: f.tenantId, idempotencyKey: 'tna-concurrent', nodeIdentity: '__system__' },
+    })
+    expect(count).toBe(1)
+
+    // The record has nodeId=null but nodeIdentity='__system__'.
+    const record = fulfilled[0].value
+    expect(record.nodeId).toBeNull()
+    expect(record.nodeIdentity).toBe('__system__')
+  })
+})
+
+// ===========================================================================
+// T-New-B — System transform conflict (nodeId=null, different fingerprint)
+// ===========================================================================
+
+describeOrSkip('Phase 14F: T-New-B — System transform conflict', () => {
+  it('same identity (nodeId=null) + different outputHash → ConflictError, original unchanged', async () => {
+    const f = await createTransformFixture('TNB')
+
+    const r1 = await createTransformRecord(f.tenantId, {
+      bundleId: f.bundleId,
+      transformType: 'system_transform',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output-A'),
+      idempotencyKey: 'tnb-key',
+    })
+
+    await expect(
+      createTransformRecord(f.tenantId, {
+        bundleId: f.bundleId,
+        transformType: 'system_transform',
+        transformVersion: '1.0.0',
+        inputHash: sha256('input'),
+        outputHash: sha256('output-B'),
+        idempotencyKey: 'tnb-key',
+      }),
+    ).rejects.toBeInstanceOf(ConflictError)
+
+    // Original record unchanged.
+    const refetched = await getTransformRecord(f.tenantId, r1.id)
+    expect(refetched.outputHash).toBe(sha256('output-A'))
+  })
+})
+
+// ===========================================================================
+// T-New-C — resultStatus conflict
+// ===========================================================================
+
+describeOrSkip('Phase 14F: T-New-C — resultStatus conflict', () => {
+  it('same identity + success vs failed → ConflictError', async () => {
+    const f = await createTransformFixture('TNC')
+
+    await createTransformRecord(f.tenantId, {
+      bundleId: f.bundleId,
+      nodeId: f.sourceNodeId,
+      transformType: 'compression',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      resultStatus: 'success',
+      idempotencyKey: 'tnc-key',
+    })
+
+    await expect(
+      createTransformRecord(f.tenantId, {
+        bundleId: f.bundleId,
+        nodeId: f.sourceNodeId,
+        transformType: 'compression',
+        transformVersion: '1.0.0',
+        inputHash: sha256('input'),
+        outputHash: sha256('output'),
+        resultStatus: 'failed',
+        idempotencyKey: 'tnc-key',
+      }),
+    ).rejects.toBeInstanceOf(ConflictError)
+  })
+})
+
+// ===========================================================================
+// T-New-D — Metadata replay (non-identity-bearing)
+// ===========================================================================
+
+describeOrSkip('Phase 14F: T-New-D — Metadata replay', () => {
+  it('same identity + same fingerprint + different resultMetadata → idempotent replay', async () => {
+    const f = await createTransformFixture('TND')
+
+    const r1 = await createTransformRecord(f.tenantId, {
+      bundleId: f.bundleId,
+      nodeId: f.sourceNodeId,
+      transformType: 'compression',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      resultStatus: 'success',
+      resultMetadata: { ratio: 0.45, timestamp: '2026-01-01' },
+      idempotencyKey: 'tnd-key',
+    })
+
+    const r2 = await createTransformRecord(f.tenantId, {
+      bundleId: f.bundleId,
+      nodeId: f.sourceNodeId,
+      transformType: 'compression',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      resultStatus: 'success',
+      resultMetadata: { ratio: 0.50, timestamp: '2026-02-02' },
+      idempotencyKey: 'tnd-key',
+    })
+
+    expect(r2.id).toBe(r1.id)
+  })
+})
+
+// ===========================================================================
+// T-New-E — Canonical parameter ordering
+// ===========================================================================
+
+describeOrSkip('Phase 14F: T-New-E — Canonical parameter ordering', () => {
+  it('{a:1,b:2} and {b:2,a:1} produce the same fingerprint (no conflict)', async () => {
+    const f = await createTransformFixture('TNE')
+
+    const r1 = await createTransformRecord(f.tenantId, {
+      bundleId: f.bundleId,
+      nodeId: f.sourceNodeId,
+      transformType: 'compression',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      parameters: { a: 1, b: 2 },
+      idempotencyKey: 'tne-key',
+    })
+
+    const r2 = await createTransformRecord(f.tenantId, {
+      bundleId: f.bundleId,
+      nodeId: f.sourceNodeId,
+      transformType: 'compression',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      parameters: { b: 2, a: 1 },
+      idempotencyKey: 'tne-key',
+    })
+
+    expect(r2.id).toBe(r1.id)
+  })
+})
+
+// ===========================================================================
+// T-New-F — Actual parameter difference
+// ===========================================================================
+
+describeOrSkip('Phase 14F: T-New-F — Actual parameter difference', () => {
+  it('{a:1,b:2} vs {a:1,b:3} → ConflictError', async () => {
+    const f = await createTransformFixture('TNF')
+
+    await createTransformRecord(f.tenantId, {
+      bundleId: f.bundleId,
+      nodeId: f.sourceNodeId,
+      transformType: 'compression',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      parameters: { a: 1, b: 2 },
+      idempotencyKey: 'tnf-key',
+    })
+
+    await expect(
+      createTransformRecord(f.tenantId, {
+        bundleId: f.bundleId,
+        nodeId: f.sourceNodeId,
+        transformType: 'compression',
+        transformVersion: '1.0.0',
+        inputHash: sha256('input'),
+        outputHash: sha256('output'),
+        parameters: { a: 1, b: 3 },
+        idempotencyKey: 'tnf-key',
+      }),
+    ).rejects.toBeInstanceOf(ConflictError)
+  })
+})
+
+// ===========================================================================
+// T-New-G — Node-backed idempotency + concurrency
+// ===========================================================================
+
+describeOrSkip('Phase 14F: T-New-G — Node-backed idempotency + concurrency', () => {
+  it('Node-backed records: replay + concurrent convergence, nodeIdentity matches nodeId', async () => {
+    const f = await createTransformFixture('TNG')
+
+    const input = {
+      bundleId: f.bundleId,
+      nodeId: f.sourceNodeId,
+      transformType: 'compression',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      idempotencyKey: 'tng-key',
+    }
+
+    const r1 = await createTransformRecord(f.tenantId, input)
+    const r2 = await createTransformRecord(f.tenantId, input)
+    expect(r2.id).toBe(r1.id)
+    expect(r2.nodeId).toBe(f.sourceNodeId)
+    expect(r2.nodeIdentity).toBe(f.sourceNodeId)
+
+    // Concurrent.
+    const input2 = { ...input, idempotencyKey: 'tng-concurrent' }
+    const results = await Promise.allSettled([
+      createTransformRecord(f.tenantId, input2),
+      createTransformRecord(f.tenantId, input2),
+      createTransformRecord(f.tenantId, input2),
+    ])
+    const fulfilled = results.filter((r) => r.status === 'fulfilled')
+    expect(fulfilled.length).toBe(3)
+    const ids = new Set(fulfilled.map((r) => (r as PromiseFulfilledResult<Awaited<ReturnType<typeof createTransformRecord>>>).value.id))
+    expect(ids.size).toBe(1)
+  })
+})
+
+// ===========================================================================
+// T-New-H — Cross-tenant isolation
+// ===========================================================================
+
+describeOrSkip('Phase 14F: T-New-H — Cross-tenant isolation', () => {
+  it('Tenant A cannot read/replay/conflict against Tenant B TransformRecord', async () => {
+    const fA = await createTransformFixture('TNH-A')
+    const tenantB = await createSecondTenant('TNH')
+
+    const record = await createTransformRecord(fA.tenantId, {
+      bundleId: fA.bundleId,
+      nodeId: fA.sourceNodeId,
+      transformType: 'compression',
+      transformVersion: '1.0.0',
+      inputHash: sha256('input'),
+      outputHash: sha256('output'),
+      idempotencyKey: 'tnh-key',
+    })
+
+    // Tenant B cannot read it.
+    await expect(getTransformRecord(tenantB.id, record.id)).rejects.toBeInstanceOf(NotFoundError)
+
+    // Tenant B cannot list it.
+    const tenantBRecords = await listTransformRecords(tenantB.id)
+    expect(tenantBRecords.find((r) => r.id === record.id)).toBeUndefined()
+
+    // Tenant B cannot create a record referencing Tenant A's bundle (Bundle lookup fails).
+    await expect(
+      createTransformRecord(tenantB.id, {
+        bundleId: fA.bundleId,
+        nodeId: fA.sourceNodeId,
+        transformType: 'compression',
+        transformVersion: '1.0.0',
+        inputHash: sha256('input'),
+        outputHash: sha256('output'),
+        idempotencyKey: 'tnh-key',
+      }),
+    ).rejects.toBeInstanceOf(NotFoundError)
+  })
+})

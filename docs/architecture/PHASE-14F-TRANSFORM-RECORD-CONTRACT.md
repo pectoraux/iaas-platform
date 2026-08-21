@@ -244,28 +244,40 @@ The service exposes `createTransformRecord`, `getTransformRecord`, `listTransfor
 
 Phase 14F distinguishes two concepts (mirroring the Phase 14E pattern):
 
-- **Identity key** (the database uniqueness tuple): `(tenantId, bundleId, nodeId, transformType, idempotencyKey)`. This is enforced by `@@unique([tenantId, bundleId, nodeId, transformType, idempotencyKey])`. It determines which requests are "the same record" for durability purposes. Note that `nodeId` is part of the identity key — a record with `nodeId=null` and a record with `nodeId="node_1"` are **different records** under the same `idempotencyKey` (transform applied by the platform vs. by a specific Node).
+- **Identity key** (the database uniqueness tuple): `(tenantId, bundleId, nodeIdentity, transformType, idempotencyKey)`. This is enforced by `@@unique([tenantId, bundleId, nodeIdentity, transformType, idempotencyKey])`. The `nodeIdentity` column is **NON-NULL**: it is `nodeId` when a Node is specified, or `'__system__'` when no Node is attributable (system-applied transform). This corrects the Phase 14F initial implementation's use of nullable `nodeId` in the unique constraint — PostgreSQL allows multiple NULL values in a UNIQUE constraint, which broke idempotency for system-applied records. The `nodeIdentity` column makes the identity key non-null at the database level, so PostgreSQL enforces idempotency even for `nodeId = NULL`.
 
-- **Request fingerprint** (`computeTransformFingerprint`): `SHA-256({bundleId, payloadHash, nodeId, transformType, transformVersion, inputHash, outputHash, parameters, idempotencyKey})`. This is the material content of the record. It includes `payloadHash` (the Bundle's own payload hash, fetched at creation) as an integrity anchor. It does **NOT** include `resultMetadata` — metadata is non-identity-bearing.
+- **Request fingerprint** (`computeTransformFingerprint`): `SHA-256({bundleId, payloadHash, nodeIdentity, transformType, transformVersion, inputHash, outputHash, canonicalize(parameters), resultStatus, idempotencyKey})`. This is the material content of the record. It includes:
+  - `nodeIdentity` (not `nodeId`) — the non-null identity representation.
+  - `resultStatus` — MATERIAL (a success record and a failed record are different facts; same identity + different resultStatus → ConflictError).
+  - `parameters` — canonicalized via recursive key sort so insertion-order differences do not produce different fingerprints.
+  - It does **NOT** include `resultMetadata` — metadata is non-identity-bearing (observational).
 
 ### Idempotent Replay vs Idempotency Conflict
 
 - **Idempotent replay:** same identity key + same fingerprint → return the existing record. The caller's request is materially identical to the prior request; the record already exists. No new record is created; no audit event is emitted.
-- **Idempotency conflict:** same identity key + DIFFERENT fingerprint → throw `ConflictError`. The caller reused an identity key with a materially different request (e.g. different `transformVersion`, different `inputHash`/`outputHash`, different `parameters`). This cannot silently converge — the existing record is **NOT** returned, and no new record is created.
+- **Idempotency conflict:** same identity key + DIFFERENT fingerprint → throw `ConflictError`. The caller reused an identity key with a materially different request (e.g. different `transformVersion`, different `inputHash`/`outputHash`, different `resultStatus`, different `parameters` value). This cannot silently converge — the existing record is **NOT** returned, and no new record is created.
 - **`resultMetadata` is non-identity-bearing:** the same identity key + same fingerprint but different `resultMetadata` → idempotent replay (returns the existing record). Metadata changes do NOT cause a conflict because metadata is NOT part of the fingerprint. This is a deliberate architectural choice: `resultMetadata` is observational (e.g. compression ratio, error code), not identity.
-- **`resultStatus` is non-identity-bearing (also non-fingerprint):** the same identity key + same fingerprint but different `resultStatus` → idempotent replay. The caller cannot re-register a failed transform as a success under the same identity key — the first result is durable. This is a deliberate choice: re-attempting a failed transform requires a NEW `idempotencyKey`.
+- **`resultStatus` IS material:** the same identity key + different `resultStatus` (success vs failed) → ConflictError. A success record and a failed record are different provenance facts. Re-attempting a failed transform requires a NEW `idempotencyKey`.
 
 ### P2002 Source Distinction
 
-TransformRecord has **only ONE unique constraint** — the idempotency key `@@unique([tenantId, bundleId, nodeId, transformType, idempotencyKey])`. There is no `@unique` on any single column (unlike DeliveryConfirmation's `transportAttemptId @unique`). Therefore:
+TransformRecord has **only ONE unique constraint** — the idempotency key `@@unique([tenantId, bundleId, nodeIdentity, transformType, idempotencyKey])`. There is no `@unique` on any single column (unlike DeliveryConfirmation's `transportAttemptId @unique`). Therefore:
 
 - Any `P2002` is **unambiguously** an idempotency race — there is no second constraint to disambiguate.
-- The handler catches `P2002`, re-reads by the identity key, recomputes the fingerprint, and either returns the existing record (replay) or throws `ConflictError` (conflict).
+- The handler catches `P2002`, re-reads by the identity key (using `nodeIdentity`), recomputes the fingerprint, and either returns the existing record (replay) or throws `ConflictError` (conflict).
 - No `err.meta.target` inspection is required — the source is unambiguous. (The Phase 14E handler must inspect `err.meta.target` because of its two constraints; Phase 14F does not.)
+
+### System-Applied Transforms (nodeId = null)
+
+When `nodeId` is not provided (system-applied transform), the service computes `nodeIdentity = '__system__'`. This sentinel is a non-null string that participates in the `@@unique` constraint. PostgreSQL treats it as a regular value, so two concurrent system-applied records with the same `(tenantId, bundleId, '__system__', transformType, idempotencyKey)` will conflict → P2002 → idempotent convergence. This is the database invariant, not application timing.
+
+### Canonical Parameter Serialization
+
+Parameters are serialized via `canonicalize()` — a recursive key-sort function that produces deterministic JSON. `{a:1, b:2}` and `{b:2, a:1}` produce the same canonical string, so they produce the same fingerprint. This prevents false idempotency conflicts from JavaScript object key-insertion-order differences. The `canonicalize()` helper follows the same pattern as the module-private `canonicalize()` in `src/lib/control-plane/types.ts`; a local copy is introduced to avoid modifying the control-plane module (scope discipline).
 
 ### Convergence Under Concurrency
 
-Two concurrent `createTransformRecord` calls with the same identity key + same fingerprint converge. The loser of the insert race receives a Prisma `P2002`; the service catches it, re-reads by the identity key, recomputes the fingerprint, and returns the existing record. The winner's record is the durable one; the loser's record is silently dropped (idempotent replay).
+Two concurrent `createTransformRecord` calls with the same identity key + same fingerprint converge. The loser of the insert race receives a Prisma `P2002`; the service catches it, re-reads by the identity key, recomputes the fingerprint, and returns the existing record. This works for both Node-backed records (`nodeIdentity = nodeId`) and system-applied records (`nodeIdentity = '__system__'`).
 
 ### Fingerprint Computation
 

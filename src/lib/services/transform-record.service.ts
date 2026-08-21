@@ -119,35 +119,48 @@ export async function createTransformRecord(
     }
   }
 
+  // Compute nodeIdentity — the non-null identity representation.
+  // This is nodeId when a Node is specified, or '__system__' when no Node is
+  // attributable (system-applied transform). This makes the @@unique constraint
+  // non-null, so PostgreSQL enforces idempotency even for system-applied records
+  // (nodeId = NULL). PostgreSQL UNIQUE allows multiple NULLs; nodeIdentity
+  // replaces nodeId in the unique constraint to fix this.
+  const nodeIdentity = input.nodeId ?? '__system__'
+
   // Compute the request fingerprint — the material content of the record.
   // This is used for idempotency conflict detection: same key + different
-  // fingerprint → ConflictError. Metadata is non-identity-bearing.
+  // fingerprint → ConflictError. resultMetadata is non-identity-bearing.
+  // resultStatus IS material (a success vs failed record are different facts).
+  // Parameters are canonicalized (recursive key sort) so insertion-order
+  // differences do not produce different fingerprints.
   const fingerprint = computeTransformFingerprint({
     bundleId: input.bundleId,
     payloadHash: bundle.payloadHash,
-    nodeId: input.nodeId ?? null,
+    nodeIdentity,
     transformType: input.transformType,
     transformVersion: input.transformVersion,
     inputHash: input.inputHash,
     outputHash: input.outputHash,
     parameters: input.parameters ?? {},
+    resultStatus: input.resultStatus ?? 'success',
     idempotencyKey: input.idempotencyKey,
   })
 
   // Idempotent insert: try to create, catch P2002, re-read.
-  // TransformRecord has ONE unique constraint (the idempotency key), so there
-  // is no P2002 source ambiguity (unlike DeliveryConfirmation which has two).
+  // TransformRecord has ONE unique constraint (the idempotency key on
+  // nodeIdentity, not nodeId), so there is no P2002 source ambiguity.
   try {
     const record = await db.transformRecord.create({
       data: {
         tenantId,
         bundleId: input.bundleId,
         nodeId: input.nodeId ?? null,
+        nodeIdentity,
         transformType: input.transformType,
         transformVersion: input.transformVersion,
         inputHash: input.inputHash,
         outputHash: input.outputHash,
-        parametersJson: JSON.stringify(input.parameters ?? {}),
+        parametersJson: canonicalStringify(input.parameters ?? {}),
         resultStatus: input.resultStatus ?? 'success',
         resultMetadataJson: JSON.stringify(input.resultMetadata ?? {}),
         idempotencyKey: input.idempotencyKey,
@@ -163,6 +176,7 @@ export async function createTransformRecord(
       metadata: {
         bundleId: input.bundleId,
         nodeId: input.nodeId ?? null,
+        nodeIdentity,
         transformType: input.transformType,
         transformVersion: input.transformVersion,
       },
@@ -171,14 +185,14 @@ export async function createTransformRecord(
     return record
   } catch (err: unknown) {
     // P2002: concurrent createTransformRecord won the insert race.
-    // TransformRecord has only ONE unique constraint (the idempotency key),
-    // so any P2002 is an idempotency race — no source ambiguity.
+    // TransformRecord has only ONE unique constraint (on nodeIdentity), so
+    // any P2002 is an idempotency race — no source ambiguity.
     if (isPrismaUniqueConstraintError(err)) {
       const existing = await db.transformRecord.findFirst({
         where: {
           tenantId,
           bundleId: input.bundleId,
-          nodeId: input.nodeId ?? null,
+          nodeIdentity,
           transformType: input.transformType,
           idempotencyKey: input.idempotencyKey,
         },
@@ -188,17 +202,18 @@ export async function createTransformRecord(
       const existingFingerprint = computeTransformFingerprint({
         bundleId: existing.bundleId,
         payloadHash: bundle.payloadHash,
-        nodeId: existing.nodeId,
+        nodeIdentity: existing.nodeIdentity,
         transformType: existing.transformType,
         transformVersion: existing.transformVersion,
         inputHash: existing.inputHash,
         outputHash: existing.outputHash,
         parameters: JSON.parse(existing.parametersJson),
+        resultStatus: existing.resultStatus,
         idempotencyKey: existing.idempotencyKey,
       })
       if (existingFingerprint !== fingerprint) {
         throw new ConflictError(
-          'TransformRecord idempotency conflict: same identity key but different request fingerprint (transformType, version, inputHash, outputHash, or parameters differ)',
+          'TransformRecord idempotency conflict: same identity key but different request fingerprint (transformVersion, inputHash, outputHash, resultStatus, or parameters differ)',
           { idempotencyKey: input.idempotencyKey, recordId: existing.id },
         )
       }
@@ -258,33 +273,78 @@ export async function listTransformRecords(
 
 /**
  * Compute the request fingerprint for idempotency conflict detection.
- * The fingerprint includes all material fields (transformType, transformVersion,
- * inputHash, outputHash, parameters, bundleId, nodeId, idempotencyKey) but
- * does NOT include resultMetadata (non-identity-bearing).
+ *
+ * MATERIAL fields (included in fingerprint):
+ *   - bundleId, payloadHash, nodeIdentity
+ *   - transformType, transformVersion
+ *   - inputHash, outputHash
+ *   - parameters (canonicalized via canonicalStringify)
+ *   - resultStatus (success vs failed are different facts)
+ *   - idempotencyKey
+ *
+ * NON-identity-bearing (excluded):
+ *   - resultMetadata (observational — compression ratio, timestamps, etc.)
+ *
+ * There is ONE canonical derivation — this function is used by both
+ * createTransformRecord and the idempotency conflict check.
  */
 function computeTransformFingerprint(input: {
   bundleId: string
   payloadHash: string
-  nodeId: string | null
+  nodeIdentity: string
   transformType: string
   transformVersion: string
   inputHash: string
   outputHash: string
   parameters: Record<string, unknown>
+  resultStatus: string
   idempotencyKey: string
 }): string {
   const canonical = JSON.stringify({
     bundleId: input.bundleId,
     payloadHash: input.payloadHash,
-    nodeId: input.nodeId,
+    nodeIdentity: input.nodeIdentity,
     transformType: input.transformType,
     transformVersion: input.transformVersion,
     inputHash: input.inputHash,
     outputHash: input.outputHash,
-    parameters: input.parameters,
+    parameters: canonicalize(input.parameters),
+    resultStatus: input.resultStatus,
     idempotencyKey: input.idempotencyKey,
   })
   return sha256(canonical)
+}
+
+/**
+ * Deterministic JSON serialization for parameters. Recursively sorts object
+ * keys so that { a: 1, b: 2 } and { b: 2, a: 1 } produce the same string.
+ * This prevents false idempotency conflicts from key-insertion-order differences.
+ *
+ * This follows the same pattern as the canonicalize() helper in
+ * src/lib/control-plane/types.ts (which is module-private and not exported).
+ * The smallest local copy is introduced here to avoid modifying the control-plane
+ * module (scope discipline).
+ */
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map(canonicalize)
+  }
+  const sortedKeys = Object.keys(value as Record<string, unknown>).sort()
+  const result: Record<string, unknown> = {}
+  for (const key of sortedKeys) {
+    result[key] = canonicalize((value as Record<string, unknown>)[key])
+  }
+  return result
+}
+
+/**
+ * Canonical JSON string — uses canonicalize() for deterministic key ordering.
+ */
+function canonicalStringify(value: Record<string, unknown>): string {
+  return JSON.stringify(canonicalize(value))
 }
 
 /**
