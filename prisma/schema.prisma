@@ -2588,7 +2588,7 @@ model DeliveryConfirmation {
 //   - WHAT was the result (resultStatus + resultMetadataJson)
 //
 // IDENTITY: cuid (immutable). Idempotent creation via deterministic key
-// (tenantId, bundleId, nodeId, transformType, idempotencyKey) → concurrent
+// (tenantId, bundleId, nodeIdentity, transformType, idempotencyKey) → concurrent
 // calls converge.
 //
 // This is the hook for future TransformRegistry (catalog) and TransformRuntime

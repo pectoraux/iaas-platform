@@ -5271,3 +5271,16 @@ Verified results (real PostgreSQL/Neon):
 - Total static (Phase 13-14F): 132/132 PASS.
 - Existing data: 19 records preserved, all with valid namespaced encoding.
 - ESLint: clean. TypeScript: only pre-existing baselineEngine.
+
+---
+Task ID: 14F-migration-parity
+Agent: Implementation agent (migration parity correction)
+Task: PHASE 14F — migration parity + FK constraints + stale doc cleanup
+
+Work Log:
+- Found the migration had ZERO foreign key constraints — all Phase 14A-F FKs with explicit ON DELETE behavior (CASCADE/SET NULL) were missing.
+- Rewrote migration to include ALL FK constraints using DO $$ ... IF NOT EXISTS ... ADD CONSTRAINT ... ON DELETE {CASCADE|SET NULL} — idempotent and production-safe.
+- Covered all 13 Phase 14A-F models' FKs: Node (4 FKs), NodeNetworkMembership (2), Bundle (3), BundleDelivery (2), Route (4), RouteHop (3), NodeCapability (1), NodeReachability (1), TransportExecution (3), TransportAttempt (3), TransportCapability (1), DeliveryConfirmation (4), TransformRecord (3).
+- Created tests/phase-14f-migration-parity.test.ts: 23 static tests verifying all tables, FKs with correct ON DELETE, unique constraints, nodeIdentity NOT NULL, backfill, duplicate detection, no data destruction.
+- Fixed stale documentation: schema comment and contract doc §10/§11/§12 still referenced old identity key (tenantId, bundleId, nodeId, ...) — updated to (tenantId, bundleId, nodeIdentity, ...).
+- All 155 static tests pass. Key integration tests pass against Neon.

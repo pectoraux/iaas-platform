@@ -197,7 +197,7 @@ There is no `expired`, `revoked`, `superseded`, or `replayed` state. Once create
 
 Creation semantics:
 
-- A duplicate record (same `(tenantId, bundleId, nodeId, transformType, idempotencyKey)`) returns the **existing** record — idempotent replay (see §14).
+- A duplicate record (same `(tenantId, bundleId, nodeIdentity, transformType, idempotencyKey)`) returns the **existing** record — idempotent replay (see §14).
 - `createdAt` is `@default(now())` — persisted, deterministic per-insert. It records when the transform was registered.
 - `updatedAt` is `@updatedAt` for schema hygiene (Prisma convention); the service never calls `update()` on TransformRecord, so it is effectively immutable in practice. `updatedAt` is not a lifecycle signal — it is a schema invariant.
 
@@ -208,17 +208,17 @@ The service exposes `createTransformRecord`, `getTransformRecord`, `listTransfor
 ## 11. Invariants
 
 1. **Immutability.** TransformRecord is never updated. The service exposes `createTransformRecord`, `getTransformRecord`, `listTransformRecords`, `computeTransformFingerprint` — there is no `updateTransformRecord` or `deleteTransformRecord`. Only created or read.
-2. **Tenant isolation.** All queries filter by `tenantId`. The `@@index([tenantId])` and the `@@unique([tenantId, bundleId, nodeId, transformType, idempotencyKey])` enforce this at the data layer. The service accepts `tenantId` as its first argument on every function; it never trusts a `tenantId` from a request body.
+2. **Tenant isolation.** All queries filter by `tenantId`. The `@@index([tenantId])` and the `@@unique([tenantId, bundleId, nodeIdentity, transformType, idempotencyKey])` enforce this at the data layer. The service accepts `tenantId` as its first argument on every function; it never trusts a `tenantId` from a request body.
 3. **Node authorization.** If `nodeId` is provided, it must be an active Node in the tenant (T4 — `getNode` must succeed and `status === 'active'`). Inactive Nodes cannot apply transforms. A null `nodeId` is permitted (system-applied transform).
 4. **Provenance completeness.** `inputHash` + `outputHash` + `transformType` + `transformVersion` + `parameters` are all required (the service throws `ValidationError` on missing `transformType`, `transformVersion`, `inputHash`, `outputHash`, or `idempotencyKey`). `parameters` defaults to `{}` (empty canonical JSON) if not provided.
-5. **Idempotency.** Same `(tenantId, bundleId, nodeId, transformType, idempotencyKey)` → same record. Concurrent creations converge via `P2002` catch + re-read (see §14).
+5. **Idempotency.** Same `(tenantId, bundleId, nodeIdentity, transformType, idempotencyKey)` → same record. Concurrent creations converge via `P2002` catch + re-read (see §14).
 6. **No mutation of Bundle / Route / Node / TransportExecution / TransportAttempt / DeliveryConfirmation.** The service reads Bundle (via `getBundle`) and Node (via `getNode`) for validation; it never writes them. It does not import or write to Route, TransportExecution, TransportAttempt, or DeliveryConfirmation.
 
 ---
 
 ## 12. Security / Tenant Boundary
 
-- **Tenant isolation (T1):** all queries filter by `tenantId`. The service accepts `tenantId` as its first argument on every function; it never trusts a `tenantId` from a request body. The `@@unique([tenantId, bundleId, nodeId, transformType, idempotencyKey])` and `@@index([tenantId])` enforce this at the data layer.
+- **Tenant isolation (T1):** all queries filter by `tenantId`. The service accepts `tenantId` as its first argument on every function; it never trusts a `tenantId` from a request body. The `@@unique([tenantId, bundleId, nodeIdentity, transformType, idempotencyKey])` and `@@index([tenantId])` enforce this at the data layer.
 - **Node must be active if provided (T4):** `getNode(tenantId, nodeId)` must succeed and `status === 'active'`. Inactive Nodes cannot apply transforms. The error message is explicit: `Node ${nodeId} is ${node.status}; only active Nodes can apply transforms`.
 - **No encryption / authentication in TransformRecord itself.** `inputHash` and `outputHash` are **integrity proofs** (SHA-256 of the input and output payloads), **not cryptographic signatures**. They prove the recorded input/output hashes match the actual payloads at audit time; they do not prove that the Node is who it claims to be, nor that the transform was correctly executed. A future security layer may add signatures.
 - **The record is the security seam.** A future TransformRuntime may verify that the recorded `inputHash` → `outputHash` transition matches what the transform actually produces (i.e. re-execute and compare). TransformRecord provides the seam; it does not implement the verifier.
