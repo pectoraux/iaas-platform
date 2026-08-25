@@ -22,9 +22,13 @@ Architecture Version: `IAAS-GOV-ARCH-1`
 
 Dependencies: none
 
+Requirements: `GOV-001` through `GOV-008`; acceptance criteria `W001-AC01` through `W001-AC13`.
+
 Objective: establish persistent governance/specification without changing IAAS production behavior.
 
-Scope: `spec/` governance documents and their executable consistency gate.
+Repository Scope: `spec/` governance documents and their executable consistency gate.
+
+Architecture Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` (no change without an approved ACR); no IAAS production implementation; no domain architecture creation (pending WORK-002).
 
 Out of Scope: domain feature implementation, migrations, runtime changes, vertical networks, Domain Architecture V1.
 
@@ -63,8 +67,23 @@ Architecture Version: `IAAS-GOV-ARCH-1`
 
 Dependencies: `WORK-001`
 
+Requirements: truth-classified repository baseline covering architecture documents, code, schema, tests, CI, and history; deliverables `docs/architecture/REPOSITORY-BASELINE.md`, canonical Domain Architecture V1, domain requirements, domain dependency graph.
+
 Objective: audit architecture documents, code, schema, tests, CI, and history into a truth-classified repository baseline and canonical `IAAS-DOM-ARCH-1`.
 
-Required deliverables: `docs/architecture/REPOSITORY-BASELINE.md`, canonical Domain Architecture V1, domain requirements, domain dependency graph.
+Repository Scope: `docs/architecture/` baseline documents and the `spec/` domain architecture layer, as authorized by the WORK-002 Work Order.
+
+Architecture Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` governs all changes; the domain architecture is derived only from the verified repository baseline; domain architecture changes require an approved ACR and a new version.
 
 Out of Scope: broad refactors, unrelated feature expansion, and future-feature implementation.
+
+Acceptance Criteria:
+
+- `W002-AC01` repository baseline exists and is truth-classified.
+- `W002-AC02` canonical `IAAS-DOM-ARCH-1` is published and registered.
+- `W002-AC03` domain requirements and domain dependency graph exist.
+- `W002-AC04` no scope beyond the repository baseline audit and domain architecture V1.
+
+Required Verification: repository baseline inspection against truth classifications; automated specification consistency validation; independent Architect Review after WORK-001 is VERIFIED.
+
+Definition of Done: repository baseline committed; canonical domain architecture approved by the Architect; domain requirements and dependency graph committed; Work Item VERIFIED.

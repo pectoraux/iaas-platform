@@ -99,6 +99,7 @@ describe('spec consistency validator — positive case', () => {
     expect(first.stdout).toContain('architecture=IAAS-GOV-ARCH-1')
     expect(first.stdout).toContain('required-files=10')
     expect(first.stdout).toContain('work-items=2')
+    expect(first.stdout).toContain('work-item-schema-fields=11')
     expect(first.stdout).toContain('work001-acceptance-criteria=13')
     expect(first.stdout).toContain('dependency-edges=1')
     expect(first.stdout).toContain('checks=16')
@@ -192,12 +193,12 @@ describe('spec consistency validator — negative cases (WORK-001 Required Tests
     const specDir = makeTempSpecCopy()
     rewrite(specDir, 'work-items.md', (content) =>
       content.replace(
-        'Scope: `spec/` governance documents and their executable consistency gate.',
-        'Scope: `spec/` governance documents, `prisma/schema.prisma` migrations, and production services.',
+        'Repository Scope: `spec/` governance documents and their executable consistency gate.',
+        'Repository Scope: `spec/` governance documents, `prisma/schema.prisma` migrations, and production services.',
       ),
     )
     const result = runValidator(specDir)
-    expectFailure(result, 'SC-15', "WORK-001 'Scope' declares forbidden production implementation scope")
+    expectFailure(result, 'SC-15', "WORK-001 'Repository Scope' declares forbidden production implementation scope")
   })
 
   test('fails when the WORK-001 production freeze is removed from requirements (SC-15)', () => {
@@ -288,7 +289,69 @@ describe('spec consistency validator — negative cases (WORK-001 Required Tests
       content.replace('Dependencies: none\n', ''),
     )
     const result = runValidator(specDir)
-    expectFailure(result, 'SC-06', 'WORK-001 is missing required field: Dependencies')
+    expectFailure(result, 'SC-06', 'WORK-001 is missing required schema field: Dependencies')
+  })
+
+  // Architect Review correction AR-001: the complete Work Item schema is
+  // enforced for EVERY Work Item. These negative cases prove it.
+  test('fails when a schema field required for every Work Item is missing (AR-001, SC-06)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'work-items.md', (content) =>
+      content.replace(
+        'Architecture Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` governs all changes;',
+        'Governance Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` governs all changes;',
+      ),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-06', 'WORK-002 is missing required schema field: Architecture Constraints')
+  })
+
+  test('fails when a Work Item declares an empty schema field value (AR-001, SC-06)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'work-items.md', (content) =>
+      content.replace(
+        'Objective: establish persistent governance/specification without changing IAAS production behavior.',
+        'Objective:',
+      ),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-06', 'declares an empty value for required schema field: Objective')
+  })
+
+  test('fails when a required schema section is missing from a Work Item (AR-001, SC-06)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'work-items.md', (content) =>
+      content.replace('Definition of Done: repository baseline committed;', 'Completion: repository baseline committed;'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-06', 'WORK-002 is missing required schema section: Definition of Done')
+  })
+
+  test('fails when a Work Item declares no acceptance criterion IDs (AR-001, SC-06)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'work-items.md', (content) =>
+      content.replace(/`W002-AC\d+`/g, '`AC`'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-06', 'WORK-002 declares no acceptance criterion IDs')
+  })
+
+  test('fails when WORK-001 Required Verification loses a required activity (AR-001, SC-08)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'work-items.md', (content) =>
+      content.replace('- CI execution of the consistency check;\n', ''),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-08', 'missing required activity: CI execution')
+  })
+
+  test('fails when WORK-001 Definition of Done loses a required element (AR-001, SC-08)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'work-items.md', (content) =>
+      content.replace('architect approves', 'architect agrees'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-08', 'missing required element: architect approves')
   })
 
   test('fails when the persistent WORK-001 Work Order loses its verification gate (SC-16)', () => {

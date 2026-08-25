@@ -8,6 +8,13 @@
 // Implementation" items 2–11. Each check below carries a stable check ID
 // (SC-01 … SC-16) so failures are mechanically attributable.
 //
+// Architect Review corrections applied to this validator:
+//   - AR-001: SC-06 enforces the COMPLETE Work Item schema declared in
+//     spec/work-items.md ("Schema") for EVERY Work Item, not a subset.
+//   - AR-002: the GitHub-state one-active-PR invariant (W001-AC09 /
+//     GOV-005 / frozen rule 8) is established by the companion script
+//     scripts/pr-invariant-check.ts, executed by the same CI job.
+//
 // Contract (WORK-001 Required Implementation item 13):
 //   - exits 0 and prints a deterministic success message when the
 //     specification is internally consistent;
@@ -93,6 +100,44 @@ const AC_PATTERN = /^W001-AC\d{2}$/
 const EXPECTED_WORK001_ACS: readonly string[] = Array.from({ length: 13 }, (_, i) =>
   `W001-AC${String(i + 1).padStart(2, '0')}`,
 )
+
+// Work Item schema (spec/work-items.md "Schema" / GOV-002). Every Work Item
+// MUST define all of these. Value fields must carry a non-empty value on
+// their field line; section fields must appear as their own heading line.
+const SCHEMA_VALUE_FIELDS: ReadonlyArray<string> = [
+  'Objective',
+  'Requirements',
+  'Dependencies',
+  'Architecture Constraints',
+  'Repository Scope',
+  'Out of Scope',
+]
+const SCHEMA_SECTION_FIELDS: ReadonlyArray<string> = [
+  'Acceptance Criteria',
+  'Required Verification',
+  'Definition of Done',
+]
+// Work ID (section heading) + Governing Architecture Version (SC-05) plus
+// the value and section fields above.
+const SCHEMA_FIELD_COUNT = 2 + SCHEMA_VALUE_FIELDS.length + SCHEMA_SECTION_FIELDS.length
+
+// WORK-001 Required Verification activities and Definition of Done elements
+// (GOV-002 traceability). Field PRESENCE for every Work Item is SC-06; this
+// content is pinned by SC-08.
+const WORK001_REQUIRED_VERIFICATION_ACTIVITIES: ReadonlyArray<string> = [
+  'repository specification inspection',
+  'automated specification consistency check',
+  'negative tests',
+  'CI execution',
+  'PR diff inspection',
+  'independent Architect Review',
+]
+const WORK001_DOD_ELEMENTS: ReadonlyArray<string> = [
+  'production diff is empty',
+  'architect approves',
+  'PR merged',
+  'VERIFIED',
+]
 
 // Lifecycle states from spec/architecture-lock.md "Workflow" plus `BLOCKED`,
 // the dependency-derived state used by spec/work-items.md / dependency-graph.md.
@@ -200,14 +245,7 @@ interface WorkItem {
   architectureVersionCount: number
   dependencies: string[]
   acceptanceCriteria: string[]
-  hasObjective: boolean
-  hasDependenciesField: boolean
-  hasOutOfScope: boolean
-  hasScope: boolean
-  hasAcceptanceCriteriaSection: boolean
-  hasRequiredVerification: boolean
-  hasDefinitionOfDone: boolean
-  scopeLine: string | null
+  repositoryScopeLine: string | null
 }
 
 function fieldValue(body: string, field: string): string | null {
@@ -228,6 +266,17 @@ function allBackticked(text: string): string[] {
   const out: string[] = []
   for (const match of matches) out.push(match[1])
   return out
+}
+
+/** Content of the `Acceptance Criteria:` section (list of AC IDs). */
+function acceptanceCriteriaSection(body: string): string {
+  const match = body.match(/^Acceptance Criteria:[ \t]*$/m)
+  if (!match || match.index === undefined) return ''
+  const rest = body.slice(match.index + match[0].length)
+  // The section ends at the next field/section declaration line
+  // (e.g. `Required Verification:`). List items do not match.
+  const endMatch = rest.match(/^(?:[-*]\s+)?[A-Z][A-Za-z /]*:/m)
+  return endMatch && endMatch.index !== undefined ? rest.slice(0, endMatch.index) : rest
 }
 
 function parseWorkItems(workItemsMd: string): WorkItem[] {
@@ -264,15 +313,8 @@ function finalizeWorkItem(section: { id: string; lines: string[] }): WorkItem {
     architectureVersion: firstBackticked(fieldValue(body, 'Architecture Version')),
     architectureVersionCount: versionLines.length,
     dependencies,
-    acceptanceCriteria: allBackticked(body).filter((t) => AC_PATTERN.test(t)),
-    hasObjective: fieldValue(body, 'Objective') !== null,
-    hasDependenciesField: dependenciesRaw !== null,
-    hasOutOfScope: fieldValue(body, 'Out of Scope') !== null,
-    hasScope: fieldValue(body, 'Scope') !== null,
-    hasAcceptanceCriteriaSection: /^Acceptance Criteria:/m.test(body),
-    hasRequiredVerification: /^Required Verification:/m.test(body),
-    hasDefinitionOfDone: /^Definition of Done:/m.test(body),
-    scopeLine: fieldValue(body, 'Scope'),
+    acceptanceCriteria: allBackticked(acceptanceCriteriaSection(body)).filter((t) => AC_PATTERN.test(t)),
+    repositoryScopeLine: fieldValue(body, 'Repository Scope'),
   }
 }
 
@@ -406,19 +448,41 @@ for (const item of workItems) {
   }
 }
 
-// SC-06 — required Work Item fields (per the schema in spec/work-items.md).
+// SC-06 — complete Work Item schema (spec/work-items.md "Schema" / GOV-002),
+// enforced for EVERY Work Item: Work ID (section heading), Objective,
+// Governing Architecture Version (exactly one — SC-05), Requirements,
+// Acceptance Criteria, Dependencies, Architecture Constraints, Repository
+// Scope, Out of Scope, Required Verification, Definition of Done.
+// (Architect Review correction AR-001: the schema is no longer enforced for
+// a subset of fields or a subset of Work Items.)
+if (workItems.length === 0) {
+  error('SC-06', 'spec/work-items.md declares no Work Items')
+}
 for (const item of workItems) {
-  if (!item.hasObjective) error('SC-06', `Work Item ${item.id} is missing required field: Objective`)
+  for (const field of SCHEMA_VALUE_FIELDS) {
+    const value = fieldValue(item.body, field)
+    if (value === null) {
+      error('SC-06', `Work Item ${item.id} is missing required schema field: ${field}`)
+    } else if (value.length === 0) {
+      error('SC-06', `Work Item ${item.id} declares an empty value for required schema field: ${field}`)
+    }
+  }
+  for (const field of SCHEMA_SECTION_FIELDS) {
+    if (!new RegExp(`^${field}:`, 'm').test(item.body)) {
+      error('SC-06', `Work Item ${item.id} is missing required schema section: ${field}`)
+    }
+  }
+  const acPrefix = item.id.replace(/^WORK-/, 'W')
+  if (!new RegExp('`' + acPrefix + '-AC\\d{2}`').test(item.body)) {
+    error(
+      'SC-06',
+      `Work Item ${item.id} declares no acceptance criterion IDs (expected \`${acPrefix}-ACnn\`)`,
+    )
+  }
   if (item.status === null) {
     error('SC-06', `Work Item ${item.id} is missing required field: Status`)
   } else if (!ALLOWED_STATUSES.has(item.status)) {
     error('SC-06', `Work Item ${item.id} declares unknown Status: ${item.status}`)
-  }
-  if (!item.hasDependenciesField) {
-    error('SC-06', `Work Item ${item.id} is missing required field: Dependencies`)
-  }
-  if (!item.hasOutOfScope) {
-    error('SC-06', `Work Item ${item.id} is missing required field: Out of Scope`)
   }
 }
 
@@ -447,19 +511,20 @@ if (work001) {
   error('SC-07', 'Work Item WORK-001 is not declared in spec/work-items.md')
 }
 
-// SC-08 — WORK-001 required verification sections (GOV-002 traceability).
+// SC-08 — WORK-001 Required Verification activities and Definition of Done
+// elements (GOV-002 traceability). Schema PRESENCE for every Work Item is
+// enforced by SC-06; SC-08 pins WORK-001's verification and completion
+// CONTENT so the traceability requirement cannot be vacuously satisfied.
 if (work001) {
-  if (!work001.hasAcceptanceCriteriaSection) {
-    error('SC-08', 'WORK-001 is missing required field: Acceptance Criteria')
+  for (const activity of WORK001_REQUIRED_VERIFICATION_ACTIVITIES) {
+    if (!work001.body.includes(activity)) {
+      error('SC-08', `WORK-001 Required Verification is missing required activity: ${activity}`)
+    }
   }
-  if (!work001.hasRequiredVerification) {
-    error('SC-08', 'WORK-001 is missing required field: Required Verification')
-  }
-  if (!work001.hasDefinitionOfDone) {
-    error('SC-08', 'WORK-001 is missing required field: Definition of Done')
-  }
-  if (!work001.hasScope) {
-    error('SC-08', 'WORK-001 is missing required field: Scope')
+  for (const element of WORK001_DOD_ELEMENTS) {
+    if (!work001.body.includes(element)) {
+      error('SC-08', `WORK-001 Definition of Done is missing required element: ${element}`)
+    }
   }
 }
 
@@ -626,15 +691,15 @@ if (work001) {
   if (!/domain feature implementation/i.test(outOfScope) || !/migration/i.test(outOfScope)) {
     error('SC-15', "WORK-001 'Out of Scope' must exclude domain feature implementation and migrations")
   }
-  const scopeLine = work001.scopeLine ?? ''
+  const scopeLine = work001.repositoryScopeLine ?? ''
   if (!scopeLine.includes('spec/')) {
-    error('SC-15', "WORK-001 'Scope' must be limited to the spec/ governance layer and its consistency gate")
+    error('SC-15', "WORK-001 'Repository Scope' must be limited to the spec/ governance layer and its consistency gate")
   }
   const forbidden = scopeLine.match(PRODUCTION_SCOPE_MARKERS)
   if (forbidden) {
     error(
       'SC-15',
-      `WORK-001 'Scope' declares forbidden production implementation scope (matched: ${forbidden[0]})`,
+      `WORK-001 'Repository Scope' declares forbidden production implementation scope (matched: ${forbidden[0]})`,
     )
   }
 }
@@ -701,6 +766,7 @@ process.stdout.write(
   `architecture=${archVersion ?? 'unknown'} ` +
     `required-files=${REQUIRED_SPEC_FILES.length} ` +
     `work-items=${workItems.length} ` +
+    `work-item-schema-fields=${SCHEMA_FIELD_COUNT} ` +
     `work001-acceptance-criteria=${EXPECTED_WORK001_ACS.length} ` +
     `dependency-edges=${declaredKeySet.size} ` +
     `checks=16\n`,
