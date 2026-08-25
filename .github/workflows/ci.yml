@@ -1,8 +1,10 @@
 # =============================================================================
-# CI Pipeline — Phase 5 CI Gate
+# CI Pipeline — Phase 5 CI Gate + WORK-001 Specification Consistency Gate
 # =============================================================================
-# Runs on every push to main and every PR. The pipeline has four stages:
+# Runs on every push to main and every PR. The pipeline has five stages:
 #
+#   0. spec-validation — WORK-001 governance/specification consistency gate
+#                        (validator + negative tests + diff scope enforcement)
 #   1. lint           — ESLint code quality
 #   2. typecheck      — TypeScript strict compilation
 #   3. architecture   — Regex architecture contract tests (no DB needed)
@@ -29,6 +31,54 @@ env:
   DATABASE_URL: postgresql://postgres:postgres@localhost:5432/iaas_test?schema=public
 
 jobs:
+  # ===========================================================================
+  # WORK-001 — Specification Consistency Validation
+  # ===========================================================================
+  # Governance gate for the persistent spec/ layer (IAAS-GOV-ARCH-1).
+  #   1. runs the executable specification consistency validator
+  #   2. runs the validator negative tests (proof it rejects inconsistencies)
+  #   3. enforces the WORK-001 diff scope: only governance/specification
+  #      artifacts may change — no production IAAS implementation changes
+  # The validator and its tests are dependency-free (node:* builtins only),
+  # so this job does not install the application dependency tree.
+  spec-validation:
+    name: Specification Consistency Validator (WORK-001)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Run specification consistency validator
+        run: bun run spec:validate
+      - name: Run specification validator negative tests
+        run: bun test tests/spec-consistency-validator.test.ts --timeout 120000
+      - name: Enforce WORK-001 diff scope (no production IAAS changes)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          BASE="origin/${{ github.base_ref }}"
+          if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+            echo "Base ref $BASE not available; skipping diff scope check."
+            exit 0
+          fi
+          CHANGED="$(git diff --name-only "$BASE"...HEAD | sort -u)"
+          if [ -z "$CHANGED" ]; then
+            echo "No changes relative to $BASE; WORK-001 diff scope check passed."
+            exit 0
+          fi
+          VIOLATIONS="$(printf '%s\n' "$CHANGED" | grep -Ev '^(spec/|scripts/spec-validator\.ts$|tests/spec-consistency-validator\.test\.ts$|\.github/workflows/ci\.yml$|package\.json$)' || true)"
+          if [ -n "$VIOLATIONS" ]; then
+            echo "WORK-001 SCOPE VIOLATION: files outside the allowed governance scope were changed:"
+            printf '%s\n' "$VIOLATIONS"
+            exit 1
+          fi
+          echo "WORK-001 diff scope check passed: only governance/specification artifacts changed."
+          echo "Changed files:"
+          printf '%s\n' "$CHANGED"
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
