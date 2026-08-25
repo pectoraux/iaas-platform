@@ -4,7 +4,8 @@
 # Runs on every push to main and every PR. The pipeline has five stages:
 #
 #   0. spec-validation — WORK-001 governance/specification consistency gate
-#                        (validator + negative tests + diff scope enforcement)
+#                        (validator + negative tests + one-active-PR invariant
+#                        + fail-closed diff-scope enforcement)
 #   1. lint           — ESLint code quality
 #   2. typecheck      — TypeScript strict compilation
 #   3. architecture   — Regex architecture contract tests (no DB needed)
@@ -37,8 +38,13 @@ jobs:
   # Governance gate for the persistent spec/ layer (IAAS-GOV-ARCH-1).
   #   1. runs the executable specification consistency validator
   #   2. runs the validator negative tests (proof it rejects inconsistencies)
-  #   3. enforces the WORK-001 diff scope: only governance/specification
-  #      artifacts may change — no production IAAS implementation changes
+  #      plus the one-active-PR invariant negative tests (AR-002)
+  #   3. verifies the one-active-PR invariant (W001-AC09 / GOV-005) against
+  #      LIVE GitHub state — fails closed if it cannot be established (AR-002)
+  #   4. enforces the WORK-001 diff scope: only governance/specification
+  #      artifacts may change — no production IAAS implementation changes.
+  #      The guard FAILS CLOSED (AR-003): an unresolvable diff base is a
+  #      failure, never a skip.
   # The validator and its tests are dependency-free (node:* builtins only),
   # so this job does not install the application dependency tree.
   spec-validation:
@@ -54,22 +60,27 @@ jobs:
       - name: Run specification consistency validator
         run: bun run spec:validate
       - name: Run specification validator negative tests
-        run: bun test tests/spec-consistency-validator.test.ts --timeout 120000
+        run: bun test tests/spec-consistency-validator.test.ts tests/pr-invariant-check.test.ts --timeout 120000
+      - name: Verify one-active-PR invariant (W001-AC09, live GitHub state)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bun scripts/pr-invariant-check.ts --repo ${{ github.repository }}
       - name: Enforce WORK-001 diff scope (no production IAAS changes)
         if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           BASE="origin/${{ github.base_ref }}"
           if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
-            echo "Base ref $BASE not available; skipping diff scope check."
-            exit 0
+            echo "WORK-001 SCOPE CHECK FAILED (fail-closed): cannot resolve diff base '$BASE'."
+            echo "The production-scope guard must never be skipped; failing instead of passing without a verifiable base."
+            exit 1
           fi
           CHANGED="$(git diff --name-only "$BASE"...HEAD | sort -u)"
           if [ -z "$CHANGED" ]; then
             echo "No changes relative to $BASE; WORK-001 diff scope check passed."
             exit 0
           fi
-          VIOLATIONS="$(printf '%s\n' "$CHANGED" | grep -Ev '^(spec/|scripts/spec-validator\.ts$|tests/spec-consistency-validator\.test\.ts$|\.github/workflows/ci\.yml$|package\.json$)' || true)"
+          VIOLATIONS="$(printf '%s\n' "$CHANGED" | grep -Ev '^(spec/|scripts/spec-validator\.ts$|scripts/pr-invariant-check\.ts$|tests/spec-consistency-validator\.test\.ts$|tests/pr-invariant-check\.test\.ts$|\.github/workflows/ci\.yml$|package\.json$)' || true)"
           if [ -n "$VIOLATIONS" ]; then
             echo "WORK-001 SCOPE VIOLATION: files outside the allowed governance scope were changed:"
             printf '%s\n' "$VIOLATIONS"
