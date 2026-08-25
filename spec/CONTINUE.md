@@ -1,0 +1,1 @@
+Continue execution only through the Work Item workflow. WORK-002 is blocked until WORK-001 is VERIFIED.
