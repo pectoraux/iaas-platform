@@ -1,0 +1,1 @@
+Governance foundation is documented in the spec directory. See README.md for the authoritative index.
