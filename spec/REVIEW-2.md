@@ -1,0 +1,1 @@
+Architect review is required before WORK-001 can be marked VERIFIED.
