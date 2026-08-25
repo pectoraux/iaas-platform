@@ -24,7 +24,7 @@ Dependencies: none
 
 Objective: establish persistent governance/specification without changing IAAS production behavior.
 
-Scope: `spec/` governance documents.
+Scope: `spec/` governance documents and their executable consistency gate.
 
 Out of Scope: domain feature implementation, migrations, runtime changes, vertical networks, Domain Architecture V1.
 
@@ -48,11 +48,12 @@ Required Verification:
 
 - repository specification inspection against every W001 acceptance criterion;
 - automated specification consistency check covering required documents, stable IDs, architecture-version references, dependency resolution, and forbidden WORK-001 production-scope changes;
+- negative tests proving the validator rejects representative specification inconsistencies;
 - CI execution of the consistency check;
 - PR diff inspection confirming only governance/specification artifacts changed;
 - independent Architect Review after verification evidence is available.
 
-Definition of Done: specification committed; automated consistency checks pass; CI records the pass; production diff is empty; architect approves; PR merged; Work Item VERIFIED.
+Definition of Done: specification committed; automated consistency checks pass; negative tests pass; CI records the pass; production diff is empty; architect approves; PR merged; Work Item VERIFIED.
 
 ## WORK-002 — Repository Baseline and Domain Architecture V1
 
