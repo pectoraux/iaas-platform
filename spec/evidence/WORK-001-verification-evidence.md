@@ -4,13 +4,41 @@
 - Architecture Version: `IAAS-GOV-ARCH-1`
 - Implementer: Z.ai
 - Prepared: 2026-08-25 (UTC)
-- Updated: 2026-08-25 (UTC) — second submission round: Architect Review corrections AR-001, AR-002, AR-003
+- Updated: 2026-08-25 (UTC) — third submission round: objective-evidence reconciliation for Architect Review `REQUEST_CHANGES` (validator / negative tests / CI evidence)
 - Status: **submitted for independent verification and Architect Review**
 
 > Per `spec/verification.md`, this document records objective evidence
 > (commands, outputs, CI runs, diffs). It is implementer-collected evidence.
 > It does not establish `VERIFIED` — that decision belongs to verification and
 > Architect Review, which remain separate from this submission (GOV-003/GOV-004).
+
+## 0. Architect Review REQUEST_CHANGES — Objective Evidence Reconciliation
+
+The Architect's independent review of the prior submission returned
+`REQUEST_CHANGES`, citing three items as `MISSING`. Each is addressed below
+with independently reproducible objective evidence (no narrative substitute).
+
+| Architect verdict item | Objective evidence (reproducible) |
+|---|---|
+| Executable consistency validator: `MISSING` | `scripts/spec-validator.ts` exists on this branch (775 lines, 16 checks `SC-01`…`SC-16`). `bun run spec:validate` exits `0` with a deterministic success line (section 2). CI step 4 "Run specification consistency validator" = `success` (section 3). |
+| Negative validator tests: `MISSING` | `tests/spec-consistency-validator.test.ts` (25 tests) + `tests/pr-invariant-check.test.ts` (18 tests) = 43 tests, **43 pass / 0 fail** locally and in CI (section 4). CI step 5 "Run specification validator negative tests" = `success` (section 3). |
+| CI evidence: `MISSING` | GitHub Actions run `32841900474` (head `5c6ed16`, = current PR HEAD), job **Specification Consistency Validator (WORK-001)** `conclusion: success`, all 7 substantive steps `success` (section 3). |
+
+**On the overall red workflow run.** The workflow run `32841900474` has overall
+conclusion `failure`, but ONLY because of three pre-existing production
+baseline jobs that are explicitly out of WORK-001 scope ("Do not change IAAS
+production services"):
+
+- `Typecheck` — failure (pre-existing on `main`, run `32511416648`, commit `db61a940`)
+- `Architecture Contract Tests` — failure (pre-existing on `main`)
+- `PostgreSQL Integration Tests` — failure (pre-existing on `main`)
+
+These jobs depend on production IAAS code that WORK-001 does not touch. The
+WORK-001 `spec-validation` job (the only job WORK-001 is accountable for) is
+green, and the CI diff-scope guard (step 7, `success`) mechanically proves no
+production file changed. Fixing the pre-existing production failures would
+violate the Work Order's scope containment and is reserved for a later Work
+Item.
 
 ## 1. Exact Validator Command
 
@@ -21,65 +49,78 @@ bun run spec:validate
 (equivalently: `bun scripts/spec-validator.ts`; the validator is
 dependency-free and accepts `--spec-dir <path>` for negative-test isolation.)
 
-## 2. Successful Command Output (local, commit d3eb4d70)
+## 2. Successful Command Output (local, current HEAD `5c6ed16`)
 
 ```text
 $ bun run spec:validate
-$ bun scripts/spec-validator.ts
 SPEC VALIDATION PASSED
-architecture=IAAS-GOV-ARCH-1 required-files=10 work-items=2 work001-acceptance-criteria=13 dependency-edges=1 checks=16
+architecture=IAAS-GOV-ARCH-1 required-files=10 work-items=2 work-item-schema-fields=11 work001-acceptance-criteria=13 dependency-edges=1 checks=16
 ```
 
 Exit code: `0`. Output is deterministic (byte-identical across repeated runs;
-asserted by the positive test).
+asserted by the positive test and re-confirmed manually below).
+
+Fresh independent reproduction (`2026-08-25`, `bun 1.3.14`, HEAD `5c6ed16`):
+
+```text
+$ bun scripts/spec-validator.ts ; echo "exit=$?"
+SPEC VALIDATION PASSED
+architecture=IAAS-GOV-ARCH-1 required-files=10 work-items=2 work-item-schema-fields=11 work001-acceptance-criteria=13 dependency-edges=1 checks=16
+exit=0
+
+$ bun test tests/spec-consistency-validator.test.ts tests/pr-invariant-check.test.ts --timeout 120000
+ 43 pass
+ 0 fail
+ 183 expect() calls
+Ran 43 tests across 2 files. [1310.00ms]
+
+$ A=$(bun scripts/spec-validator.ts 2>/dev/null); B=$(bun scripts/spec-validator.ts 2>/dev/null); [ "$A" = "$B" ] && echo DETERMINISTIC
+DETERMINISTIC
+```
+
+Note: the success line carries `work-item-schema-fields=11`, introduced by the
+AR-001 complete-schema enforcement correction. (The first submission round's
+success line omitted this counter; it is present from the AR-001 round onward.)
 
 ## 3. CI Job/Run URL and Result
 
-- Workflow run (implementation commit `d3eb4d70`):
+### Current HEAD (`5c6ed16`) — freshest green `spec-validation` run
+
+- Workflow run: https://github.com/pectoraux/iaas-platform/actions/runs/32841900474
+  - head_sha: `5c6ed1650be0ac4c85ddcf304f8f96b2b72b65ef` (= current PR HEAD)
+  - event: `pull_request`
+  - overall conclusion: `failure` (pre-existing production jobs only — see section 0)
+- Job: **Specification Consistency Validator (WORK-001)** — `conclusion: success`
+  - Job URL: https://github.com/pectoraux/iaas-platform/actions/runs/32841900474/job/97783050861
+  - job_id: `97783050861`
+  - All substantive steps `success`:
+    1. Set up job — `success`
+    2. Run actions/checkout@v4 — `success`
+    3. Run oven-sh/setup-bun@v2 — `success`
+    4. Run specification consistency validator — `success`
+    5. Run specification validator negative tests — `success`
+    6. Verify one-active-PR invariant (W001-AC09, live GitHub state) — `success`
+    7. Enforce WORK-001 diff scope (no production IAAS changes) — `success`
+- Other jobs in the same run: `Lint` `success`; `Typecheck` / `Architecture
+  Contract Tests` / `PostgreSQL Integration Tests` `failure` (pre-existing
+  production baseline, out of WORK-001 scope — unchanged from `main`).
+
+### Prior green `spec-validation` runs (chronological)
+
+- Workflow run (AR-001/AR-002/AR-003 correction commits, head `c000b9f`):
+  https://github.com/pectoraux/iaas-platform/actions/runs/32841488946
+  - Job: **Specification Consistency Validator (WORK-001)** — `success`
+  - Job URL: https://github.com/pectoraux/iaas-platform/actions/runs/32841488946/job/97781766086
+  - Steps: validator `success` (`SPEC VALIDATION PASSED`, `work-item-schema-fields=11`);
+    negative tests `success` (**43 pass / 0 fail** = 25 spec-consistency + 18
+    PR-invariant); one-active-PR invariant `success` (live GitHub state);
+    fail-closed diff-scope enforcement `success`.
+- Workflow run (first submission, head `d3eb4d70`):
   https://github.com/pectoraux/iaas-platform/actions/runs/32837200309
-- Job: **Specification Consistency Validator (WORK-001)** — `success`
+  - Job: **Specification Consistency Validator (WORK-001)** — `success`
   - Job URL: https://github.com/pectoraux/iaas-platform/actions/runs/32837200309/job/97768602064
   - Steps: validator `success`; negative tests `success` (19 pass / 0 fail);
     diff-scope enforcement `success`.
-- CI validator output (from the job log):
-
-  ```text
-  SPEC VALIDATION PASSED
-  architecture=IAAS-GOV-ARCH-1 required-files=10 work-items=2 work001-acceptance-criteria=13 dependency-edges=1 checks=16
-  ```
-
-- CI diff-scope guard output (from the job log):
-
-  ```text
-  WORK-001 diff scope check passed: only governance/specification artifacts changed.
-  Changed files:
-  .github/workflows/ci.yml
-  package.json
-  scripts/spec-validator.ts
-  spec/README.md
-  spec/architecture-change-request.md
-  spec/architecture-lock.md
-  spec/architecture.md
-  spec/dependency-graph.md
-  spec/requirements.md
-  spec/verification.md
-  spec/work-items.md
-  spec/work-order-template.md
-  spec/work-orders/WORK-001.md
-  tests/spec-consistency-validator.test.ts
-  ```
-
-### Pre-existing CI baseline failures (OBSERVED, not caused by WORK-001)
-
-The `Typecheck`, `Architecture Contract Tests`, and `PostgreSQL Integration
-Tests` jobs fail on this run. These failures are pre-existing on `main`
-(run https://github.com/pectoraux/iaas-platform/actions/runs/32511416648,
-commit `db61a940`, same three jobs failing) and are unrelated to WORK-001:
-the WORK-001 diff touches no production code (mechanically enforced by the
-diff-scope guard above). The pre-existing failures are repository baseline
-material for WORK-002's truth-classified audit and are explicitly out of
-WORK-001 scope ("Do not change IAAS production services"). Fixing them here
-would violate the Work Order's scope containment.
 
 ## 4. Negative Test Evidence
 
@@ -175,7 +216,7 @@ $ git diff --stat origin/main...HEAD
   spec/architecture-lock.md                       |  34 ++
   spec/architecture.md                            |  12 +
   spec/dependency-graph.md                        |  13 +
- spec/evidence/WORK-001-verification-evidence.md (this file)
+  spec/evidence/WORK-001-verification-evidence.md | NNN ++   (this file; count grows with each evidence refresh)
   spec/requirements.md                            |  45 ++
   spec/verification.md                            |  21 +
   spec/work-items.md                              |  89 +++
@@ -184,6 +225,11 @@ $ git diff --stat origin/main...HEAD
   tests/pr-invariant-check.test.ts                | 273 +++++++++
   tests/spec-consistency-validator.test.ts        | 365 +++++++++++
 ```
+
+The exact line counts are reproducible on the PR branch with
+`git diff --stat origin/main...HEAD`. The file LIST and the absence of any
+production path are stable and are what the CI diff-scope guard (section 3,
+step 7) mechanically enforces on every push.
 
 Observations:
 
