@@ -44,7 +44,15 @@ Acceptance Criteria:
 - `W001-AC12` next Work Item is dependency-derived.
 - `W001-AC13` no IAAS production code changes in WORK-001.
 
-Definition of Done: specification committed; checks pass; production diff is empty; architect approves; PR merged; Work Item VERIFIED.
+Required Verification:
+
+- repository specification inspection against every W001 acceptance criterion;
+- automated specification consistency check covering required documents, stable IDs, architecture-version references, dependency resolution, and forbidden WORK-001 production-scope changes;
+- CI execution of the consistency check;
+- PR diff inspection confirming only governance/specification artifacts changed;
+- independent Architect Review after verification evidence is available.
+
+Definition of Done: specification committed; automated consistency checks pass; CI records the pass; production diff is empty; architect approves; PR merged; Work Item VERIFIED.
 
 ## WORK-002 — Repository Baseline and Domain Architecture V1
 
