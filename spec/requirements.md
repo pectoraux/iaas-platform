@@ -58,6 +58,24 @@ The repository's existing runtime-resolution dependent tests MUST no longer fail
 
 Acceptance: `W004-AC05` and `W004-AC06` pass with CI evidence.
 
+## BASE-004 — Deterministic Integration Fixtures
+
+Affected PostgreSQL integration tests MUST explicitly establish the tenant-scoped operator/asset/device/capability fixtures they consume, or use a deterministic helper that does so.
+
+Acceptance: `W005-AC01` and `W005-AC02` pass.
+
+## BASE-005 — Fixture Isolation
+
+Integration-test fixture lookup MUST NOT permit records from another tenant or another test file to satisfy a test's prerequisite lookup.
+
+Acceptance: `W005-AC04` passes through an explicit tenant-isolation regression test and clean-database evidence.
+
+## BASE-006 — Baseline Failure Containment
+
+The fixture correction MUST remain test-only and MUST NOT weaken production runtime, execution, capacity, economic, Data Plane, or vertical-boundary contracts.
+
+Acceptance: `W005-AC03`, `W005-AC05`, `W005-AC06`, and `W005-AC07` pass with exact diff and CI evidence.
+
 ## WORK-001 Freeze
 
 No production IAAS feature is authorized by these requirements. Domain requirements are derived by WORK-002 after baseline audit.
