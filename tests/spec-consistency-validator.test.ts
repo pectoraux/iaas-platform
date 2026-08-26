@@ -81,7 +81,7 @@ describe('spec validator — mandatory negative cases', () => {
 
   test('WORK-001 production scope is rejected', () => {
     const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('Repository Scope: `spec/` governance documents and their executable consistency gate.', 'Repository Scope: `spec/` plus production services and prisma migrations.'))
+    rewrite(s, 'work-items.md', x => x.replace('Repository Scope: `spec/` governance documents and its executable consistency gate.', 'Repository Scope: `spec/` plus production services and prisma migrations.'))
     expectFailure(s, 'SC-15')
   })
 
