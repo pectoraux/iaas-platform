@@ -160,8 +160,13 @@ describe('Phase 8B: compute end-to-end economic pipeline', () => {
     expect(result.rewardId).toBeTruthy()
     const reward = await db.reward.findUnique({ where: { id: result.rewardId } })
     expect(reward).toBeTruthy()
-    // $0.50/GPU-hour × 9.5 GPU-hours = $4.75
-    expect(parseFloat(reward!.amount.toString())).toBeCloseTo(4.75, 2)
+    // WORK-005 (AR-006): the compute-gpu-network template's reward rule has
+    // platform_fee_pct: 10. The reward service deducts the platform fee:
+    //   gross = $0.50/GPU-hour × 9.5 GPU-hours = $4.75
+    //   net  = gross × (1 - 10%) = $4.75 × 0.9 = $4.275
+    // The previous assertion expected the gross (4.75); the correct expected
+    // value is the net amount after the platform fee deduction.
+    expect(parseFloat(reward!.amount.toString())).toBeCloseTo(4.275, 2)
 
     // 7. Settlement (generic settlement service)
     expect(result.settlementId).toBeTruthy()
