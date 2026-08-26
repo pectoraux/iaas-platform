@@ -16,7 +16,7 @@ ARCHITECT_REVIEW -> IMPLEMENTATION_BLOCKED -> IMPLEMENTING
 
 ## VERIFIED historical Work Items
 
-### WORK-001 — WorkflowOS Specification and Governance Foundation
+## WORK-001 — WorkflowOS Specification and Governance Foundation
 
 Status: `VERIFIED`
 
@@ -32,7 +32,7 @@ Repository Scope: `spec/` governance documents and their executable consistency 
 
 Architecture Constraints: frozen governance architecture; no production implementation; no domain feature implementation.
 
-Out of Scope: domain features, migrations, runtime changes, vertical networks.
+Out of Scope: domain feature implementation, migrations, runtime changes, vertical networks.
 
 Acceptance Criteria:
 - `W001-AC01` frozen governance architecture exists.
@@ -49,11 +49,18 @@ Acceptance Criteria:
 - `W001-AC12` next Work Item is dependency-derived.
 - `W001-AC13` no IAAS production code changes in WORK-001.
 
-Required Verification: specification validator; negative validator tests; CI evidence; exact diff/scope inspection; independent Architect Review.
+Required Verification:
 
-Definition of Done: governance specification committed and verified; PR merged; Work Item VERIFIED.
+- repository specification inspection against every W001 acceptance criterion;
+- automated specification consistency check covering required documents, stable IDs, architecture-version references, dependency resolution, and forbidden WORK-001 production-scope changes;
+- negative tests proving the validator rejects representative specification inconsistencies;
+- CI execution of the consistency check;
+- PR diff inspection confirming only governance/specification artifacts changed;
+- independent Architect Review after verification evidence is available.
 
-### WORK-002 — Repository Baseline and Domain Architecture V1
+Definition of Done: specification committed; automated consistency checks pass; negative tests pass; CI records the pass; production diff is empty; architect approves; PR merged; Work Item VERIFIED.
+
+## WORK-002 — Repository Baseline and Domain Architecture V1
 
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
@@ -67,7 +74,7 @@ Acceptance Criteria: `W002-AC01` baseline is truth-classified; `W002-AC02` V1 is
 Required Verification: baseline inspection; specification validation; Architect Review.
 Definition of Done: baseline and V1 architecture committed and verified.
 
-### WORK-003 — VerifiedEvidenceContext Implementation
+## WORK-003 — VerifiedEvidenceContext Implementation
 
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
@@ -83,7 +90,7 @@ Acceptance Criteria: `W003-AC01` through `W003-AC09` prove immutable context, du
 Required Verification: static architecture checks, unit/PG tests, VPP integration, anti-dependency tests, CI, Architect Review.
 Definition of Done: W003 criteria verified and merged.
 
-### WORK-004 — Runtime Registry Bootstrap Reliability
+## WORK-004 — Runtime Registry Bootstrap Reliability
 
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
@@ -98,7 +105,7 @@ Acceptance Criteria: `W004-AC01` through `W004-AC09`.
 Required Verification: runtime resolution, registry stability, dependent integration tests, architecture checks, CI, Architect Review.
 Definition of Done: runtime registration verified and merged.
 
-### WORK-005 — Integration Test Fixture and Prerequisite Reliability
+## WORK-005 — Integration Test Fixture and Prerequisite Reliability
 
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
@@ -113,7 +120,7 @@ Acceptance Criteria: `W005-AC01` through `W005-AC08`.
 Required Verification: affected PG suites, isolation tests, validator, exact scope, Architect Review.
 Definition of Done: fixture failures eliminated and verified.
 
-### WORK-006 — Baseline Typecheck and Architecture Contract Recovery
+## WORK-006 — Baseline Typecheck and Architecture Contract Recovery
 
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
@@ -128,7 +135,7 @@ Acceptance Criteria: `W006-AC01` through `W006-AC10`.
 Required Verification: baseline captures, Typecheck, architecture tests, PG, validator, lint, scope, Architect Review.
 Definition of Done: in-scope baseline failures eliminated and verified.
 
-### WORK-007 — Typecheck Residual Closure and TypeScript Project Boundaries
+## WORK-007 — Typecheck Residual Closure and TypeScript Project Boundaries
 
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
@@ -143,7 +150,7 @@ Acceptance Criteria: `W007-AC01` through `W007-AC10`.
 Required Verification: Typecheck, boundary tests, architecture/PG/validator/lint/scope gates, Architect Review.
 Definition of Done: Typecheck clean and residuals classified.
 
-### WORK-008 — Architecture Truth Reconciliation and Verified-Evidence Promotion
+## WORK-008 — Architecture Truth Reconciliation and Verified-Evidence Promotion
 
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
@@ -158,7 +165,7 @@ Acceptance Criteria: `W008-AC01` through `W008-AC08`.
 Required Verification: truth inventory, historical preservation, regression tests, full gates, Architect Review.
 Definition of Done: truth drift reconciled and verified.
 
-### WORK-009 — Transform Stack Architecture Freeze
+## WORK-009 — Transform Stack Architecture Freeze
 
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
@@ -173,7 +180,7 @@ Acceptance Criteria: `W009-AC01` through `W009-AC08`.
 Required Verification: ACR traceability, V3 consistency, responsibility separation, regression tests, CI, scope, Architect Review.
 Definition of Done: V3 frozen and verified.
 
-### WORK-010 — TransformRegistry Implementation
+## WORK-010 — TransformRegistry Implementation
 
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
@@ -188,7 +195,7 @@ Acceptance Criteria: `W010-AC01` through `W010-AC08`.
 Required Verification: unit/PG/tenant/concurrency/anti-dependency tests, validator, Typecheck, lint, CI, Architect Review.
 Definition of Done: Registry verified and merged.
 
-### WORK-011 — TransformRuntime Implementation
+## WORK-011 — TransformRuntime Implementation
 
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
@@ -203,7 +210,7 @@ Acceptance Criteria: `W011-AC01` through `W011-AC10`.
 Required Verification: unit/PG/idempotency/failure/provenance/anti-dependency tests plus all gates.
 Definition of Done: Runtime verified and merged.
 
-### WORK-012 — Transform Stack Truth Synchronization
+## WORK-012 — Transform Stack Truth Synchronization
 
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
@@ -218,7 +225,7 @@ Acceptance Criteria: `W012-AC01` through `W012-AC06`.
 Required Verification: validator, truth-regression tests, architecture/Typecheck/PG/lint/scope gates, Architect Review.
 Definition of Done: V3 synchronized and verified.
 
-### WORK-013 — Transform Stack End-to-End Conformance and Integration Hardening
+## WORK-013 — Transform Stack End-to-End Conformance and Integration Hardening
 
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`

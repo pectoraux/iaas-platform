@@ -99,10 +99,10 @@ describe('spec consistency validator — positive case', () => {
     expect(first.stdout).toContain('architecture=IAAS-GOV-ARCH-1')
     expect(first.stdout).toContain('domain-architecture=IAAS-DOM-ARCH-3')
     expect(first.stdout).toContain('required-files=13')
-    expect(first.stdout).toContain('work-items=13')
+    expect(first.stdout).toContain('work-items=14')
     expect(first.stdout).toContain('work-item-schema-fields=11')
     expect(first.stdout).toContain('work001-acceptance-criteria=13')
-    expect(first.stdout).toContain('dependency-edges=12')
+    expect(first.stdout).toContain('dependency-edges=13')
     expect(first.stdout).toContain('checks=20')
     expect(first.stderr).toBe('')
 
@@ -310,8 +310,8 @@ describe('spec consistency validator — negative cases (WORK-001 Required Tests
     const specDir = makeTempSpecCopy()
     rewrite(specDir, 'work-items.md', (content) =>
       content.replace(
-        'Architecture Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` governs all changes;',
-        'Governance Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` governs all changes;',
+        'Architecture Constraints: derived only from verified baseline; architecture changes require ACR/new version.',
+        'Governance Constraints: derived only from verified baseline; architecture changes require ACR/new version.',
       ),
     )
     const result = runValidator(specDir)
@@ -333,7 +333,7 @@ describe('spec consistency validator — negative cases (WORK-001 Required Tests
   test('fails when a required schema section is missing from a Work Item (AR-001, SC-06)', () => {
     const specDir = makeTempSpecCopy()
     rewrite(specDir, 'work-items.md', (content) =>
-      content.replace('Definition of Done: repository baseline committed;', 'Completion: repository baseline committed;'),
+      content.replace('Definition of Done: baseline and V1 architecture committed and verified.', 'Completion: baseline and V1 architecture committed and verified.'),
     )
     const result = runValidator(specDir)
     expectFailure(result, 'SC-06', 'WORK-002 is missing required schema section: Definition of Done')
