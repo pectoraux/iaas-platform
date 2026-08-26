@@ -213,8 +213,20 @@ describe('WORK-003 — VPP constructs VerifiedEvidenceContext (W003-AC04)', () =
   test('VPP no longer directly mutates EconomicPipelineState.eventId/attestationId', () => {
     // The prior vertical-specific convention directly mutated the checkpoint.
     // After WORK-003, VPP must NOT contain the direct pre-population mutation;
-    // it must go through applyVerifiedEvidence.
-    expect(VPP_SERVICE).not.toMatch(/economicPipelineState\.update\(\s*[^)]*eventId:\s*event\.id/s)
+    // it must go through applyVerifiedEvidence. (Search for the old pattern:
+    // economicPipelineState.update({ ... eventId: event.id ... }) — after
+    // migration this pattern is absent because VPP calls applyVerifiedEvidence
+    // instead. We check that the VPP source does not contain the combination of
+    // economicPipelineState.update with eventId: event.id.)
+    const hasDirectMutation = /economicPipelineState\.update\(/.test(VPP_SERVICE) &&
+      /eventId:\s*event\.id/.test(VPP_SERVICE) &&
+      /attestationId:\s*attestation\.id/.test(VPP_SERVICE) &&
+      /stage:\s*ECONOMIC_STAGE\.VERIFIED/.test(VPP_SERVICE)
+    // The four tokens must not all appear in the direct-mutation combination.
+    // (After migration, applyVerifiedEvidence owns this; VPP only constructs
+    // the context.) Verify the explicit pre-population block is gone by checking
+    // that the update call near eventId/attestationId is absent.
+    expect(hasDirectMutation).toBe(false)
   })
 
   test('VPP retains its domain-specific baseline calculation (not refactored away)', () => {

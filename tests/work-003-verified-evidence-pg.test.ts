@@ -131,19 +131,17 @@ async function createAssignmentAndCheckpoint(label: string) {
       sourceId: assignmentId,
     },
   })
+  const operatorId = (await db.operator.findFirst({ where: { tenantId } }))!.id
   const assignment = await db.executionAssignment.create({
     data: {
       tenantId,
       executionId: execution.id,
       assetId,
-      operatorId: (await db.operator.findFirst({ where: { tenantId } }))!.id,
-      networkVersionId,
+      operatorId,
       capabilityType: 'energy_discharge',
       assignedQuantity: '10',
       assignedUnit: 'kW',
       status: 'completed',
-      sourceType: 'w003_test',
-      sourceId: assignmentId,
     },
   })
   await initEconomicPipeline({
