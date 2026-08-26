@@ -90,9 +90,13 @@ Definition of Done: repository baseline committed; canonical domain architecture
 
 ## WORK-003 — VerifiedEvidenceContext Implementation
 
-Status: `READY`
+Status: `VERIFIED`
 
 Architecture Version: `IAAS-GOV-ARCH-1`
+
+Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
+
+Architecture Change Request: `ACR-001` (APPROVED)
 
 Dependencies: `WORK-002`
 
