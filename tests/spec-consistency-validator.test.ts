@@ -99,10 +99,10 @@ describe('spec consistency validator — positive case', () => {
     expect(first.stdout).toContain('architecture=IAAS-GOV-ARCH-1')
     expect(first.stdout).toContain('domain-architecture=IAAS-DOM-ARCH-3')
     expect(first.stdout).toContain('required-files=13')
-    expect(first.stdout).toContain('work-items=9')
+    expect(first.stdout).toContain('work-items=12')
     expect(first.stdout).toContain('work-item-schema-fields=11')
     expect(first.stdout).toContain('work001-acceptance-criteria=13')
-    expect(first.stdout).toContain('dependency-edges=8')
+    expect(first.stdout).toContain('dependency-edges=11')
     expect(first.stdout).toContain('checks=20')
     expect(first.stderr).toBe('')
 

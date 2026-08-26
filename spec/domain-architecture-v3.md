@@ -75,8 +75,11 @@ Transform
   └─ securityProperties: declared, not enforced by the contract itself
 ```
 
-Classification: **FROZEN-CONTRACT** — the abstract operation contract is frozen;
-concrete Transform implementations are future (not authorized by this version).
+Classification: **IMPLEMENTED** — the abstract operation contract is frozen
+and implemented via `TransformContract` in
+`src/lib/services/transform-runtime.service.ts` (WORK-011 VERIFIED).
+Concrete Transform implementations remain future (not authorized by this
+version).
 
 ### 2.4 TransformRegistry — Discovery and Catalog
 
@@ -94,9 +97,9 @@ concrete Transform implementations are future (not authorized by this version).
 - a kernel primitive (it is service-layer);
 - a vertical-specific catalog.
 
-Classification: **FROZEN-CONTRACT** — the registry contract is frozen;
-production implementation is future (requires a separate Work Item after
-WORK-009 is VERIFIED).
+Classification: **IMPLEMENTED** — the registry contract is frozen and
+implemented in `src/lib/services/transform-registry.service.ts`
+(WORK-010 VERIFIED).
 
 ### 2.5 TransformRuntime — Execution Engine
 
@@ -118,9 +121,9 @@ WORK-009 is VERIFIED).
 - a kernel primitive (it is service-layer);
 - coupled to EconomicPipeline, Route, TransportExecution, or RuntimeRegistry.
 
-Classification: **FROZEN-CONTRACT** — the runtime contract is frozen;
-production implementation is future (requires a separate Work Item after
-WORK-009 is VERIFIED).
+Classification: **IMPLEMENTED** — the runtime contract is frozen and
+implemented in `src/lib/services/transform-runtime.service.ts`
+(WORK-011 VERIFIED).
 
 ### 2.6 TransformRecord — Immutable Provenance (IMPLEMENTED, unchanged)
 
@@ -204,7 +207,9 @@ All V2 rules remain unchanged:
   anti-conflation, kernel boundary restraint.
 - All anti-drift rules (constitution §16).
 - DOM-P02 (TransformRegistry) and DOM-P03 (TransformRuntime) are now
-  SUPERSEDED by this V3 freeze (promoted from FUTURE to FROZEN-CONTRACT).
+  SUPERSEDED by this V3 freeze (promoted from FUTURE to IMPLEMENTED:
+  TransformRegistry via WORK-010 VERIFIED, TransformRuntime via WORK-011
+  VERIFIED).
   See `spec/domain-requirements-v3.md` for DOM-015 and DOM-016.
 - DOM-P04..P08 remain FUTURE/OPEN/RESEARCH (not promoted by this version).
 

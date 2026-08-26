@@ -11,9 +11,12 @@ WORK-005 -> WORK-006
 WORK-006 -> WORK-007
 WORK-007 -> WORK-008
 WORK-008 -> WORK-009
+WORK-009 -> WORK-010
+WORK-010 -> WORK-011
+WORK-011 -> WORK-012
 ```
 
-WORK-001 is VERIFIED. WORK-002 through WORK-008 are VERIFIED. WORK-009 depends on WORK-008; that dependency is satisfied, so WORK-009 is eligible and has been released by the Architect.
+WORK-001 is VERIFIED. WORK-002 through WORK-011 are VERIFIED. WORK-012 depends on WORK-011; that dependency is satisfied, so WORK-012 is eligible and has been released by the Architect.
 
 A Work Item is eligible only when its architecture version is valid, all dependencies exist and are VERIFIED, acceptance/verification data is complete, no unresolved architecture change blocks it, and it has at most one active implementation PR.
 
