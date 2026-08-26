@@ -44,14 +44,16 @@ describe('WORK-015/016 — frozen V4 state and next-work release', () => {
   test('DOM-P05..P08 remain future/open/research', () => {
     expect(req).toContain('DOM-P05..DOM-P08: remain FUTURE/OPEN/RESEARCH')
   })
-  test('WORK-015 is VERIFIED and WORK-016 is READY', () => {
+  test('WORK-015/016 are VERIFIED and WORK-017 is READY', () => {
     expect(items).toContain('## WORK-015 — IAAS-DOM-ARCH-4 Freeze and DOM-P04 Truth Promotion')
     expect(items).toContain('## WORK-016 — ExtensionRegistry Implementation')
+    expect(items).toContain('## WORK-017 — ExtensionRuntime Implementation')
     expect(items).toContain('Status: `VERIFIED`')
     expect(items).toContain('Status: `READY`')
     expect(deps).toContain('WORK-014 -> WORK-015')
     expect(deps).toContain('WORK-015 -> WORK-016')
-    expect(deps).toContain('WORK-016 is READY')
+    expect(deps).toContain('WORK-016 -> WORK-017')
+    expect(deps).toContain('WORK-017 is READY')
   })
   test('WORK-016 is released only against frozen V4', () => {
     const order = read('work-orders/WORK-016.md')
@@ -59,5 +61,12 @@ describe('WORK-015/016 — frozen V4 state and next-work release', () => {
     expect(order).toContain('`IAAS-DOM-ARCH-4` (FROZEN)')
     expect(order).toContain('`WORK-015` VERIFIED')
     expect(order).toContain('Do not start WORK-017')
+  })
+  test('WORK-017 is released only against frozen V4 and WORK-016 VERIFIED', () => {
+    const order = read('work-orders/WORK-017.md')
+    expect(order).toContain('`RELEASED`')
+    expect(order).toContain('`IAAS-DOM-ARCH-4` (FROZEN)')
+    expect(order).toContain('`WORK-016` VERIFIED')
+    expect(order).toContain('DOM-020')
   })
 })

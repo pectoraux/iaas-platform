@@ -26,7 +26,20 @@ Objective: establish persistent governance/specification without changing IAAS p
 Repository Scope: `spec/` governance documents and their executable consistency gate.
 Architecture Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` (no change without approved ACR); no production implementation; no domain feature implementation.
 Out of Scope: domain feature implementation, migrations, runtime changes, vertical networks.
-Acceptance Criteria: `W001-AC01` through `W001-AC13`.
+Acceptance Criteria:
+- `W001-AC01` frozen governance architecture exists.
+- `W001-AC02` every Work Item names exactly one architecture version.
+- `W001-AC03` requirements and objective ACs are explicit.
+- `W001-AC04` dependencies and out-of-scope boundaries are explicit.
+- `W001-AC05` architecture changes require an ACR.
+- `W001-AC06` agent claims cannot establish PASS.
+- `W001-AC07` verification evidence maps to ACs.
+- `W001-AC08` Architect Review is distinct from Verification.
+- `W001-AC09` max one active implementation PR per Work Item.
+- `W001-AC10` dependency graph has no unresolved/circular dependencies.
+- `W001-AC11` truth classification supports OBSERVED/INFERRED/CONFIRMED/PROPOSED.
+- `W001-AC12` next Work Item is dependency-derived.
+- `W001-AC13` no IAAS production code changes in WORK-001.
 Required Verification:
 - repository specification inspection against every W001 acceptance criterion;
 - automated specification consistency check covering required documents, stable IDs, architecture-version references, dependency resolution, and forbidden WORK-001 production-scope changes;

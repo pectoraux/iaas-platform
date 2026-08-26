@@ -75,7 +75,7 @@ describe('spec validator — mandatory negative cases', () => {
 
   test('missing WORK-001 acceptance criterion is rejected', () => {
     const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('Acceptance Criteria: `W001-AC01` through `W001-AC13`.', 'Acceptance Criteria: `W001-AC01` through `W001-AC12`.'))
+    rewrite(s, 'work-items.md', x => x.replace('- `W001-AC07` verification evidence maps to ACs.\n', ''))
     expectFailure(s, 'SC-07')
   })
 
@@ -100,7 +100,7 @@ describe('spec validator — mandatory negative cases', () => {
   test('truth classification is required', () => {
     const s = copySpec()
     rewrite(s, 'requirements.md', x => x.replace(/OBSERVED/g, ''))
-    expectFailure(s, 'SC-13')
+    expectFailure(s, 'SC-12')
   })
 })
 
