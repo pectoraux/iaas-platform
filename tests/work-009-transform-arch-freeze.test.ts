@@ -42,14 +42,14 @@ describe('WORK-009 — ACR-002 traceability (W009-AC01)', () => {
 // ---------------------------------------------------------------------------
 
 describe('WORK-009 — IAAS-DOM-ARCH-3 registration (W009-AC02)', () => {
-  test('architecture.md registers V3 as FROZEN', () => {
+  test('architecture.md registers V4 as FROZEN', () => {
     const src = readSpec('architecture.md')
-    expect(src).toContain('`IAAS-DOM-ARCH-3` | FROZEN')
+    expect(src).toContain('`IAAS-DOM-ARCH-4` | FROZEN')
   })
 
-  test('architecture-lock.md registers V3 as current FROZEN domain version', () => {
+  test('architecture-lock.md registers V4 as current FROZEN domain version', () => {
     const src = readSpec('architecture-lock.md')
-    expect(src).toContain('IAAS-DOM-ARCH-3')
+    expect(src).toContain('IAAS-DOM-ARCH-4')
     expect(src).toContain('FROZEN')
   })
 

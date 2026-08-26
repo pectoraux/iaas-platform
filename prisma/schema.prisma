@@ -104,6 +104,8 @@ model Tenant {
   transformRecords       TransformRecord[]
   // WORK-010: TransformRegistryEntry — tenant-scoped transform catalog entries.
   transformRegistryEntries TransformRegistryEntry[]
+  // WORK-016: ExtensionRegistryEntry — tenant-scoped extension catalog entries.
+  extensionRegistryEntries ExtensionRegistryEntry[]
 
   @@index([slug])
 }
@@ -2691,5 +2693,64 @@ model TransformRegistryEntry {
   @@index([transformVersion])
   @@index([certificationStatus])
   @@index([revocationStatus])
+  @@index([createdAt])
+}
+
+// -----------------------------------------------------------------------------
+// WORK-016 (IAAS-DOM-ARCH-4 / DOM-019): ExtensionRegistry
+//
+// The service-layer catalog/lifecycle authority for Extensions. Provides
+// tenant-scoped registration, lookup by (extensionType, extensionVersion),
+// version compatibility rules, certification metadata, revocation metadata,
+// and authoritative lifecycle state transitions.
+//
+// Architectural boundaries (frozen by IAAS-DOM-ARCH-4):
+//   - Service-layer, NOT kernel.
+//   - Does NOT execute extensions (that is ExtensionRuntime — future).
+//   - Does NOT import vertical services, EconomicPipeline, Route/Transport,
+//     RuntimeRegistry, or kernel code.
+//   - PostgreSQL is the durable source of registry metadata.
+//   - Tenant isolation is mandatory.
+//   - Lifecycle authority: registered → installed → activated ⇌ deactivated → revoked (terminal).
+//   - Deterministic idempotency: (tenantId, extensionType, extensionVersion).
+// -----------------------------------------------------------------------------
+model ExtensionRegistryEntry {
+  id                        String   @id @default(cuid())
+  tenantId                  String
+  extensionType             String   // generic extension identity (e.g. "routing_strategy", "cache_strategy")
+  extensionVersion          String   // semver string (e.g. "1.0.0")
+  description               String   @default("")
+  // Version compatibility: JSON array of compatible version ranges
+  compatibleVersionsJson    String   @default("[]")
+  // Certification metadata (DOM-019 §3): certifier identity + status
+  certifierIdentity         String?
+  certificationStatus       String   @default("uncertified") // uncertified | pending | certified | rejected
+  certifiedAt               DateTime?
+  // Revocation metadata (DOM-019 §4): status + reason + revokedAt
+  revocationStatus          String   @default("active") // active | revoked
+  revocationReason          String?
+  revokedAt                 DateTime?
+  // Lifecycle state (DOM-019 §5 / V4 §2.7): authoritative registry-owned state
+  lifecycleState            String   @default("registered") // registered | installed | activated | deactivated | revoked
+  // Declared capabilities and resource limits (extension-declared request, not runtime-enforced ceiling)
+  declaredCapabilitiesJson  String   @default("[]")
+  declaredResourceLimitsJson String  @default("{}") // { cpuMs, memoryBytes, timeMs }
+  // Security properties (metadata only, not cryptographic verification)
+  publisherIdentity         String?
+  // Idempotency: deterministic identity tuple
+  idempotencyKey            String
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  tenant                    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Deterministic registration identity: one entry per (tenant, type, version)
+  @@unique([tenantId, extensionType, extensionVersion])
+  @@index([tenantId])
+  @@index([extensionType])
+  @@index([extensionVersion])
+  @@index([certificationStatus])
+  @@index([revocationStatus])
+  @@index([lifecycleState])
   @@index([createdAt])
 }

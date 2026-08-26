@@ -20,7 +20,7 @@ WORK-014 -> WORK-015
 WORK-015 -> WORK-016
 ```
 
-WORK-001 through WORK-015 are VERIFIED. WORK-016 depends on WORK-015; that dependency is satisfied, so WORK-016 is READY and is the only eligible implementation Work Item.
+WORK-001 is VERIFIED. WORK-001 through WORK-015 are VERIFIED in dependency order. WORK-016 depends on WORK-015; that dependency is satisfied, so WORK-016 is READY and is the only eligible implementation Work Item.
 
 A Work Item is eligible only when its architecture version is valid, all dependencies exist and are VERIFIED, acceptance/verification data is complete, no unresolved architecture change blocks it, and it has at most one active implementation PR.
 
