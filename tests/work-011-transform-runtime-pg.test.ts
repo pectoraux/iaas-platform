@@ -93,10 +93,10 @@ beforeAll(async () => {
   // Need active source + destination Nodes for Bundle creation.
   // Nodes require a ParticipantIdentity to exist first.
   const sourceParticipant = await db.participantIdentity.create({
-    data: { tenantId },
+    data: {},
   })
   const destParticipant = await db.participantIdentity.create({
-    data: { tenantId },
+    data: {},
   })
   const { registerNode, activateNode } = await import('../src/lib/services/node.service')
   const sourceNode = await registerNode(tenantId, {
