@@ -62,9 +62,16 @@ describe('WORK-016 — ExtensionRegistry architecture (W016-AC08)', () => {
     expect(REGISTRY_SRC).toContain('Does NOT execute extensions')
   })
 
-  test('ExtensionRuntime remains absent from production code', () => {
+  test('ExtensionRuntime is implemented as a service-layer module (WORK-017)', () => {
+    // WORK-016 originally asserted ExtensionRuntime was absent. WORK-017
+    // implements ExtensionRuntime as a service-layer peer to ExtensionRegistry.
+    // The boundary that remains: ExtensionRegistry does NOT import or depend
+    // on ExtensionRuntime (verified by the import-prohibition tests below).
     const path = join(REPO_ROOT, 'src', 'lib', 'services', 'extension-runtime.service.ts')
-    expect(existsSync(path)).toBe(false)
+    expect(existsSync(path)).toBe(true)
+    // ExtensionRegistry must NOT import ExtensionRuntime (no reverse dependency).
+    expect(REGISTRY_SRC).not.toContain('extension-runtime.service')
+    expect(REGISTRY_SRC).not.toMatch(/^import.*ExtensionRuntime/m)
   })
 
   test('ExtensionRegistry does NOT import ExtensionProvenance service', () => {
