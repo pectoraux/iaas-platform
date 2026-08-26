@@ -130,6 +130,12 @@ The canonical planning/specification layer MUST accurately reflect verified repo
 
 Acceptance: `W008-AC01` through `W008-AC06` pass with truth-drift inventory, cross-document consistency evidence, and regression protection.
 
+## BASE-016 — Transform Stack Architecture Freeze
+
+The TransformRegistry and TransformRuntime boundaries MAY be promoted from FUTURE to a new frozen domain architecture only through an explicit Architecture Change Request and architecture-version Work Item. Their production implementation is prohibited until that architecture version is VERIFIED.
+
+Acceptance: `W009-AC01` through `W009-AC08` pass with an approved ACR-002, explicit IAAS-DOM-ARCH-3 contract, frozen dependency boundaries, and no production implementation changes during the architecture-freeze Work Item.
+
 ## WORK-001 Freeze
 
 No production IAAS feature is authorized by these requirements. Domain requirements are derived by WORK-002 after baseline audit.
