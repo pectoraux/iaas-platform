@@ -6,6 +6,7 @@
 - Architecture Change Request: `ACR-001` (APPROVED)
 - Implementer: Z.ai
 - Prepared: 2026-08-26 (UTC)
+- Updated: 2026-08-26 (UTC) — AR-005 correction round: provenance-validation (verificationPolicyId + verificationPolicyVersion against durable NetworkVersion)
 - Status: **submitted for independent verification and Architect Review**
 
 > Per `spec/verification.md`, this document records objective evidence. It is
@@ -127,10 +128,10 @@ tests/work-003-verified-evidence-pg.test.ts   (new)
 | Criterion | Evidence |
 |---|---|
 | W003-AC01 | `createVerifiedEvidenceContext` returns `Object.freeze`'d object; unit test asserts `Object.isFrozen`. |
-| W003-AC02 | Interface carries only identity refs (`eventId`, `attestationId`, `verificationPolicyId`, `verificationPolicyVersion`, `evidenceIdentity`); test asserts no payload fields. |
+| W003-AC02 | Interface carries only identity refs (`eventId`, `attestationId`, `verificationPolicyId`, `verificationPolicyVersion`, `evidenceIdentity`); test asserts no payload fields. AR-005: the `(verificationPolicyId, verificationPolicyVersion)` tuple is validated against the durable NetworkVersion (`event.networkVersionId` + `networkVersion.version`), establishing provenance authoritatively. |
 | W003-AC03 | `economic-pipeline.ts` imports context, no vertical service (static test); `applyVerifiedEvidence` is the generic boundary. |
 | W003-AC04 | VPP constructs context + calls `applyVerifiedEvidence`; no direct checkpoint mutation; baseline logic retained (3 static tests). |
-| W003-AC05 | `applyVerifiedEvidence` validates Event/Attestation/tenant/network/policy/version; 6 PG tests prove valid + stale/invalid/mismatch rejection. |
+| W003-AC05 | `applyVerifiedEvidence` validates Event/Attestation/tenant/network/policy-id/policy-version/identity; AR-005: `(policyId, policyVersion)` validated against durable NetworkVersion (not just Attestation field); 9 PG tests prove valid + stale/invalid/mismatch/divergence rejection (incl. mismatched policyId-with-matching-version). |
 | W003-AC06 | Context in `src/lib/domain/` (not kernel); imports no ledger/Event/Attestation service (4 static tests). |
 | W003-AC07 | `economic-pipeline.ts` imports no data-plane service (static test + AR-004 regression tests in work-002-baseline). |
 | W003-AC08 | PG integration tests run in CI `postgres-integration-tests` job; no SQLite/in-memory replacement. |
@@ -155,5 +156,81 @@ No stop-condition triggered:
 - `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-2` remain FROZEN (not modified).
 - No Data Plane / Kernel / Prisma schema / ledger model changes.
 - No subsequent Work Item started.
+
+## 11. AR-005 Correction Round (Architect Review REQUEST_CHANGES)
+
+The Architect's independent review of WORK-003 returned `REQUEST_CHANGES` for
+a single finding (AR-005). The implementation was otherwise substantially
+correct. AR-005 is corrected below; no other WORK-003 content changed.
+
+### 11.1 AR-005 — Provenance validation of (verificationPolicyId, verificationPolicyVersion)
+
+**Defect.** `VerifiedEvidenceContext` carries `verificationPolicyId`, but
+`applyVerifiedEvidence()` validated `verificationPolicyVersion` only against
+the `Attestation.verificationPolicyVersion` field — it never established that
+`verificationPolicyId` is the NetworkVersion/policy that produced the durable
+Event/Attestation. A context could claim provenance from a different
+NetworkVersion than the durable evidence actually belongs to (even if the
+version number happened to match).
+
+**Correction (implementation correctness fix within WORK-003; no architectural
+change, no ACR, no IAAS-DOM-ARCH-2 modification).**
+
+In `src/lib/control-plane/economic-pipeline.ts` `applyVerifiedEvidence()`:
+
+- The Event query now includes `networkVersion: { select: { id, networkId,
+  version } }` (previously only `networkId`).
+- **New validation (AR-005)**: `context.verificationPolicyId` MUST equal
+  `event.networkVersionId` — the context's policy id is the NetworkVersion
+  that produced the durable evidence.
+- **New validation (AR-005)**: `context.verificationPolicyVersion` MUST equal
+  `event.networkVersion.version` — the context's policy version is validated
+  against the durable NetworkVersion's own version number, not just the
+  Attestation field. This makes the `(policyId, policyVersion)` tuple
+  authoritative against the durable NetworkVersion.
+- The existing `Attestation.verificationPolicyVersion` check is retained but
+  repointed: it now validates against `event.networkVersion.version` (the
+  durable NetworkVersion), confirming the Attestation was produced by the same
+  policy version as the NetworkVersion that owns the Event (belt-and-suspenders
+  with the AR-005 check).
+
+### 11.2 AR-005 regression tests
+
+`tests/work-003-verified-evidence-pg.test.ts` — 2 new PostgreSQL negative
+tests (9 total now, up from 7):
+
+1. **`rejects a mismatched verificationPolicyId even when the version matches
+   (AR-005)`** — context claims a wrong `verificationPolicyId` while the
+   `verificationPolicyVersion` matches the NetworkVersion's version. Must be
+   rejected with `verificationPolicyId mismatch`.
+2. **`rejects when the Attestation.verificationPolicyVersion diverges from the
+   durable NetworkVersion (AR-005)`** — a corrupted Attestation with a
+   divergent policy version is rejected, even when the context matches the
+   NetworkVersion (proves the Attestation↔NetworkVersion cross-check).
+
+### 11.3 AR-005 verification evidence (current HEAD)
+
+```text
+$ bun run spec:validate
+SPEC VALIDATION PASSED
+architecture=IAAS-GOV-ARCH-1 domain-architecture=IAAS-DOM-ARCH-2 required-files=13 work-items=3 work-item-schema-fields=11 work001-acceptance-criteria=13 dependency-edges=2 checks=20
+exit=0
+
+$ bun test tests/spec-consistency-validator.test.ts tests/pr-invariant-check.test.ts tests/work-002-baseline.test.ts tests/work-003-verified-evidence-context.test.ts --timeout 120000
+ 97 pass / 0 fail / 358 expect() calls / 4 files
+```
+
+DB-free tests unchanged (97 pass). The 2 new AR-005 tests are PostgreSQL
+integration tests (run in CI `postgres-integration-tests` job). Deterministic.
+Lint clean. No production refactor beyond the `applyVerifiedEvidence`
+provenance-validation correction.
+
+### 11.4 AR-005 diff scope
+
+The correction touches only `src/lib/control-plane/economic-pipeline.ts` (the
+`applyVerifiedEvidence` validation block) and
+`tests/work-003-verified-evidence-pg.test.ts` (2 new tests). No VPP, Data
+Plane, Kernel, Prisma schema, ledger, or vertical-network changes. ACR-001,
+`IAAS-DOM-ARCH-2`, and VPP semantics are unchanged.
 
 Ready for independent verification and Architect Review.

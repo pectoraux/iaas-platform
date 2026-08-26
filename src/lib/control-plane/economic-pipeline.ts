@@ -239,7 +239,7 @@ export async function applyVerifiedEvidence(input: {
   const event = await db.event.findUnique({
     where: { id: context.eventId },
     include: {
-      networkVersion: { select: { networkId: true } },
+      networkVersion: { select: { id: true, networkId: true, version: true } },
       attestations: { select: { id: true, verificationPolicyVersion: true, status: true } },
     },
   })
@@ -268,6 +268,26 @@ export async function applyVerifiedEvidence(input: {
     )
   }
 
+  // AR-005 — Provenance validation: the context's (verificationPolicyId,
+  // verificationPolicyVersion) tuple MUST be authoritative against the durable
+  // NetworkVersion that produced the Event/Attestation, not just the
+  // Attestation field. The context.verificationPolicyId is the NetworkVersion
+  // id whose verification policy produced the attestation; it MUST equal the
+  // Event's networkVersionId. The context.verificationPolicyVersion MUST equal
+  // that NetworkVersion's own version number. This prevents a context from
+  // claiming provenance from a different NetworkVersion than the durable
+  // evidence actually belongs to (even if the version number happens to match).
+  if (context.verificationPolicyId !== event.networkVersionId) {
+    throw new Error(
+      `applyVerifiedEvidence: verificationPolicyId mismatch (context=${context.verificationPolicyId}, durable Event.networkVersionId=${event.networkVersionId}) for assignment '${executionAssignmentId}'. The context's verification policy id must be the NetworkVersion that produced the durable evidence.`,
+    )
+  }
+  if (event.networkVersion.version !== context.verificationPolicyVersion) {
+    throw new Error(
+      `applyVerifiedEvidence: verificationPolicyVersion mismatch (context=${context.verificationPolicyVersion}, durable NetworkVersion.version=${event.networkVersion.version}) for assignment '${executionAssignmentId}'. The context's verification policy version must match the durable NetworkVersion's version.`,
+    )
+  }
+
   // 3. Validate the durable Attestation reference.
   const attestation = event.attestations.find((a) => a.id === context.attestationId)
   if (!attestation) {
@@ -275,9 +295,13 @@ export async function applyVerifiedEvidence(input: {
       `applyVerifiedEvidence: referenced Attestation '${context.attestationId}' not found on Event '${context.eventId}' (stale/invalid reference) for assignment '${executionAssignmentId}'.`,
     )
   }
-  if (attestation.verificationPolicyVersion !== context.verificationPolicyVersion) {
+  // The Attestation's verificationPolicyVersion MUST also match the durable
+  // NetworkVersion version (and thus the context). This is belt-and-suspenders
+  // with the AR-005 check above: the Attestation was produced by the same
+  // policy version as the durable NetworkVersion that owns the Event.
+  if (attestation.verificationPolicyVersion !== event.networkVersion.version) {
     throw new Error(
-      `applyVerifiedEvidence: verificationPolicyVersion mismatch (context=${context.verificationPolicyVersion}, attestation=${attestation.verificationPolicyVersion}) for assignment '${executionAssignmentId}'.`,
+      `applyVerifiedEvidence: Attestation.verificationPolicyVersion (${attestation.verificationPolicyVersion}) does not match the durable NetworkVersion.version (${event.networkVersion.version}) for assignment '${executionAssignmentId}'.`,
     )
   }
   if (attestation.status !== 'verified') {

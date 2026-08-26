@@ -260,6 +260,54 @@ describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05
     ).rejects.toThrow(/verificationPolicyVersion mismatch/)
   })
 
+  it('rejects a mismatched verificationPolicyId even when the version matches (AR-005)', async () => {
+    // AR-005: the context's verificationPolicyId MUST equal the durable
+    // Event's networkVersionId. A context claiming provenance from a different
+    // NetworkVersion id must be rejected EVEN IF the version number happens to
+    // match — the (policyId, policyVersion) tuple is authoritative against the
+    // durable NetworkVersion, not just the version number.
+    const { assignment } = await createAssignmentAndCheckpoint('policy-id')
+    const { event, attestation, externalEventId } = await createDurableEventAndAttestation(assignment.id)
+    const context = createVerifiedEvidenceContext({
+      tenantId,
+      networkId,
+      eventId: event.id,
+      attestationId: attestation.id,
+      verificationPolicyId: 'different-network-version-id', // wrong policy id
+      verificationPolicyVersion: networkVersionNumber, // correct version number
+      evidenceIdentity: externalEventId,
+      issuedAt: attestation.createdAt.toISOString(),
+    })
+
+    await expect(
+      applyVerifiedEvidence({ executionAssignmentId: assignment.id, context }),
+    ).rejects.toThrow(/verificationPolicyId mismatch/)
+  })
+
+  it('rejects when the Attestation.verificationPolicyVersion diverges from the durable NetworkVersion (AR-005)', async () => {
+    // AR-005 belt-and-suspenders: the Attestation's policy version MUST match
+    // the durable NetworkVersion's version (not just the context). A corrupted
+    // Attestation with a divergent policy version is rejected.
+    const { assignment } = await createAssignmentAndCheckpoint('att-policy-divergence')
+    const { event, attestation, externalEventId } = await createDurableEventAndAttestation(assignment.id, {
+      policyVersion: networkVersionNumber + 1, // Attestation claims a different version than the NetworkVersion
+    })
+    const context = createVerifiedEvidenceContext({
+      tenantId,
+      networkId,
+      eventId: event.id,
+      attestationId: attestation.id,
+      verificationPolicyId: networkVersionId,
+      verificationPolicyVersion: networkVersionNumber, // context matches the NetworkVersion, not the corrupt Attestation
+      evidenceIdentity: externalEventId,
+      issuedAt: attestation.createdAt.toISOString(),
+    })
+
+    await expect(
+      applyVerifiedEvidence({ executionAssignmentId: assignment.id, context }),
+    ).rejects.toThrow(/Attestation\.verificationPolicyVersion.*does not match the durable NetworkVersion\.version/)
+  })
+
   it('rejects a non-verified Attestation (status != verified)', async () => {
     const { assignment } = await createAssignmentAndCheckpoint('not-verified')
     const { event, attestation, externalEventId } = await createDurableEventAndAttestation(assignment.id, {
