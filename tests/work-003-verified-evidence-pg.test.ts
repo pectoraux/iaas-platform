@@ -71,12 +71,17 @@ beforeAll(async () => {
   assetId = asset.id
 })
 
-/** Create a durable Event + Attestation directly via Prisma. */
-async function createDurableEventAndAttestation(label: string, options?: {
+/** Create a durable Event + Attestation directly via Prisma.
+ *  The Event.externalEventId is set to match the checkpoint's deterministic
+ *  eventIdempotencyKey (evidence-${assignmentId}) so applyVerifiedEvidence's
+ *  identity validation passes (unless an override is provided for mismatch tests).
+ */
+async function createDurableEventAndAttestation(assignmentId: string, options?: {
   attestationStatus?: string
   policyVersion?: number
+  externalEventIdOverride?: string
 }) {
-  const eventId = `evt-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const externalEventId = options?.externalEventIdOverride ?? `evidence-${assignmentId}`
   const event = await db.event.create({
     data: {
       tenantId,
@@ -84,7 +89,7 @@ async function createDurableEventAndAttestation(label: string, options?: {
       assetId,
       deviceId: null,
       capabilityType: 'energy_discharge',
-      externalEventId: eventId,
+      externalEventId,
       eventType: 'telemetry',
       occurredAt: new Date(),
       sequence: 1,
@@ -105,7 +110,7 @@ async function createDurableEventAndAttestation(label: string, options?: {
       verifierVersion: 'v1',
     },
   })
-  return { event, attestation, externalEventId: eventId }
+  return { event, attestation, externalEventId }
 }
 
 /** Create a minimal Execution + ExecutionAssignment + checkpoint. */
@@ -149,7 +154,7 @@ async function createAssignmentAndCheckpoint(label: string) {
 describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05, W003-AC08)', () => {
   it('pre-populates the checkpoint with valid durable references and advances to VERIFIED', async () => {
     const { assignment } = await createAssignmentAndCheckpoint('valid')
-    const { event, attestation, externalEventId } = await createDurableEventAndAttestation('valid')
+    const { event, attestation, externalEventId } = await createDurableEventAndAttestation(assignment.id)
 
     const context = createVerifiedEvidenceContext({
       tenantId,
@@ -181,7 +186,7 @@ describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05
 
   it('rejects a stale (non-existent) Event reference', async () => {
     const { assignment } = await createAssignmentAndCheckpoint('stale-evt')
-    const { attestation, externalEventId } = await createDurableEventAndAttestation('stale-evt-att')
+    const { attestation, externalEventId } = await createDurableEventAndAttestation(assignment.id)
     const context = createVerifiedEvidenceContext({
       tenantId,
       networkId,
@@ -200,7 +205,7 @@ describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05
 
   it('rejects a stale (wrong) Attestation reference', async () => {
     const { assignment } = await createAssignmentAndCheckpoint('stale-att')
-    const { event, externalEventId } = await createDurableEventAndAttestation('stale-att-evt')
+    const { event, externalEventId } = await createDurableEventAndAttestation(assignment.id)
     const context = createVerifiedEvidenceContext({
       tenantId,
       networkId,
@@ -219,7 +224,7 @@ describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05
 
   it('rejects a tenant scope mismatch', async () => {
     const { assignment } = await createAssignmentAndCheckpoint('tenant')
-    const { event, attestation, externalEventId } = await createDurableEventAndAttestation('tenant-evt')
+    const { event, attestation, externalEventId } = await createDurableEventAndAttestation(assignment.id)
     const context = createVerifiedEvidenceContext({
       tenantId: 'different-tenant-id',
       networkId,
@@ -238,7 +243,7 @@ describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05
 
   it('rejects a verificationPolicyVersion mismatch', async () => {
     const { assignment } = await createAssignmentAndCheckpoint('policy')
-    const { event, attestation, externalEventId } = await createDurableEventAndAttestation('policy-evt')
+    const { event, attestation, externalEventId } = await createDurableEventAndAttestation(assignment.id)
     const context = createVerifiedEvidenceContext({
       tenantId,
       networkId,
@@ -257,7 +262,7 @@ describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05
 
   it('rejects a non-verified Attestation (status != verified)', async () => {
     const { assignment } = await createAssignmentAndCheckpoint('not-verified')
-    const { event, attestation, externalEventId } = await createDurableEventAndAttestation('not-verified-evt', {
+    const { event, attestation, externalEventId } = await createDurableEventAndAttestation(assignment.id, {
       attestationStatus: 'disputed',
     })
     const context = createVerifiedEvidenceContext({
@@ -277,7 +282,7 @@ describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05
   })
 
   it('rejects when the checkpoint does not exist (initEconomicPipeline not called)', async () => {
-    const { event, attestation, externalEventId } = await createDurableEventAndAttestation('no-checkpoint')
+    const { event, attestation, externalEventId } = await createDurableEventAndAttestation('nonexistent-assignment-id')
     const context = createVerifiedEvidenceContext({
       tenantId,
       networkId,
