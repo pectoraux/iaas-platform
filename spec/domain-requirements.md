@@ -162,8 +162,18 @@ Cross-assignment and cross-tenant contamination MUST be impossible.
 These are recorded as architecture gaps for future Work Items. They are NOT
 implemented and MUST NOT be treated as existing architecture.
 
+> **WORK-008 (BASE-015) — Architecture Truth Reconciliation:**
+> `DOM-P01` was promoted out of this section by `ACR-001` (APPROVED) →
+> `IAAS-DOM-ARCH-2` (FROZEN) → `DOM-013` → `WORK-003` (VERIFIED). It is
+> retained below as a historical record with a `SUPERSEDED` marker so the
+> V1→V2 promotion is visible. The canonical current requirement is
+> `DOM-013` in `spec/domain-requirements-v2.md`. All other `DOM-Pxx` items
+> remain genuinely future/proposed and are NOT promoted (W008-AC04).
+
 - `DOM-P01` — Generic `VerifiedEvidenceContext` (constitution §6 future
-  evolution). PROPOSED.
+  evolution). **SUPERSEDED** — promoted to `DOM-013` (`IAAS-DOM-ARCH-2`) via
+  `ACR-001`; implemented and VERIFIED by `WORK-003`. See
+  `spec/domain-requirements-v2.md`.
 - `DOM-P02` — TransformRegistry (technical catalog). FUTURE.
 - `DOM-P03` — TransformRuntime (execution engine). FUTURE.
 - `DOM-P04` — Extension + ExtensionRegistry + ExtensionRuntime. FUTURE.

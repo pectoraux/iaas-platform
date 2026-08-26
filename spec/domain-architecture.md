@@ -1,12 +1,13 @@
 # IAAS Domain Architecture — IAAS-DOM-ARCH-1
 
 - Domain Architecture Version: `IAAS-DOM-ARCH-1`
-- Status: **FROZEN** (canonical, immutable; changes require an Architecture Change Request and a new version `IAAS-DOM-ARCH-2`)
+- Status: **FROZEN** (immutable historical record; SUPERSEDED by `IAAS-DOM-ARCH-2` via ACR-001)
 - Governing Architecture: `IAAS-GOV-ARCH-1` (FROZEN)
 - Produced by: `WORK-002` (Repository Baseline and Domain Architecture V1)
 - Evidence basis: `docs/architecture/REPOSITORY-BASELINE.md` (truth-classified repository audit) and `docs/architecture/RECONCILIATION-MATRIX.md`
 
-> This document is the canonical Domain Architecture V1. It reconciles the
+> This document is the historical Domain Architecture V1 (SUPERSEDED by
+> `IAAS-DOM-ARCH-2`). It reconciles the
 > existing `docs/architecture/` corpus (Constitution + Phase 13R reconciliation
 > + Phase 14A–14F contracts) with actual repository evidence (code, schema,
 > tests, CI, history) into a single truth-classified architectural state.
@@ -287,6 +288,15 @@ Node → Bundle → Route → TransportExecution → TransportAdapter → Delive
   VPP pre-population pattern is accepted as safe in the interim (durable
   PostgreSQL records; checkpoint IDs validated against deterministic
   identities; stale/NULL IDs recovered from durable state).
+
+> **WORK-008 (BASE-015) addendum:** the `FUTURE` classification above was
+> accurate at the time V1 was frozen (WORK-002). It has since been promoted:
+> `ACR-001` (APPROVED) → `IAAS-DOM-ARCH-2` (FROZEN) → `DOM-013` → `WORK-003`
+> (VERIFIED). `VerifiedEvidenceContext` is now IMPLEMENTED in
+> `src/lib/domain/verified-evidence-context.ts` +
+> `src/lib/control-plane/economic-pipeline.ts` (applyVerifiedEvidence). The
+> canonical current architecture is `spec/domain-architecture-v2.md`. This V1
+> text is retained as an immutable historical record (W008-AC03).
 
 ## 9. Protocol / Extension / Marketplace / SDK Boundaries
 

@@ -270,7 +270,7 @@ Definition of Done: Typecheck and Architecture Contract failures within scope ar
 
 ## WORK-007 — Typecheck Residual Closure and TypeScript Project Boundaries
 
-Status: `READY`
+Status: `VERIFIED`
 
 Architecture Version: `IAAS-GOV-ARCH-1`
 
@@ -315,3 +315,46 @@ Required Verification:
 - independent Architect Review.
 
 Definition of Done: residual Typecheck failures are objectively classified; baselineEngine is fixed with regression evidence; TypeScript project boundaries are explicit and validated; IAAS application Typecheck is clean; all existing CI gates remain green; evidence is recorded; PR merged; Work Item VERIFIED.
+
+## WORK-008 — Architecture Truth Reconciliation and Verified-Evidence Promotion
+
+Status: `READY`
+
+Architecture Version: `IAAS-GOV-ARCH-1`
+
+Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
+
+Dependencies: `WORK-007`
+
+Requirements: `BASE-015`; `GOV-001`, `GOV-003`, `GOV-006`, `GOV-008`.
+
+Objective: synchronize the canonical planning/specification layer with verified repository reality after WORK-003 and WORK-007. The V1-derived domain requirements still label `DOM-P01 VerifiedEvidenceContext` as `PROPOSED`, even though ACR-001 was approved, `IAAS-DOM-ARCH-2` was frozen, and WORK-003 was implemented and VERIFIED.
+
+Repository Scope: `spec/` specification documents; `docs/architecture/` only for reconciliation/addendum evidence; directly related specification tests; CI configuration only when required.
+
+Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-2` remain FROZEN; no production code changes; no new domain primitives; no new ACRs unless a genuine contradiction is discovered; no promotion of unrelated FUTURE items; frozen architecture versions are not modified in place (historical V1 preserved with addendum).
+
+Out of Scope: production code changes, frozen architecture mutation, new primitives, promoting TransformRegistry/TransformRuntime/Extensions/Marketplace/SDK/Fragmentation, new ACRs without genuine contradiction, WORK-009+.
+
+Acceptance Criteria:
+
+- `W008-AC01` truth drift inventory: every stale statement captured with source, current statement, verified evidence, classification, required correction.
+- `W008-AC02` VerifiedEvidenceContext is no longer represented as merely proposed in the current domain requirements/index; identified as implemented under IAAS-DOM-ARCH-2, traced to ACR-001 and WORK-003.
+- `W008-AC03` IAAS-DOM-ARCH-1 remains immutable historical architecture; wording not silently rewritten.
+- `W008-AC04` no other DOM-Pxx future/open/research item is promoted without its own verified architecture decision.
+- `W008-AC05` cross-document consistency: domain-architecture.md, domain-architecture-v2.md, domain-requirements.md, architecture.md, architecture-lock.md, work-items.md, dependency-graph.md remain mutually consistent.
+- `W008-AC06` regression protection: deterministic specification tests detect a future reversion that incorrectly labels a VERIFIED primitive as merely proposed.
+- `W008-AC07` no production changes (src/, prisma/, runtime, economic, Data Plane, vertical).
+- `W008-AC08` governance gates remain green (validator, architecture-contract, Typecheck, PostgreSQL, lint, diff-scope).
+
+Required Verification:
+
+- truth-drift inventory;
+- updated current-domain requirement/index state;
+- historical V1 unchanged evidence;
+- regression test proving the verified-evidence promotion cannot silently revert;
+- full CI evidence;
+- exact diff/scope evidence;
+- independent Architect Review.
+
+Definition of Done: truth drift is inventoried; VerifiedEvidenceContext is correctly represented as implemented/current; historical V1 remains immutable; unrelated future primitives remain future/proposed; regression protection is added; all governance and engineering CI gates remain green; PR submitted; Architect Review approves; PR merged; WORK-008 becomes VERIFIED only after independent Architect Review.
