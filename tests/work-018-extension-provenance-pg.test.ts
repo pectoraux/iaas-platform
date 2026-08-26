@@ -434,8 +434,11 @@ describe('WORK-018 — ExtensionProvenance PostgreSQL (W018-AC01..AC07)', () => 
     const beforeBootstrap = getDefaultExtensionProvenanceSink()
     expect(beforeBootstrap.constructor.name).toBe('InMemoryExtensionProvenanceSink')
 
-    // Run the application composition root.
-    const { initializeBootstrap } = await import('../src/lib/bootstrap')
+    // Reset the bootstrap initialized flag so initializeBootstrap() runs fresh.
+    // (initializeBootstrap is idempotent — without reset, a prior test's call
+    // would make this call a no-op.)
+    const { initializeBootstrap, __resetBootstrapForTesting } = await import('../src/lib/bootstrap')
+    __resetBootstrapForTesting()
     initializeBootstrap()
 
     // After bootstrap, the default sink MUST be the durable sink.
