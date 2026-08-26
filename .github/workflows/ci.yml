@@ -62,7 +62,7 @@ jobs:
       - name: Run specification consistency validator
         run: bun run spec:validate
       - name: Run specification validator negative tests
-        run: bun test tests/spec-consistency-validator.test.ts tests/pr-invariant-check.test.ts tests/work-002-baseline.test.ts tests/work-003-verified-evidence-context.test.ts tests/work-004-runtime-bootstrap.test.ts --timeout 120000
+        run: bun test tests/spec-consistency-validator.test.ts tests/pr-invariant-check.test.ts tests/work-002-baseline.test.ts tests/work-003-verified-evidence-context.test.ts --timeout 120000
       - name: Verify one-active-PR invariant (W001-AC09, live GitHub state)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -126,7 +126,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bunx prisma generate
       - name: Architecture + runtime resolution tests (no DB)
-        run: bun test tests/architecture-contract.test.ts tests/runtime-resolution.test.ts --timeout 30000
+        run: bun test tests/architecture-contract.test.ts tests/runtime-resolution.test.ts tests/work-004-runtime-bootstrap.test.ts --timeout 30000
 
   postgres-integration-tests:
     name: PostgreSQL Integration Tests
