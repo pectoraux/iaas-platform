@@ -2,7 +2,8 @@
 
 - Governance Architecture Version: `IAAS-GOV-ARCH-1`
 - Status: **FROZEN**
-- Domain Architecture Version: `IAAS-DOM-ARCH-1` (FROZEN — published by WORK-002; changes require an ACR and a new version `IAAS-DOM-ARCH-2`).
+- Domain Architecture Version: `IAAS-DOM-ARCH-2` (FROZEN — published through ACR-001; changes require an ACR and a new version `IAAS-DOM-ARCH-3`).
+- Superseded Domain Version: `IAAS-DOM-ARCH-1` (immutable historical record).
 
 ## Frozen Rules
 
@@ -19,6 +20,7 @@
 11. Corrections remain attached to the same Work Item unless architecture changes.
 12. The implementation agent does not choose the next Work Item.
 13. WORK-001 authorizes no production feature implementation.
+14. `IAAS-DOM-ARCH-2` introduces `VerifiedEvidenceContext` only as defined by ACR-001; no other V1 architectural rule is changed.
 
 ## Workflow
 
