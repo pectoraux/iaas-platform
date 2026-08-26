@@ -99,10 +99,10 @@ describe('spec consistency validator — positive case', () => {
     expect(first.stdout).toContain('architecture=IAAS-GOV-ARCH-1')
     expect(first.stdout).toContain('domain-architecture=IAAS-DOM-ARCH-3')
     expect(first.stdout).toContain('required-files=13')
-    expect(first.stdout).toContain('work-items=12')
+    expect(first.stdout).toContain('work-items=13')
     expect(first.stdout).toContain('work-item-schema-fields=11')
     expect(first.stdout).toContain('work001-acceptance-criteria=13')
-    expect(first.stdout).toContain('dependency-edges=11')
+    expect(first.stdout).toContain('dependency-edges=12')
     expect(first.stdout).toContain('checks=20')
     expect(first.stderr).toBe('')
 
@@ -254,7 +254,9 @@ describe('spec consistency validator — negative cases (WORK-001 Required Tests
   test('fails when the graph does not state WORK-001 is VERIFIED (SC-11)', () => {
     const specDir = makeTempSpecCopy()
     rewrite(specDir, 'dependency-graph.md', (content) =>
-      content.replace('WORK-001 is VERIFIED.', 'WORK-001 is IMPLEMENTING.'),
+      content
+        .replace('WORK-001 is VERIFIED.', 'WORK-001 is IMPLEMENTING.')
+        .replace('WORK-001 is VERIFIED, which is the eligibility/release condition for WORK-002; the same verified-dependency rule applies transitively to subsequent Work Items.\n', ''),
     )
     const result = runValidator(specDir)
     expectFailure(result, 'SC-11', 'does not state that WORK-001 is VERIFIED')
