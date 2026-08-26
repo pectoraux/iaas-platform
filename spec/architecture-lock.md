@@ -2,8 +2,8 @@
 
 - Governance Architecture Version: `IAAS-GOV-ARCH-1`
 - Status: **FROZEN**
-- Domain Architecture Version: `IAAS-DOM-ARCH-2` (FROZEN — published through ACR-001; changes require an ACR and a new version `IAAS-DOM-ARCH-3`).
-- Superseded Domain Version: `IAAS-DOM-ARCH-1` (immutable historical record).
+- Domain Architecture Version: `IAAS-DOM-ARCH-3` (FROZEN — published through ACR-002; changes require an ACR and a new version `IAAS-DOM-ARCH-4`).
+- Superseded Domain Versions: `IAAS-DOM-ARCH-2` (via ACR-001) and `IAAS-DOM-ARCH-1` (via WORK-002) — immutable historical records.
 
 ## Frozen Rules
 

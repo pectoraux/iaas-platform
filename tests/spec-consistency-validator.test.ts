@@ -97,12 +97,12 @@ describe('spec consistency validator — positive case', () => {
     expect(first.exitCode).toBe(0)
     expect(first.stdout).toContain('SPEC VALIDATION PASSED')
     expect(first.stdout).toContain('architecture=IAAS-GOV-ARCH-1')
-    expect(first.stdout).toContain('domain-architecture=IAAS-DOM-ARCH-2')
+    expect(first.stdout).toContain('domain-architecture=IAAS-DOM-ARCH-3')
     expect(first.stdout).toContain('required-files=13')
-    expect(first.stdout).toContain('work-items=8')
+    expect(first.stdout).toContain('work-items=9')
     expect(first.stdout).toContain('work-item-schema-fields=11')
     expect(first.stdout).toContain('work001-acceptance-criteria=13')
-    expect(first.stdout).toContain('dependency-edges=7')
+    expect(first.stdout).toContain('dependency-edges=8')
     expect(first.stdout).toContain('checks=20')
     expect(first.stderr).toBe('')
 
@@ -384,7 +384,7 @@ describe('spec consistency validator — WORK-002 domain architecture cases', ()
   test('fails when the domain architecture is reverted to PENDING (SC-04)', () => {
     const specDir = makeTempSpecCopy()
     rewrite(specDir, 'architecture.md', (content) =>
-      content.replace('| `IAAS-DOM-ARCH-2` | FROZEN |', '| `IAAS-DOM-ARCH-2` | PENDING WORK-003 |'),
+      content.replace('| `IAAS-DOM-ARCH-3` | FROZEN |', '| `IAAS-DOM-ARCH-3` | PENDING WORK-010 |'),
     )
     const result = runValidator(specDir)
     expectFailure(result, 'SC-04', 'must mark the Domain Architecture FROZEN')
@@ -393,7 +393,7 @@ describe('spec consistency validator — WORK-002 domain architecture cases', ()
   test('fails when the domain architecture version is malformed (SC-04)', () => {
     const specDir = makeTempSpecCopy()
     rewrite(specDir, 'architecture.md', (content) =>
-      content.replace('`IAAS-DOM-ARCH-2`', '`domain-version-final`'),
+      content.replace('`IAAS-DOM-ARCH-3`', '`domain-version-final`'),
     )
     const result = runValidator(specDir)
     expectFailure(result, 'SC-04', 'malformed Domain Architecture version')
@@ -402,7 +402,7 @@ describe('spec consistency validator — WORK-002 domain architecture cases', ()
   test('fails when domain architecture versions disagree between docs (SC-04)', () => {
     const specDir = makeTempSpecCopy()
     rewrite(specDir, 'architecture-lock.md', (content) =>
-      content.replace('`IAAS-DOM-ARCH-2`', '`IAAS-DOM-ARCH-3`'),
+      content.replace('`IAAS-DOM-ARCH-3`', '`IAAS-DOM-ARCH-4`'),
     )
     const result = runValidator(specDir)
     expectFailure(result, 'SC-04', 'domain architecture version inconsistent')
