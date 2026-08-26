@@ -137,7 +137,7 @@ Definition of Done: implementation committed; W003 acceptance criteria objective
 
 ## WORK-004 — Runtime Registry Bootstrap Reliability
 
-Status: `READY`
+Status: `VERIFIED`
 
 Architecture Version: `IAAS-GOV-ARCH-1`
 
