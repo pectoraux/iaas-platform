@@ -256,9 +256,9 @@ describeOrSkip('Phase 12B Slice 7: Compute Migration', () => {
     expect(reconcileResult.stage).toBe(ECONOMIC_STAGE.COMPLETED)
 
     // Same objects reused.
-    expect(reconcileResult.contributionId).toBe(stateBefore!.contributionId)
-    expect(reconcileResult.rewardId).toBe(stateBefore!.rewardId)
-    expect(reconcileResult.settlementId).toBe(stateBefore!.settlementId)
+    expect(reconcileResult.contributionId).toBe(stateBefore!.contributionId ?? undefined) // WORK-006 (BASE-007): null → undefined for toBe overload
+    expect(reconcileResult.rewardId).toBe(stateBefore!.rewardId ?? undefined) // WORK-006 (BASE-007): null → undefined
+    expect(reconcileResult.settlementId).toBe(stateBefore!.settlementId ?? undefined) // WORK-006 (BASE-007): null → undefined
 
     // Still exactly one of each.
     const contributions = await db.contribution.findMany({ where: { tenantId: f.tenantId } })

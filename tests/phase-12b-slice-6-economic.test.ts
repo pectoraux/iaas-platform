@@ -341,24 +341,24 @@ describeOrSkip('Phase 12B Slice 6: Economic Pipeline', () => {
     const settlement = await db.settlement.findUnique({
       where: { id: trace.settlementId! },
     })
-    expect(settlement!.rewardId).toBe(trace.rewardId)
+    expect(settlement!.rewardId).toBe(trace.rewardId!) // WORK-006 (BASE-007): non-null assertion (trace is complete)
 
     const reward = await db.reward.findUnique({
       where: { id: trace.rewardId! },
     })
-    expect(reward!.contributionId).toBe(trace.contributionId)
+    expect(reward!.contributionId).toBe(trace.contributionId!) // WORK-006 (BASE-007): non-null assertion
 
     const contribution = await db.contribution.findUnique({
       where: { id: trace.contributionId! },
     })
     // Contribution references the attestation via attestationIdsJson.
     const attestationIds = JSON.parse(contribution!.attestationIdsJson) as string[]
-    expect(attestationIds).toContain(trace.attestationId)
+    expect(attestationIds).toContain(trace.attestationId!) // WORK-006 (BASE-007): non-null assertion (trace is complete)
 
     const attestation = await db.attestation.findUnique({
       where: { id: trace.attestationId! },
     })
-    expect(attestation!.eventId).toBe(trace.eventId)
+    expect(attestation!.eventId).toBe(trace.eventId!) // WORK-006 (BASE-007): non-null assertion
 
     const event = await db.event.findUnique({
       where: { id: trace.eventId! },

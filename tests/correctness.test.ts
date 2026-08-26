@@ -199,7 +199,7 @@ describe('Task 2: Worker claiming (FOR UPDATE SKIP LOCKED)', () => {
 
     // After processing: verified or rejected (not queued or processing).
     const after = await db.event.findUnique({ where: { id: result.event_id } })
-    expect(['verified', 'rejected']).toContain(after?.status)
+    expect(['verified', 'rejected']).toContain(after?.status ?? '') // WORK-006 (BASE-007): coerce undefined to '' for toContain
   })
 })
 

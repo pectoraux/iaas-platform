@@ -317,7 +317,7 @@ describe('Task 7: Double-entry ledger', () => {
 
     // Verify the entries sum to 0.
     const entries = await db.ledgerEntry.findMany({ where: { postingId: result.posting_id } })
-    const sum = entries.reduce((acc, e) => acc + e.amount, 0)
+    const sum = entries.reduce((acc, e) => acc + e.amount.toNumber(), 0) // WORK-006 (BASE-007): Prisma Decimal → number
     expect(Math.abs(sum)).toBeLessThan(0.001)
   })
 
@@ -327,7 +327,7 @@ describe('Task 7: Double-entry ledger', () => {
 
     // Verify the posting is balanced.
     const entries = await db.ledgerEntry.findMany({ where: { postingId: result.posting_id } })
-    const sum = entries.reduce((acc, e) => acc + e.amount, 0)
+    const sum = entries.reduce((acc, e) => acc + e.amount.toNumber(), 0) // WORK-006 (BASE-007): Prisma Decimal → number
     expect(Math.abs(sum)).toBeLessThan(0.001)
   })
 })

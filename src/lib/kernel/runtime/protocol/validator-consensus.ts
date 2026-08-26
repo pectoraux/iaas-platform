@@ -278,6 +278,17 @@ export function nonceAwareOrder(transactions: ProtocolTransaction[]): ProtocolTr
  *   - Per-sender nonce ascending
  *   - Global tie-break by transaction ID
  */
+
+// WORK-006 (BASE-007): HeapNode is used by the BucketSortedConsensusEngine's
+// private buildMinHeap/siftDown helpers. Previously declared inside the
+// method body, it was out of scope for the class methods (TS2304). Moved to
+// module scope so the methods can reference it.
+interface HeapNode {
+  tx: ProtocolTransaction
+  sender: string
+  nextIdx: number
+}
+
 export class BucketSortedConsensusEngine implements ConsensusEngine {
   private readonly proposerId: string
 
@@ -352,12 +363,7 @@ export class BucketSortedConsensusEngine implements ConsensusEngine {
     }
 
     // Build a min-heap of (txId, sender) pairs for the first tx of each sender.
-    interface HeapNode {
-      tx: ProtocolTransaction
-      sender: string
-      nextIdx: number
-    }
-
+    // (HeapNode interface is declared at module scope — WORK-006 BASE-007.)
     const heap: HeapNode[] = []
     for (const [sender, queue] of bySender) {
       if (queue.length > 0) {

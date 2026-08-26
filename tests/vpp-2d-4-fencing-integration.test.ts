@@ -63,10 +63,27 @@ describe('VPP-2D-4 fencing: commitment stale-worker rejection (real DB)', () => 
       },
     })
 
+    // WORK-006 (BASE-007): VppDispatch requires executionId (1:1 FK to Execution).
+    // Create the Execution record first, then link it.
+    const execution = await db.execution.create({
+      data: {
+        tenantId,
+        networkId,
+        networkVersionId: versionId,
+        requestedQuantity: '100',
+        requestedUnit: 'kW',
+        startTime: start,
+        endTime: end,
+        status: 'dispatching',
+        sourceType: 'vpp_dispatch',
+        sourceId: `vpp-2d-4-${Date.now()}`,
+      },
+    })
     const dispatch = await db.vppDispatch.create({
       data: {
         tenantId,
         programId: program.id,
+        executionId: execution.id,
         requestedKw: '100',
         requestedKwh: '200',
         startTime: start,
@@ -205,10 +222,27 @@ describe('VPP-2D-4 fencing: commitment stale-worker rejection (real DB)', () => 
       },
     })
 
+    // WORK-006 (BASE-007): VppDispatch requires executionId (1:1 FK to Execution).
+    // Create the Execution record first, then link it.
+    const execution = await db.execution.create({
+      data: {
+        tenantId,
+        networkId,
+        networkVersionId: versionId,
+        requestedQuantity: '100',
+        requestedUnit: 'kW',
+        startTime: start,
+        endTime: end,
+        status: 'dispatching',
+        sourceType: 'vpp_dispatch',
+        sourceId: `vpp-2d-4-${Date.now()}`,
+      },
+    })
     const dispatch = await db.vppDispatch.create({
       data: {
         tenantId,
         programId: program.id,
+        executionId: execution.id,
         requestedKw: '100',
         requestedKwh: '200',
         startTime: start,

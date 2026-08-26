@@ -141,12 +141,18 @@ describe('Architecture contract: VPP depends on kernel (not vice versa)', () => 
     const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
     const content = readFileSync(vppServicePath, 'utf-8')
 
-    // VPP should import generic services — this proves the dependency direction.
+    // WORK-006 (BASE-008): Phase 12B Slice 7 migrated VPP to delegate economic
+    // processing to the generic EconomicPipelineState + processEconomicPipeline.
+    // VPP no longer directly imports contribution/reward/ledger/settlement
+    // services — it imports the generic economic-pipeline orchestrator, which
+    // in turn dynamically imports those services. The stale assertion expected
+    // direct static imports of all economic services in vpp.service.ts; the
+    // correct assertion is that VPP imports capacity.service (capacity is
+    // still direct) + the generic economic-pipeline orchestrator (which owns
+    // the contribution→reward→ledger→settlement chain). This preserves the
+    // frozen architecture: VPP depends on generic services, not vice versa.
     expect(content).toMatch(/from\s+['"]\.\/capacity\.service/)
-    expect(content).toMatch(/from\s+['"]\.\/contribution\.service/)
-    expect(content).toMatch(/from\s+['"]\.\/reward\.service/)
-    expect(content).toMatch(/from\s+['"]\.\/ledger\.service/)
-    expect(content).toMatch(/from\s+['"]\.\/settlement\.service/)
+    expect(content).toMatch(/from\s+['"]@\/lib\/control-plane\/economic-pipeline/)
   })
 })
 
@@ -381,16 +387,19 @@ describe('Architecture contract: execution/economics separation (Phase 5.2)', ()
     const vppServicePath = join(process.cwd(), 'src', 'lib', 'services', 'vpp.service.ts')
     const content = readFileSync(vppServicePath, 'utf-8')
 
-    // Find the position of runtime.completeAssignment and createContribution.
-    // completeAssignment must appear BEFORE createContribution in the
-    // executeDispatchAssignment function — operational completion happens
-    // before the economic pipeline.
+    // WORK-006 (BASE-008): Phase 12B Slice 7 moved createContribution into the
+    // generic economic-pipeline orchestrator (economic-pipeline.ts), not
+    // vpp.service.ts. The stale assertion searched for createContribution( in
+    // vpp.service.ts and always returned -1. The correct assertion: VPP calls
+    // runtime.completeAssignment (operational completion) BEFORE it calls
+    // processEconomicPipeline (which drives contribution→reward→ledger→
+    // settlement). This preserves the execution/economics separation contract.
     const completeIdx = content.indexOf('runtime.completeAssignment(tx,')
-    const contributionIdx = content.indexOf('createContribution(')
+    const economicIdx = content.indexOf('processEconomicPipeline(')
 
     expect(completeIdx).toBeGreaterThan(-1)
-    expect(contributionIdx).toBeGreaterThan(-1)
-    expect(completeIdx).toBeLessThan(contributionIdx)
+    expect(economicIdx).toBeGreaterThan(-1)
+    expect(completeIdx).toBeLessThan(economicIdx)
   })
 
   it('VPP markReconciliationRequired checks operationalCompleted before calling runtime.failAssignment', () => {
@@ -632,9 +641,13 @@ describe('Architecture contract: physical execution boundary (Phase 6)', () => {
     const infraPath = join(process.cwd(), 'src', 'lib', 'kernel', 'runtime', 'infrastructure-runtime.ts')
     const content = readFileSync(infraPath, 'utf-8')
 
-    // Phase 7.3: The runtime must accept an AdapterRegistry in its constructor
-    // (dependency injection), not import the global singleton.
-    expect(content).toMatch(/constructor\(private readonly adapterRegistry:\s*AdapterRegistry\)/)
+    // WORK-006 (BASE-008): the constructor is multi-line (the runtime also
+    // accepts an optional leaseValidator). The stale single-line regex
+    // `constructor\(private readonly adapterRegistry:\s*AdapterRegistry\)`
+    // did not match the multi-line form. The correct assertion verifies the
+    // constructor accepts a private readonly adapterRegistry of type
+    // AdapterRegistry, regardless of line breaks.
+    expect(content).toMatch(/constructor\(\s*private readonly adapterRegistry:\s*AdapterRegistry/)
     // Must import the TYPE (not the singleton instance).
     expect(content).toMatch(/import type \{ AdapterRegistry \}/)
     // Must NOT import the global adapterRegistry singleton instance.

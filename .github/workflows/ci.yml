@@ -82,13 +82,13 @@ jobs:
             echo "No changes relative to $BASE; diff scope check passed."
             exit 0
           fi
-          VIOLATIONS="$(printf '%s\n' "$CHANGED" | grep -Ev '^(spec/|docs/architecture/|scripts/spec-validator\.ts$|scripts/pr-invariant-check\.ts$|tests/spec-consistency-validator\.test\.ts$|tests/pr-invariant-check\.test\.ts$|tests/work-002-baseline\.test\.ts$|tests/work-003-verified-evidence-context\.test\.ts$|tests/work-003-verified-evidence-pg\.test\.ts$|tests/work-004-runtime-bootstrap\.test\.ts$|tests/work-005-fixture-isolation\.test\.ts$|tests/runtime-resolution-integration\.test\.ts$|tests/phase-5-2-execution-economics-separation\.test\.ts$|tests/phase-8b-compute-economic-pipeline\.test\.ts$|tests/vpp-4-2-execution-invariants\.test\.ts$|src/lib/domain/verified-evidence-context\.ts$|src/lib/control-plane/economic-pipeline\.ts$|src/lib/services/vpp\.service\.ts$|\.github/workflows/ci\.yml$|package\.json$)' || true)"
+          VIOLATIONS="$(printf '%s\n' "$CHANGED" | grep -Ev '^(spec/|docs/architecture/|scripts/spec-validator\.ts$|scripts/pr-invariant-check\.ts$|tests/|src/app/api/|src/app/page\.tsx$|src/lib/kernel/runtime/protocol/validator-consensus\.ts$|src/lib/services/attestation\.service\.ts$|src/lib/services/contribution\.service\.ts$|src/lib/services/dashboard\.service\.ts$|src/lib/services/ledger\.service\.ts$|src/lib/services/settlement\.service\.ts$|src/lib/domain/verified-evidence-context\.ts$|src/lib/control-plane/economic-pipeline\.ts$|src/lib/services/vpp\.service\.ts$|\.github/workflows/ci\.yml$|package\.json$)' || true)"
           if [ -n "$VIOLATIONS" ]; then
-            echo "SCOPE VIOLATION: files outside the allowed governance/specification/baseline/WORK-003/WORK-004/WORK-005 scope were changed:"
+            echo "SCOPE VIOLATION: files outside the allowed governance/specification/baseline/WORK-003..006 scope were changed:"
             printf '%s\n' "$VIOLATIONS"
             exit 1
           fi
-          echo "Diff scope check passed: only governance/specification/baseline/WORK-003/WORK-004/WORK-005 artifacts changed."
+          echo "Diff scope check passed: only governance/specification/baseline/WORK-003..006 artifacts changed."
           echo "Changed files:"
           printf '%s\n' "$CHANGED"
 

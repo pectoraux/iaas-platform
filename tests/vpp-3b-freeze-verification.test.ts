@@ -60,10 +60,26 @@ async function createSettlementState(opts: {
     },
   })
 
+  // WORK-006 (BASE-007): VppDispatch requires executionId (1:1 FK to Execution).
+  const execution = await db.execution.create({
+    data: {
+      tenantId,
+      networkId,
+      networkVersionId: versionId,
+      requestedQuantity: '500',
+      requestedUnit: 'kW',
+      startTime: start,
+      endTime: end,
+      status: 'buyer_settlement_pending',
+      sourceType: 'vpp_dispatch',
+      sourceId: `vpp-3b-${Date.now()}`,
+    },
+  })
   const dispatch = await db.vppDispatch.create({
     data: {
       tenantId,
       programId: program.id,
+      executionId: execution.id,
       requestedKw: '500',
       requestedKwh: '1000',
       startTime: start,

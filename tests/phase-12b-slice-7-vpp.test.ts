@@ -226,9 +226,9 @@ describeOrSkip('Phase 12B Slice 7: VPP Migration Complete', () => {
     // Reconcile.
     const reconcileResult = await reconcileEconomicPipeline(assignments[0].executionAssignmentId)
     expect(reconcileResult.stage).toBe(ECONOMIC_STAGE.COMPLETED)
-    expect(reconcileResult.contributionId).toBe(stateBefore!.contributionId)
-    expect(reconcileResult.rewardId).toBe(stateBefore!.rewardId)
-    expect(reconcileResult.settlementId).toBe(stateBefore!.settlementId)
+    expect(reconcileResult.contributionId).toBe(stateBefore!.contributionId ?? undefined) // WORK-006 (BASE-007): null → undefined
+    expect(reconcileResult.rewardId).toBe(stateBefore!.rewardId ?? undefined) // WORK-006 (BASE-007): null → undefined
+    expect(reconcileResult.settlementId).toBe(stateBefore!.settlementId ?? undefined) // WORK-006 (BASE-007): null → undefined
 
     // Exactly one of each.
     const contributions = await db.contribution.findMany({ where: { tenantId } })

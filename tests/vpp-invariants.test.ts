@@ -117,7 +117,7 @@ describe('VPP invariant: derived contribution', () => {
     const result = await executeDispatchAssignment(tenantId, assignments[0].id, provisioningSecret)
 
     // The contribution quantity must equal the performance_kwh.
-    const contribution = await db.contribution.findUnique({ where: { id: result.contribution_id } })
+    const contribution = await db.contribution.findUnique({ where: { id: result.contribution_id! } }) // WORK-006 (BASE-007): non-null
     const baseline = await db.vppBaseline.findFirst({ where: { assignmentId: assignments[0].id } })
 
     expect(contribution).toBeTruthy()
@@ -126,7 +126,7 @@ describe('VPP invariant: derived contribution', () => {
     expect(contribution!.unit).toBe('kWh')
 
     // The contribution quantity must NOT be the attestation's power_kw value.
-    const attestation = await db.attestation.findFirst({ where: { eventId: result.event_id } })
+    const attestation = await db.attestation.findFirst({ where: { eventId: result.event_id! } }) // WORK-006 (BASE-007): non-null
     expect(attestation).toBeTruthy()
     // performance_kwh = actual_kwh (baseline=0), which is assigned_kwh * 0.98.
     // attestation.quantity = power_kw (first field), which is assigned_kw * 0.98.
@@ -151,7 +151,7 @@ describe('VPP invariant: capacity integrity', () => {
       createCapacityReservation(tenantId, {
         programId: program.id, operatorId, assetId, capabilityType: 'energy_discharge',
         reservedKw: '15',
-        startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+        startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString() // WORK-006 (BASE-007): inline dates (no local startTime/endTime in scope),
       }),
     ).rejects.toThrow(/exceeds physical capacity/)
   })
@@ -168,7 +168,7 @@ describe('VPP invariant: capacity integrity', () => {
       createCapacityReservation(tenantId, {
         programId: program.id, operatorId: otherOperator.id, assetId, capabilityType: 'energy_discharge',
         reservedKw: '5',
-        startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+        startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString() // WORK-006 (BASE-007): inline dates (no local startTime/endTime in scope),
       }),
     ).rejects.toThrow(/does not own asset/)
   })
@@ -184,7 +184,7 @@ describe('VPP invariant: capacity integrity', () => {
       createCapacityReservation(tenantId, {
         programId: program.id, operatorId, assetId, capabilityType: 'frequency_response',
         reservedKw: '5',
-        startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+        startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString() // WORK-006 (BASE-007): inline dates (no local startTime/endTime in scope),
       }),
     ).rejects.toThrow(/not assigned.*capability/)
   })
@@ -417,7 +417,7 @@ describe('VPP invariant: no untrusted capacity', () => {
       createCapacityReservation(tenantId, {
         programId: program.id, operatorId, assetId, capabilityType: 'energy_discharge',
         reservedKw: '50',
-        startTime: startTime.toISOString(), endTime: endTime.toISOString(),
+        startTime: new Date().toISOString(), endTime: new Date(Date.now() + 3600000).toISOString() // WORK-006 (BASE-007): inline dates (no local startTime/endTime in scope),
       }),
     ).rejects.toThrow(/exceeds verified physical capacity/)
   })
@@ -1092,10 +1092,12 @@ describe('VPP invariant: reconciliation', () => {
       expect(settlement?.status).toBe('completed')
 
       // Ledger posting exists for this reward.
-      const ledgerEntry = await db.ledgerEntry.findFirst({
-        where: { referenceType: 'reward', referenceId: reward!.id },
+      // WORK-006 (BASE-007): LedgerEntry has no referenceType/referenceId fields.
+      // Find the posting by the reward's idempotency key pattern, then its entries.
+      const ledgerPostings = await db.ledgerPosting.findMany({
+        where: { tenantId, idempotencyKey: { contains: reward!.id } },
       })
-      expect(ledgerEntry).toBeTruthy()
+      expect(ledgerPostings.length).toBeGreaterThan(0)
     }
   })
 
