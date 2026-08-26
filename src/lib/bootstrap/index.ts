@@ -145,16 +145,6 @@ export function initializeBootstrap(): void {
   initialized = true
 }
 
-/**
- * Test helper: reset the bootstrap initialized flag. Production code should
- * NOT call this — it is for test isolation only. Allows tests to call
- * initializeBootstrap() fresh and verify side effects (e.g. durable sink
- * installation).
- */
-export function __resetBootstrapForTesting(): void {
-  initialized = false
-}
-
 // Phase 6.3: NO module-scope call to initializeBootstrap().
 // Importing this module is a pure import — it does not mutate global state.
 // The caller MUST explicitly call initializeBootstrap().
