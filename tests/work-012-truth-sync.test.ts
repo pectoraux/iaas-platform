@@ -125,3 +125,43 @@ describe('WORK-012 — No unrelated promotion (W012-AC06)', () => {
     expect(src).toContain('SUPERSEDED by DOM-016')
   })
 })
+
+// ---------------------------------------------------------------------------
+// AR-012-01 — no stale implementation-authorization language contradicting IMPLEMENTED
+// ---------------------------------------------------------------------------
+
+describe('WORK-012 — AR-012-01: no stale authorization language (AR-012-01)', () => {
+  test('V3 domain-architecture-v3.md does NOT say TransformRegistry/Runtime implementation is unauthorized', () => {
+    const src = readSpec('domain-architecture-v3.md')
+    // The opening note must NOT contain the stale "No production implementation
+    // ... is authorized" language that contradicts the IMPLEMENTED classifications.
+    expect(src).not.toContain('No production implementation of\n> TransformRegistry or TransformRuntime is authorized')
+    expect(src).not.toContain('only the contract is frozen. Implementation requires a separate Work Item')
+  })
+
+  test('V3 domain-architecture-v3.md §5 does NOT call TransformRegistry/Runtime "future Work Items"', () => {
+    const src = readSpec('domain-architecture-v3.md')
+    // §5 must NOT describe the implementation as "future Work Items" — they
+    // are now VERIFIED (WORK-010/011).
+    expect(src).not.toContain('TransformRegistry/TransformRuntime (future Work Items)')
+  })
+
+  test('V3 domain-architecture-v3.md opening note explicitly states TransformRegistry/Runtime are implemented and VERIFIED', () => {
+    const src = readSpec('domain-architecture-v3.md')
+    expect(src).toContain('TransformRegistry and TransformRuntime have been implemented')
+    expect(src).toContain('VERIFIED (WORK-010 and WORK-011')
+  })
+
+  test('V3 domain-architecture-v3.md §5 references WORK-010 and WORK-011 as VERIFIED', () => {
+    const src = readSpec('domain-architecture-v3.md')
+    expect(src).toContain('WORK-010, VERIFIED')
+    expect(src).toContain('WORK-011, VERIFIED')
+  })
+
+  test('V3 domain-architecture-v3.md still correctly states concrete Transform implementations remain future', () => {
+    const src = readSpec('domain-architecture-v3.md')
+    // Concrete transforms (compression, encryption, etc.) are still future —
+    // only the registry/runtime/contract are implemented.
+    expect(src).toContain('Concrete Transform implementations remain future')
+  })
+})

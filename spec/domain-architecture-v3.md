@@ -14,10 +14,12 @@
 >
 > Per `IAAS-GOV-ARCH-1` frozen rule 3: domain architecture changes require an
 > Architecture Change Request and a new version. `ACR-002` authorized this
-> version; `WORK-009` freezes it. No production implementation of
-> TransformRegistry or TransformRuntime is authorized by this architecture —
-> only the contract is frozen. Implementation requires a separate Work Item
-> that becomes eligible only after WORK-009 is VERIFIED.
+> version; `WORK-009` freezes it. The Transform Stack contract (Transform,
+> TransformRegistry, TransformRuntime, TransformRecord) is frozen by this
+> architecture. TransformRegistry and TransformRuntime have been implemented
+> and VERIFIED (WORK-010 and WORK-011 respectively). Concrete Transform
+> implementations (specific transforms like compression, encryption, etc.)
+> remain future and are not authorized by this architecture version.
 
 ## 1. Version Relationship
 
@@ -227,8 +229,8 @@ The following remain explicitly undecided and are NOT frozen by V3:
 
 ## 5. Verification Requirements
 
-The implementation of TransformRegistry/TransformRuntime (future Work Items)
-MUST prove:
+The implementation of TransformRegistry (WORK-010, VERIFIED) and
+TransformRuntime (WORK-011, VERIFIED) MUST prove:
 
 1. Transform/Registry/Runtime responsibilities are non-overlapping.
 2. TransformRecord remains immutable provenance, service-layer only.
