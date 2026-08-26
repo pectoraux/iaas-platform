@@ -12,10 +12,8 @@
  *   - stale Event reference (non-existent id) → rejected (throw).
  *   - stale Attestation reference (wrong id) → rejected (throw).
  *   - tenant scope mismatch → rejected (throw).
- *   - network scope mismatch → rejected (throw).
  *   - verificationPolicyVersion mismatch → rejected (throw).
- *   - non-verified Attestation (status != 'verified') → rejected (throw).
- *   - applyVerifiedEvidence is idempotent (re-applying the same context is safe).
+ *   - checkpoint missing (initEconomicPipeline not called) → rejected.
  *
  * Run: bun test tests/work-003-verified-evidence-pg.test.ts --timeout 120000
  *      (requires DATABASE_URL pointing at a real PostgreSQL instance)
@@ -36,7 +34,6 @@ import { signMessage, deriveSigningKey } from '../src/lib/domain/crypto'
 import {
   initEconomicPipeline,
   applyVerifiedEvidence,
-  processEconomicPipeline,
   ECONOMIC_STAGE,
 } from '../src/lib/control-plane/economic-pipeline'
 import { createVerifiedEvidenceContext } from '../src/lib/domain/verified-evidence-context'
@@ -62,58 +59,49 @@ beforeAll(async () => {
   networkVersionId = version!.id
   networkVersionNumber = version!.version
 
-  const operator = await createOperator(tenantId, { name: 'W003 Operator' })
+  const operator = await createOperator(tenantId, { displayName: 'W003 Operator' })
   const asset = await createAsset(tenantId, {
-    name: 'W003 DER',
-    assetType: 'battery',
     operatorId: operator.id,
+    assetType: 'battery',
+    name: 'W003 DER',
   })
   assetId = asset.id
-  const device = await createDevice(tenantId, {
+  await assignAssetToNetwork(tenantId, assetId, networkId, 'energy_discharge', '100', 'kW')
+
+  const provisioned = await createDevice(tenantId, {
     assetId,
-    deviceType: 'smart_meter',
-    hardwareId: `w003-meter-${Date.now()}`,
+    deviceType: 'battery_controller',
+    manufacturer: 'Simulated',
+    model: 'DER-Adapter-v1',
   })
-  deviceId = device.id
-  provisioningSecret = device.provisioningSecret
-  await assignAssetToNetwork(tenantId, {
-    assetId,
-    networkId,
-    capabilityType: 'discharge_kw',
-    verifiedQuantity: '100',
-    unit: 'kW',
-  })
+  deviceId = provisioned.device.id
+  provisioningSecret = provisioned.provisioningSecret
 })
 
 /** Ingest a telemetry event + process the outbox so an Attestation exists. */
 async function ingestAndVerify(assignmentId: string) {
   const eventId = `evidence-${assignmentId}`
   const signingKey = deriveSigningKey(provisioningSecret)
-  const payload = { power_kw: 50, timestamp: new Date().toISOString() }
+  const timestamp = new Date().toISOString()
+  const payload = { power_kw: 50 }
   const message = buildCanonicalMessage({
-    tenantId,
-    assetId,
-    deviceId,
-    eventId,
-    eventType: 'telemetry',
-    timestamp: payload.timestamp,
+    device_id: deviceId,
+    event_id: eventId,
+    timestamp,
+    event_type: 'telemetry',
     sequence: 1,
     payload,
-    networkVersionId,
-    capabilityType: 'discharge_kw',
   })
   const signature = signMessage(message, signingKey)
   const ingestResult = await ingestEvent(tenantId, {
-    event_id: eventId,
-    asset_id: assetId,
     device_id: deviceId,
-    network_version_id: networkVersionId,
-    capability_type: 'discharge_kw',
+    event_id: eventId,
+    timestamp,
     event_type: 'telemetry',
-    timestamp: payload.timestamp,
     sequence: 1,
     payload,
     signature,
+    capability_type: 'energy_discharge',
   })
   await processEventOutbox(tenantId)
   const event = await db.event.findUnique({
@@ -126,38 +114,50 @@ async function ingestAndVerify(assignmentId: string) {
   return { event, attestation: event.attestations[0] }
 }
 
+/** Create a minimal Execution + ExecutionAssignment for the checkpoint. */
+async function createAssignmentAndCheckpoint(label: string) {
+  const assignmentId = `w003-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const execution = await db.execution.create({
+    data: {
+      tenantId,
+      networkId,
+      networkVersionId,
+      requestedQuantity: '10',
+      requestedUnit: 'kW',
+      startTime: new Date(),
+      endTime: new Date(),
+      status: 'completed',
+      sourceType: 'w003_test',
+      sourceId: assignmentId,
+    },
+  })
+  const assignment = await db.executionAssignment.create({
+    data: {
+      tenantId,
+      executionId: execution.id,
+      assetId,
+      operatorId: (await db.operator.findFirst({ where: { tenantId } }))!.id,
+      networkVersionId,
+      capabilityType: 'energy_discharge',
+      assignedQuantity: '10',
+      assignedUnit: 'kW',
+      status: 'completed',
+      sourceType: 'w003_test',
+      sourceId: assignmentId,
+    },
+  })
+  await initEconomicPipeline({
+    executionAssignmentId: assignment.id,
+    tenantId,
+    networkVersionId,
+    networkId,
+  })
+  return { assignment, assignmentId }
+}
+
 describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05, W003-AC08)', () => {
   it('pre-populates the checkpoint with valid durable references and advances to VERIFIED', async () => {
-    const assignmentId = `w003-assign-valid-${Date.now()}`
-    // Create a minimal ExecutionAssignment + Execution for the checkpoint.
-    const execution = await db.execution.create({
-      data: {
-        tenantId,
-        networkVersionId,
-        status: 'completed',
-        sourceType: 'w003_test',
-        sourceId: assignmentId,
-      },
-    })
-    const assignment = await db.executionAssignment.create({
-      data: {
-        tenantId,
-        executionId: execution.id,
-        networkVersionId,
-        capabilityType: 'discharge_kw',
-        status: 'completed',
-        sourceType: 'w003_test',
-        sourceId: assignmentId,
-      },
-    })
-
-    await initEconomicPipeline({
-      executionAssignmentId: assignment.id,
-      tenantId,
-      networkVersionId,
-      networkId,
-    })
-
+    const { assignment, assignmentId } = await createAssignmentAndCheckpoint('valid')
     const { event, attestation } = await ingestAndVerify(assignmentId)
 
     const context = createVerifiedEvidenceContext({
@@ -180,7 +180,6 @@ describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05
     expect(result.validatedAttestationId).toBe(attestation.id)
     expect(result.stage).toBe(ECONOMIC_STAGE.VERIFIED)
 
-    // The checkpoint is pre-populated.
     const state = await db.economicPipelineState.findUnique({
       where: { executionAssignmentId: assignment.id },
     })
@@ -190,17 +189,7 @@ describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05
   })
 
   it('rejects a stale (non-existent) Event reference', async () => {
-    const assignmentId = `w003-assign-stale-evt-${Date.now()}`
-    const execution = await db.execution.create({
-      data: { tenantId, networkVersionId, status: 'completed', sourceType: 'w003_test', sourceId: assignmentId },
-    })
-    const assignment = await db.executionAssignment.create({
-      data: { tenantId, executionId: execution.id, networkVersionId, capabilityType: 'discharge_kw', status: 'completed', sourceType: 'w003_test', sourceId: assignmentId },
-    })
-    await initEconomicPipeline({ executionAssignmentId: assignment.id, tenantId, networkVersionId, networkId })
-
-    // First create a valid event+attestation so we have an attestationId, but
-    // pass a deliberately-non-existent eventId.
+    const { assignment, assignmentId } = await createAssignmentAndCheckpoint('stale-evt')
     const { attestation } = await ingestAndVerify(assignmentId)
     const context = createVerifiedEvidenceContext({
       tenantId,
@@ -219,15 +208,7 @@ describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05
   })
 
   it('rejects a stale (wrong) Attestation reference', async () => {
-    const assignmentId = `w003-assign-stale-att-${Date.now()}`
-    const execution = await db.execution.create({
-      data: { tenantId, networkVersionId, status: 'completed', sourceType: 'w003_test', sourceId: assignmentId },
-    })
-    const assignment = await db.executionAssignment.create({
-      data: { tenantId, executionId: execution.id, networkVersionId, capabilityType: 'discharge_kw', status: 'completed', sourceType: 'w003_test', sourceId: assignmentId },
-    })
-    await initEconomicPipeline({ executionAssignmentId: assignment.id, tenantId, networkVersionId, networkId })
-
+    const { assignment, assignmentId } = await createAssignmentAndCheckpoint('stale-att')
     const { event } = await ingestAndVerify(assignmentId)
     const context = createVerifiedEvidenceContext({
       tenantId,
@@ -246,15 +227,7 @@ describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05
   })
 
   it('rejects a tenant scope mismatch', async () => {
-    const assignmentId = `w003-assign-tenant-${Date.now()}`
-    const execution = await db.execution.create({
-      data: { tenantId, networkVersionId, status: 'completed', sourceType: 'w003_test', sourceId: assignmentId },
-    })
-    const assignment = await db.executionAssignment.create({
-      data: { tenantId, executionId: execution.id, networkVersionId, capabilityType: 'discharge_kw', status: 'completed', sourceType: 'w003_test', sourceId: assignmentId },
-    })
-    await initEconomicPipeline({ executionAssignmentId: assignment.id, tenantId, networkVersionId, networkId })
-
+    const { assignment, assignmentId } = await createAssignmentAndCheckpoint('tenant')
     const { event, attestation } = await ingestAndVerify(assignmentId)
     const context = createVerifiedEvidenceContext({
       tenantId: 'different-tenant-id',
@@ -273,15 +246,7 @@ describe('WORK-003 — VerifiedEvidenceContext PostgreSQL integration (W003-AC05
   })
 
   it('rejects a verificationPolicyVersion mismatch', async () => {
-    const assignmentId = `w003-assign-policy-${Date.now()}`
-    const execution = await db.execution.create({
-      data: { tenantId, networkVersionId, status: 'completed', sourceType: 'w003_test', sourceId: assignmentId },
-    })
-    const assignment = await db.executionAssignment.create({
-      data: { tenantId, executionId: execution.id, networkVersionId, capabilityType: 'discharge_kw', status: 'completed', sourceType: 'w003_test', sourceId: assignmentId },
-    })
-    await initEconomicPipeline({ executionAssignmentId: assignment.id, tenantId, networkVersionId, networkId })
-
+    const { assignment, assignmentId } = await createAssignmentAndCheckpoint('policy')
     const { event, attestation } = await ingestAndVerify(assignmentId)
     const context = createVerifiedEvidenceContext({
       tenantId,
