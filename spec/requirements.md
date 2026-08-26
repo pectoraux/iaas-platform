@@ -124,6 +124,12 @@ The final IAAS application Typecheck MUST be clean while all other CI gates rema
 
 Acceptance: `W007-AC05` through `W007-AC08` pass with Typecheck, Architecture Contract, PostgreSQL, validator, lint, and regression evidence.
 
+## BASE-015 — Architecture Truth Synchronization
+
+The canonical planning/specification layer MUST accurately reflect verified repository reality. When a previously-PROPOSED architectural primitive is promoted via an approved ACR, a frozen new architecture version, and a VERIFIED Work Item, the historical V1-derived requirements MUST mark it as SUPERSEDED (not silently rewritten) and the current canonical requirements MUST classify it as implemented/verified. No unrelated FUTURE/PROPOSED item may be promoted without its own verified architecture decision.
+
+Acceptance: `W008-AC01` through `W008-AC06` pass with truth-drift inventory, cross-document consistency evidence, and regression protection.
+
 ## WORK-001 Freeze
 
 No production IAAS feature is authorized by these requirements. Domain requirements are derived by WORK-002 after baseline audit.
