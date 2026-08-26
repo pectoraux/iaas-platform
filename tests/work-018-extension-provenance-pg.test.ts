@@ -210,6 +210,73 @@ describe('WORK-018 — ExtensionProvenance PostgreSQL (W018-AC01..AC07)', () => 
     await expect(persistExtensionProvenance(payload2)).rejects.toThrow('idempotency conflict')
   })
 
+  it('tenant isolation: P2002 fingerprint fallback is tenant-scoped (Architect Review Fix #1)', async () => {
+    // Two tenants persist a record with the SAME fingerprint but different
+    // idempotency keys. The fingerprint is globally unique, so the second
+    // persist hits a P2002 on the fingerprint constraint. The P2002 fallback
+    // must be tenant-scoped: tenant B's P2002 fallback must NOT find tenant
+    // A's record (which has the same fingerprint but a different tenantId).
+    //
+    // Before the fix, the fallback used findUnique({ where: { fingerprint } })
+    // — a global lookup that would find tenant A's record and throw a
+    // ConflictError disclosing existingRecordId. After the fix, the fallback
+    // uses findFirst({ where: { fingerprint, tenantId } }) — a tenant-scoped
+    // lookup that returns null for tenant B, causing the original P2002 to
+    // be re-thrown (not a ConflictError with cross-tenant details).
+    //
+    // NOTE: In practice, two tenants producing the same fingerprint requires
+    // identical (extensionType, extensionVersion, idempotencyKey, inputHash,
+    // outputHash, resultStatus) — which means the same idempotencyKey. But
+    // the @@unique([tenantId, executionIdempotencyKey]) constraint allows
+    // different tenants to use the same idempotencyKey. So the scenario is:
+    // both tenants use the same idempotencyKey + same material fields → same
+    // fingerprint → P2002 on the global fingerprint unique constraint.
+    const sharedIdemKey = `shared-fp-${Date.now()}`
+    const sharedType = `shared-type-${Date.now()}`
+
+    // Tenant A persists first — succeeds.
+    const payloadA = buildPayload({
+      tenantId: tenantA,
+      extensionType: sharedType,
+      executionIdempotencyKey: sharedIdemKey,
+      inputHash: 'shared-input',
+      outputHash: 'shared-output',
+    })
+    const resultA = await persistExtensionProvenance(payloadA)
+    expect(resultA.status).toBe('created')
+
+    // Tenant B persists with the SAME material fields → same fingerprint.
+    // The @@unique([tenantId, executionIdempotencyKey]) does NOT fire (different
+    // tenantId). The @unique on fingerprint DOES fire (P2002). The fallback
+    // must be tenant-scoped: it must NOT find tenant A's record.
+    const payloadB = buildPayload({
+      tenantId: tenantB,
+      extensionType: sharedType,
+      executionIdempotencyKey: sharedIdemKey,
+      inputHash: 'shared-input',
+      outputHash: 'shared-output',
+    })
+
+    // The P2002 fallback must NOT disclose tenant A's record. It should
+    // re-throw the original P2002 error (not a ConflictError with
+    // existingRecordId from tenant A).
+    try {
+      await persistExtensionProvenance(payloadB)
+      // If no error, that's also acceptable IF the fingerprint unique
+      // constraint didn't fire (e.g. if the DB allows it). But with the
+      // @unique constraint, it should fire. We handle both paths.
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      // Must NOT contain tenant A's record id (cross-tenant disclosure).
+      expect(errMsg).not.toContain(resultA.recordId)
+      // If it's a ConflictError, it must NOT reference tenant A's record.
+      if (err instanceof ConflictError) {
+        const details = JSON.stringify((err as { details?: unknown }).details ?? {})
+        expect(details).not.toContain(resultA.recordId)
+      }
+    }
+  })
+
   it('tenant isolation: cross-tenant getExtensionProvenance is rejected (W018-AC02)', async () => {
     const payload = buildPayload({
       tenantId: tenantA,
@@ -353,6 +420,28 @@ describe('WORK-018 — ExtensionProvenance PostgreSQL (W018-AC01..AC07)', () => 
     // Verify the Runtime's default sink is now the durable sink.
     const { getDefaultExtensionProvenanceSink } = await import('../src/lib/services/extension-runtime.service')
     expect(getDefaultExtensionProvenanceSink()).toBe(durableSink)
+
+    // Reset for other tests.
+    __resetDefaultExtensionProvenanceSinkForTesting()
+  })
+
+  it('initializeBootstrap installs the durable sink as the Runtime default (Architect Review Fix #2)', async () => {
+    // Reset the default sink to the in-memory recorder first.
+    __resetDefaultExtensionProvenanceSinkForTesting()
+    const { getDefaultExtensionProvenanceSink } = await import('../src/lib/services/extension-runtime.service')
+
+    // Before bootstrap, the default sink is the in-memory recorder.
+    const beforeBootstrap = getDefaultExtensionProvenanceSink()
+    expect(beforeBootstrap.constructor.name).toBe('InMemoryExtensionProvenanceSink')
+
+    // Run the application composition root.
+    const { initializeBootstrap } = await import('../src/lib/bootstrap')
+    initializeBootstrap()
+
+    // After bootstrap, the default sink MUST be the durable sink.
+    const afterBootstrap = getDefaultExtensionProvenanceSink()
+    expect(afterBootstrap).toBe(getDurableExtensionProvenanceSink())
+    expect(afterBootstrap.constructor.name).toBe('DurableExtensionProvenanceSink')
 
     // Reset for other tests.
     __resetDefaultExtensionProvenanceSinkForTesting()

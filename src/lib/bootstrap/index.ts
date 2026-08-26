@@ -55,6 +55,8 @@ import { TransferHandler, MintHandler, RecordDeliveryHandler } from '@/lib/boots
 import { InMemoryValidatorRegistry, SimpleConsensusEngine } from '@/lib/kernel/runtime/protocol/validator-consensus'
 import { InMemoryReconciliationStore } from '@/lib/kernel/runtime/protocol/in-memory-reconciliation-store'
 import { validateLeaseForExecution } from '@/lib/control-plane/execution-lease'
+import { setDefaultExtensionProvenanceSink } from '@/lib/services/extension-runtime.service'
+import { getDurableExtensionProvenanceSink } from '@/lib/services/extension-provenance.service'
 
 let initialized = false
 
@@ -129,6 +131,16 @@ export function initializeBootstrap(): void {
   runtimeRegistry.register(infrastructureRuntime)
   runtimeRegistry.register(protocolRuntime)
   runtimeRegistry.register(hybridRuntime)
+
+  // 6. WORK-018: Install the durable ExtensionProvenanceSink as the Runtime
+  //    default. The Runtime depends only on the ExtensionProvenanceSink
+  //    interface (defined in extension-runtime.service); the concrete durable
+  //    implementation (DurableExtensionProvenanceSink, which owns database
+  //    access) is injected here at the composition root. This preserves the
+  //    Runtime-emits / provenance-service-persists separation (V4 §2.4 /
+  //    DOM-022 AC06): the Runtime does NOT import the database module or the
+  //    provenance service — it only receives the sink through the interface.
+  setDefaultExtensionProvenanceSink(getDurableExtensionProvenanceSink())
 
   initialized = true
 }

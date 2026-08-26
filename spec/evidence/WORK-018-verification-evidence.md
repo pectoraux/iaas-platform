@@ -197,17 +197,82 @@ No V4 architecture changes. No ExtensionRegistry changes. No ExtensionRuntime
 redesign (only added `setDefaultExtensionProvenanceSink` for bootstrap injection —
 the Runtime still does NOT own persistence).
 
+## 10A. Architect Review Fixes (Round 2)
+
+PR #28 received a blocking architect review with three substantive issues.
+All three are corrected in this update:
+
+### Fix #1 — Tenant-isolation violation in P2002 fallback
+
+**Issue:** `persistExtensionProvenance` had a P2002 fallback that used a global
+`findUnique({ where: { fingerprint } })` without `tenantId`, creating a
+cross-tenant existence/disclosure path via `ConflictError.details.existingRecordId`.
+
+**Fix:** changed to `findFirst({ where: { fingerprint, tenantId } })` — a
+tenant-scoped lookup. A cross-tenant record with the same fingerprint is now
+invisible (treated as "not found" → re-throw the original P2002).
+
+**Tests:**
+- Static: `tests/work-018-extension-provenance.test.ts` — "P2002 fingerprint
+  fallback is tenant-scoped" (asserts no global findUnique by fingerprint;
+  asserts tenantId in the where clause).
+- PG: `tests/work-018-extension-provenance-pg.test.ts` — "tenant isolation:
+  P2002 fingerprint fallback is tenant-scoped" (two tenants with same
+  fingerprint; verifies no cross-tenant recordId disclosure).
+
+### Fix #2 — Production bootstrap wiring
+
+**Issue:** `setDefaultExtensionProvenanceSink()` was injectable but the
+application composition root (`src/lib/bootstrap/index.ts`) never called it
+with `getDurableExtensionProvenanceSink()`. Normal production startup could
+still use the in-memory sink.
+
+**Fix:** `src/lib/bootstrap/index.ts` now imports
+`setDefaultExtensionProvenanceSink` (from extension-runtime.service) and
+`getDurableExtensionProvenanceSink` (from extension-provenance.service), and
+calls `setDefaultExtensionProvenanceSink(getDurableExtensionProvenanceSink())`
+in `initializeBootstrap()` step 6. The Runtime still does NOT import `@/lib/db`
+or the provenance service — the durable sink is injected through the interface.
+
+**Tests:**
+- Static: `tests/work-018-extension-provenance.test.ts` — "Production
+  bootstrap wiring" section (4 tests: bootstrap imports both modules; calls
+  setDefault; Runtime boundary preserved).
+- PG: `tests/work-018-extension-provenance-pg.test.ts` — "initializeBootstrap
+  installs the durable sink as the Runtime default" (verifies before =
+  InMemory, after = Durable).
+
+### Fix #3 — Prisma migration
+
+**Issue:** `prisma/schema.prisma` was changed without adding the corresponding
+migration. CI's `db push` masked this.
+
+**Fix:** added `prisma/migrations/20260826000000_add_extension_provenance/migration.sql`
+— a forward, idempotent migration that creates the `ExtensionProvenance` table,
+both unique constraints (`@@unique([tenantId, executionIdempotencyKey])` and
+`@unique on fingerprint`), all 6 indexes, and the Tenant FK with `ON DELETE
+CASCADE`. No mutation statements (UPDATE/DELETE FROM/DROP/TRUNCATE). Also
+added a CI step `prisma migrate deploy` after `db push` to verify the migration
+deploys cleanly.
+
+**Tests:**
+- Static: `tests/work-018-extension-provenance.test.ts` — "Prisma migration
+  presence" section (7 tests: file exists; both unique constraints; all
+  indexes; Tenant FK; no mutation statements; idempotent IF NOT EXISTS guards).
+
 ## 11. Diff Scope
 
 ```text
-prisma/schema.prisma                                    (+ ExtensionProvenance model + Tenant back-relation)
-src/lib/services/extension-provenance.service.ts       (new — ExtensionProvenanceService + DurableExtensionProvenanceSink)
-src/lib/services/extension-runtime.service.ts          (+ setDefaultExtensionProvenanceSink for bootstrap injection)
-tests/work-018-extension-provenance.test.ts            (new — 43 unit/architecture tests)
-tests/work-018-extension-provenance-pg.test.ts         (new — 16 PostgreSQL integration tests)
-tests/work-017-extension-runtime.test.ts               (AC09 boundary assertion updated for WORK-018)
-.github/workflows/ci.yml                                (add WORK-018 tests)
-spec/evidence/WORK-018-verification-evidence.md        (this document)
+prisma/schema.prisma                                                  (+ ExtensionProvenance model + Tenant back-relation)
+prisma/migrations/20260826000000_add_extension_provenance/migration.sql (new — forward migration)
+src/lib/services/extension-provenance.service.ts                     (new — ExtensionProvenanceService + DurableExtensionProvenanceSink; P2002 fallback tenant-scoped)
+src/lib/services/extension-runtime.service.ts                        (+ setDefaultExtensionProvenanceSink for bootstrap injection)
+src/lib/bootstrap/index.ts                                           (+ wire durable sink at composition root)
+tests/work-018-extension-provenance.test.ts                          (55 unit/architecture tests — includes Fix #1/#2/#3 static tests)
+tests/work-018-extension-provenance-pg.test.ts                       (18 PostgreSQL integration tests — includes Fix #1/#2 PG tests)
+tests/work-017-extension-runtime.test.ts                             (AC09 boundary assertion updated for WORK-018)
+.github/workflows/ci.yml                                             (add WORK-018 tests + prisma migrate deploy step)
+spec/evidence/WORK-018-verification-evidence.md                      (this document)
 ```
 
 No ExtensionRegistry changes. No Transform Stack changes. No Economic Pipeline /

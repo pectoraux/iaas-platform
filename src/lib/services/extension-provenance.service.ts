@@ -198,15 +198,25 @@ export async function persistExtensionProvenance(
       // exists for this (tenantId, executionIdempotencyKey). This is an
       // extremely unlikely race: another concurrent emission with a different
       // idempotency key but the same fingerprint. Re-read by fingerprint.
-      const byFingerprint = await db.extensionProvenance.findUnique({
-        where: { fingerprint: payload.fingerprint },
+      //
+      // ARCHITECTURAL BOUNDARY (DOM-022 AC02): this lookup MUST be
+      // tenant-scoped. A global findUnique({ where: { fingerprint } })
+      // would disclose cross-tenant existence via the ConflictError
+      // details. We use findFirst with tenantId + fingerprint so a
+      // cross-tenant record with the same fingerprint is invisible
+      // (treated as "not found" → re-throw the original P2002).
+      const byFingerprint = await db.extensionProvenance.findFirst({
+        where: { fingerprint: payload.fingerprint, tenantId: payload.tenantId },
       })
       if (byFingerprint) {
-        // Same fingerprint but different idempotency key → the material
-        // fields collide on a different idempotency key, which means the
-        // caller reused a fingerprint with a different key. This is a
-        // conflict (the record is immutable; we cannot re-emit it under a
-        // different key).
+        // Same tenant + same fingerprint but different idempotency key →
+        // the material fields collide on a different idempotency key, which
+        // means the caller reused a fingerprint with a different key. This
+        // is a conflict (the record is immutable; we cannot re-emit it
+        // under a different key).
+        //
+        // NOTE: byFingerprint is guaranteed tenant-scoped (same tenantId as
+        // payload), so disclosing its id in the ConflictError is safe.
         throw new ConflictError(
           'ExtensionProvenance fingerprint conflict: a record with this fingerprint already exists under a different idempotency key',
           { existingRecordId: byFingerprint.id, fingerprint: payload.fingerprint },

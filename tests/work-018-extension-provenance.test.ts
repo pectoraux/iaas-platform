@@ -284,6 +284,16 @@ describe('WORK-018 — Tenant isolation (W018-AC02)', () => {
   test('Cross-tenant access rejected with NotFoundError', () => {
     expect(SERVICE_SRC).toContain('NotFoundError')
   })
+
+  test('P2002 fingerprint fallback is tenant-scoped (no global findUnique by fingerprint)', () => {
+    // ARCHITECT REVIEW FIX #1: the P2002 fallback must NOT use a global
+    // findUnique({ where: { fingerprint } }) — that would disclose
+    // cross-tenant existence via ConflictError details. It must use
+    // findFirst with tenantId + fingerprint.
+    expect(SERVICE_SRC).not.toMatch(/findUnique\(\s*\{\s*where:\s*\{\s*fingerprint:\s*payload\.fingerprint\s*\}\s*\}\s*\)/)
+    // The tenant-scoped fallback must include tenantId in the where clause.
+    expect(SERVICE_SRC).toContain('where: { fingerprint: payload.fingerprint, tenantId: payload.tenantId }')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -366,5 +376,103 @@ describe('WORK-018 — ExtensionProvenanceService contract', () => {
   test('Audit event is emitted on persist', () => {
     expect(SERVICE_SRC).toContain('appendAudit')
     expect(SERVICE_SRC).toContain('extension_provenance.record_persisted')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ARCHITECT REVIEW FIX #2 — production bootstrap wiring (W018-AC06)
+// ---------------------------------------------------------------------------
+
+describe('WORK-018 — Production bootstrap wiring (Architect Review Fix #2)', () => {
+  const BOOTSTRAP_SRC = readSrc('src/lib/bootstrap/index.ts')
+
+  test('bootstrap imports setDefaultExtensionProvenanceSink from extension-runtime.service', () => {
+    expect(BOOTSTRAP_SRC).toContain("from '@/lib/services/extension-runtime.service'")
+    expect(BOOTSTRAP_SRC).toContain('setDefaultExtensionProvenanceSink')
+  })
+
+  test('bootstrap imports getDurableExtensionProvenanceSink from extension-provenance.service', () => {
+    expect(BOOTSTRAP_SRC).toContain("from '@/lib/services/extension-provenance.service'")
+    expect(BOOTSTRAP_SRC).toContain('getDurableExtensionProvenanceSink')
+  })
+
+  test('bootstrap calls setDefaultExtensionProvenanceSink(getDurableExtensionProvenanceSink()) in initializeBootstrap', () => {
+    expect(BOOTSTRAP_SRC).toContain('setDefaultExtensionProvenanceSink(getDurableExtensionProvenanceSink())')
+  })
+
+  test('ExtensionRuntime still does NOT import extension-provenance.service (boundary preserved)', () => {
+    const RUNTIME_SRC = readSrc('src/lib/services/extension-runtime.service.ts')
+    expect(RUNTIME_SRC).not.toMatch(/from\s+['"][^'"]*extension-provenance/)
+    expect(RUNTIME_SRC).not.toContain("from '@/lib/db'")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ARCHITECT REVIEW FIX #3 — Prisma migration presence (W018-AC07)
+// ---------------------------------------------------------------------------
+
+describe('WORK-018 — Prisma migration presence (Architect Review Fix #3)', () => {
+  const MIGRATION_PATH = 'prisma/migrations/20260826000000_add_extension_provenance/migration.sql'
+
+  test('migration file exists for ExtensionProvenance', () => {
+    const migration = readSrc(MIGRATION_PATH)
+    expect(migration).toBeTruthy()
+    expect(migration).toContain('CREATE TABLE IF NOT EXISTS "ExtensionProvenance"')
+  })
+
+  test('migration creates the @@unique([tenantId, executionIdempotencyKey]) constraint', () => {
+    const migration = readSrc(MIGRATION_PATH)
+    expect(migration).toContain('ExtensionProvenance_tenantId_executionIdempotencyKey_key')
+    expect(migration).toContain('"tenantId", "executionIdempotencyKey"')
+  })
+
+  test('migration creates the @unique on fingerprint', () => {
+    const migration = readSrc(MIGRATION_PATH)
+    expect(migration).toContain('ExtensionProvenance_fingerprint_key')
+  })
+
+  test('migration creates all required indexes', () => {
+    const migration = readSrc(MIGRATION_PATH)
+    const indexes = [
+      'ExtensionProvenance_tenantId_idx',
+      'ExtensionProvenance_extensionType_idx',
+      'ExtensionProvenance_extensionVersion_idx',
+      'ExtensionProvenance_resultStatus_idx',
+      'ExtensionProvenance_fingerprint_idx',
+      'ExtensionProvenance_createdAt_idx',
+    ]
+    for (const idx of indexes) {
+      expect(migration).toContain(idx)
+    }
+  })
+
+  test('migration creates the Tenant foreign key with ON DELETE CASCADE', () => {
+    const migration = readSrc(MIGRATION_PATH)
+    expect(migration).toContain('ExtensionProvenance_tenantId_fkey')
+    expect(migration).toContain('FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE')
+  })
+
+  test('migration has no mutation statements (forward-only, create-only)', () => {
+    const migration = readSrc(MIGRATION_PATH)
+    // Strip SQL comments (lines starting with --) before checking for
+    // forbidden statements — comments may mention these words descriptively.
+    const sqlOnly = migration
+      .split('\n')
+      .filter(line => !line.trim().startsWith('--'))
+      .join('\n')
+    // Check for standalone mutation statements (not ON DELETE CASCADE in FK constraints).
+    expect(sqlOnly).not.toMatch(/\bUPDATE\s+/i)
+    expect(sqlOnly).not.toMatch(/\bDELETE\s+FROM\b/i)
+    expect(sqlOnly).not.toMatch(/\bDROP\s+(TABLE|INDEX|COLUMN|CONSTRAINT)\b/i)
+    expect(sqlOnly).not.toMatch(/\bTRUNCATE\b/i)
+    // ON DELETE CASCADE in FK constraints is allowed (it's a referential
+    // integrity rule, not a mutation statement).
+  })
+
+  test('migration is idempotent (IF NOT EXISTS guards)', () => {
+    const migration = readSrc(MIGRATION_PATH)
+    expect(migration).toContain('CREATE TABLE IF NOT EXISTS')
+    expect(migration).toContain('CREATE UNIQUE INDEX IF NOT EXISTS')
+    expect(migration).toContain('CREATE INDEX IF NOT EXISTS')
   })
 })
