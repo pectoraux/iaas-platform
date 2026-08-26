@@ -16,7 +16,7 @@ ARCHITECT_REVIEW -> IMPLEMENTATION_BLOCKED -> IMPLEMENTING
 
 ## WORK-001 — WorkflowOS Specification and Governance Foundation
 
-Status: `READY`
+Status: `VERIFIED`
 
 Architecture Version: `IAAS-GOV-ARCH-1`
 
@@ -61,7 +61,7 @@ Definition of Done: specification committed; automated consistency checks pass; 
 
 ## WORK-002 — Repository Baseline and Domain Architecture V1
 
-Status: `BLOCKED` until WORK-001 is VERIFIED.
+Status: `READY`
 
 Architecture Version: `IAAS-GOV-ARCH-1`
 
