@@ -1,0 +1,14 @@
+{
+  "//": "WORK-007 (BASE-012/BASE-013): Explicit TypeScript project boundary. The skills/ tree contains independent skill projects, not part of the IAAS application compiler. It is excluded from the root tsconfig.json. skills/stock-analysis-skill/ has its own tsconfig.json + package.json (a standalone TypeScript project). skills/image-edit/ is a skill definition with an auxiliary script (scripts/image-edit.ts) that is not a maintained TypeScript project — it is reference material for the skill's SKILL.md. None of these are compiled by the IAAS application CI.",
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules", "stock-analysis-skill"]
+}

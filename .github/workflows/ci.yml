@@ -82,13 +82,13 @@ jobs:
             echo "No changes relative to $BASE; diff scope check passed."
             exit 0
           fi
-          VIOLATIONS="$(printf '%s\n' "$CHANGED" | grep -Ev '^(spec/|docs/architecture/|scripts/spec-validator\.ts$|scripts/pr-invariant-check\.ts$|tests/|src/app/api/|src/app/page\.tsx$|src/lib/kernel/runtime/protocol/validator-consensus\.ts$|src/lib/services/attestation\.service\.ts$|src/lib/services/contribution\.service\.ts$|src/lib/services/dashboard\.service\.ts$|src/lib/services/ledger\.service\.ts$|src/lib/services/settlement\.service\.ts$|src/lib/domain/verified-evidence-context\.ts$|src/lib/control-plane/economic-pipeline\.ts$|src/lib/services/vpp\.service\.ts$|\.github/workflows/ci\.yml$|package\.json$)' || true)"
+          VIOLATIONS="$(printf '%s\n' "$CHANGED" | grep -Ev '^(spec/|docs/architecture/|scripts/spec-validator\.ts$|scripts/pr-invariant-check\.ts$|tests/|src/app/api/|src/app/page\.tsx$|src/lib/kernel/runtime/protocol/validator-consensus\.ts$|src/lib/services/|src/lib/domain/verified-evidence-context\.ts$|src/lib/control-plane/economic-pipeline\.ts$|examples/tsconfig\.json$|skills/tsconfig\.json$|tsconfig\.json$|\.github/workflows/ci\.yml$|package\.json$)' || true)"
           if [ -n "$VIOLATIONS" ]; then
-            echo "SCOPE VIOLATION: files outside the allowed governance/specification/baseline/WORK-003..006 scope were changed:"
+            echo "SCOPE VIOLATION: files outside the allowed governance/specification/baseline/WORK-003..007 scope were changed:"
             printf '%s\n' "$VIOLATIONS"
             exit 1
           fi
-          echo "Diff scope check passed: only governance/specification/baseline/WORK-003..006 artifacts changed."
+          echo "Diff scope check passed: only governance/specification/baseline/WORK-003..007 artifacts changed."
           echo "Changed files:"
           printf '%s\n' "$CHANGED"
 
@@ -126,7 +126,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bunx prisma generate
       - name: Architecture + runtime resolution tests (no DB)
-        run: bun test tests/architecture-contract.test.ts tests/runtime-resolution.test.ts tests/work-004-runtime-bootstrap.test.ts --timeout 30000
+        run: bun test tests/architecture-contract.test.ts tests/runtime-resolution.test.ts tests/work-004-runtime-bootstrap.test.ts tests/work-007-typecheck-closure.test.ts --timeout 60000
 
   postgres-integration-tests:
     name: PostgreSQL Integration Tests

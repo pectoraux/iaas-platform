@@ -62,6 +62,14 @@ import {
   type EconomicStage,
 } from '@/lib/control-plane/economic-pipeline'
 import { createVerifiedEvidenceContext } from '@/lib/domain/verified-evidence-context'
+// WORK-007 (BASE-011): static type import for BaselineContext. The dynamic
+// import `const baselineEngine = await import('./baseline-engine.service')`
+// cannot be used as a type namespace (`baselineEngine.BaselineContext` is a
+// TS2503). TypeScript requires types to be resolved at compile time via a
+// static import, not through a runtime const. This preserves the existing
+// dynamic-import runtime behavior (baselineEngine is still imported at runtime
+// for getStrategy) while exposing the type through the supported construct.
+import type { BaselineContext } from './baseline-engine.service'
 import {
   acquireExecutionLease,
   completeExecutionLease,
@@ -821,7 +829,8 @@ export async function executeDispatchAssignment(
     const { SimulatedHistoricalTelemetryProvider } = await import('./historical-telemetry-provider.service')
     const baselineEngine = await import('./baseline-engine.service')
     const getStrategy = baselineEngine.getStrategy
-    type BaselineContext = baselineEngine.BaselineContext
+    // WORK-007 (BASE-011): BaselineContext is now imported via a static
+    // `import type` at the top of this file (not via the runtime namespace).
     const telemetryProvider = new SimulatedHistoricalTelemetryProvider()
 
     // Get historical telemetry (training data — strictly before dispatch).
