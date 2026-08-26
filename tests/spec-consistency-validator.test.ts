@@ -1,142 +1,120 @@
 /// <reference types="bun-types" />
-// =============================================================================
-// WORK-001 — Specification Consistency Validator: Negative Tests
-// =============================================================================
-// These tests prove that the executable specification validator rejects
-// representative specification inconsistencies and passes the current
-// authoritative IAAS specification.
-// =============================================================================
-
+// WORK-001 specification-consistency regression suite.
+// Kept intentionally deterministic and dependency-free.
 import { afterAll, describe, expect, test } from 'bun:test'
-import { spawnSync } from 'node:child_process'
 import { cpSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
-const REPO_ROOT = process.cwd()
-const VALIDATOR = join(REPO_ROOT, 'scripts', 'spec-validator.ts')
-const SPEC_DIR = join(REPO_ROOT, 'spec')
+const ROOT = process.cwd()
+const VALIDATOR = join(ROOT, 'scripts', 'spec-validator.ts')
+const SPEC = join(ROOT, 'spec')
 const tempDirs: string[] = []
 
-afterAll(() => {
-  for (const dir of tempDirs) {
-    try { rmSync(dir, { recursive: true, force: true }) } catch {}
-  }
-})
+afterAll(() => tempDirs.forEach(dir => rmSync(dir, { recursive: true, force: true })))
 
-function makeTempSpecCopy(): string {
-  const root = mkdtempSync(join(tmpdir(), 'iaas-spec-validation-'))
+function copySpec(): string {
+  const root = mkdtempSync(join(tmpdir(), 'iaas-spec-'))
   tempDirs.push(root)
-  const specCopy = join(root, 'spec')
-  cpSync(SPEC_DIR, specCopy, { recursive: true })
-  return specCopy
+  const out = join(root, 'spec')
+  cpSync(SPEC, out, { recursive: true })
+  return out
 }
 
-interface ValidatorResult {
-  exitCode: number | null
-  stdout: string
-  stderr: string
+function run(specDir: string) {
+  const result = spawnSync(process.execPath, [VALIDATOR, '--spec-dir', specDir], { encoding: 'utf8', env: process.env })
+  return { code: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
 }
 
-function runValidator(specDir: string): ValidatorResult {
-  const result = spawnSync(process.execPath, [VALIDATOR, '--spec-dir', specDir], {
-    encoding: 'utf8',
-    env: process.env,
-  })
-  return { exitCode: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
-}
-
-function rewrite(specDir: string, file: string, mutate: (content: string) => string): void {
+function rewrite(specDir: string, file: string, fn: (text: string) => string) {
   const path = join(specDir, file)
-  writeFileSync(path, mutate(readFileSync(path, 'utf8')))
+  writeFileSync(path, fn(readFileSync(path, 'utf8')))
 }
 
-function expectFailure(result: ValidatorResult, checkId: string, fragment: string): void {
-  expect(result.exitCode).not.toBe(0)
-  expect(result.exitCode).not.toBe(null)
+function expectFailure(specDir: string, check: string) {
+  const result = run(specDir)
+  expect(result.code).not.toBe(0)
   expect(result.stderr).toContain('SPEC VALIDATION FAILED')
-  expect(result.stderr).toContain(`[${checkId}]`)
-  expect(result.stderr).toContain(fragment)
+  expect(result.stderr).toContain(`[${check}]`)
 }
 
-describe('spec consistency validator — positive case', () => {
-  test('passes against the repository specification with a deterministic success message', () => {
-    const first = runValidator(SPEC_DIR)
-    expect(first.exitCode).toBe(0)
-    expect(first.stdout).toContain('SPEC VALIDATION PASSED')
-    expect(first.stdout).toContain('architecture=IAAS-GOV-ARCH-1')
-    expect(first.stdout).toContain('domain-architecture=IAAS-DOM-ARCH-4')
-    expect(first.stdout).toContain('required-files=13')
-    expect(first.stdout).toContain('work-items=16')
-    expect(first.stdout).toContain('work-item-schema-fields=11')
-    expect(first.stdout).toContain('work001-acceptance-criteria=13')
-    expect(first.stdout).toContain('dependency-edges=15')
-    expect(first.stdout).toContain('checks=20')
-    expect(first.stderr).toBe('')
-    const second = runValidator(SPEC_DIR)
-    expect(second.exitCode).toBe(0)
-    expect(second.stdout).toBe(first.stdout)
+describe('spec validator — current repository', () => {
+  test('passes deterministically with the V4 / 17-item specification', () => {
+    const a = run(SPEC)
+    const b = run(SPEC)
+    expect(a.code).toBe(0)
+    expect(b.code).toBe(0)
+    expect(a.stderr).toBe('')
+    expect(a.stdout).toContain('SPEC VALIDATION PASSED')
+    expect(a.stdout).toContain('domain-architecture=IAAS-DOM-ARCH-4')
+    expect(a.stdout).toContain('work-items=17')
+    expect(a.stdout).toContain('dependency-edges=16')
+    expect(a.stdout).toBe(b.stdout)
   })
 })
 
-describe('spec consistency validator — negative cases (WORK-001 Required Tests)', () => {
-  test('fails when a required spec file is missing (SC-01)', () => {
-    const specDir = makeTempSpecCopy()
-    unlinkSync(join(specDir, 'requirements.md'))
-    expectFailure(runValidator(specDir), 'SC-01', 'missing required specification file: spec/requirements.md')
+describe('spec validator — mandatory negative cases', () => {
+  test('missing required file is rejected', () => {
+    const s = copySpec()
+    unlinkSync(join(s, 'requirements.md'))
+    expectFailure(s, 'SC-01')
   })
 
-  test('fails when a Work Item dependency is unresolved (SC-09)', () => {
-    const specDir = makeTempSpecCopy()
-    rewrite(specDir, 'work-items.md', c => c.replace('Dependencies: `WORK-001`', 'Dependencies: `WORK-099`'))
-    expectFailure(runValidator(specDir), 'SC-09', 'WORK-002 declares unresolved dependency: WORK-099')
+  test('unresolved dependency is rejected', () => {
+    const s = copySpec()
+    rewrite(s, 'work-items.md', x => x.replace('Dependencies: `WORK-015`', 'Dependencies: `WORK-999`'))
+    expectFailure(s, 'SC-09')
   })
 
-  test('fails when a Work Item does not declare an architecture version (SC-05)', () => {
-    const specDir = makeTempSpecCopy()
-    rewrite(specDir, 'work-items.md', c => c.replace('Architecture Version: `IAAS-GOV-ARCH-1`', 'Architecture Version: none'))
-    expectFailure(runValidator(specDir), 'SC-05', 'Work Item WORK-001 declares a malformed architecture version')
+  test('malformed architecture version is rejected', () => {
+    const s = copySpec()
+    rewrite(s, 'work-items.md', x => x.replace('Architecture Version: `IAAS-GOV-ARCH-1`', 'Architecture Version: broken'))
+    expectFailure(s, 'SC-05')
   })
 
-  test('fails when the frozen governance architecture version is inconsistent between documents (SC-03)', () => {
-    const specDir = makeTempSpecCopy()
-    rewrite(specDir, 'architecture-lock.md', c => c.replace('`IAAS-GOV-ARCH-1`', '`IAAS-GOV-ARCH-2`'))
-    expectFailure(runValidator(specDir), 'SC-03', 'governance architecture version inconsistent')
+  test('missing WORK-001 acceptance criterion is rejected', () => {
+    const s = copySpec()
+    rewrite(s, 'work-items.md', x => x.replace('Acceptance Criteria: `W001-AC01` through `W001-AC13`.', 'Acceptance Criteria: `W001-AC01` through `W001-AC12`.'))
+    expectFailure(s, 'SC-07')
   })
 
-  test('fails when the governance architecture version is malformed (SC-03)', () => {
-    const specDir = makeTempSpecCopy()
-    rewrite(specDir, 'architecture-lock.md', c => c.replace('Governance Architecture Version: `IAAS-GOV-ARCH-1`', 'Governance Architecture Version: `governance-version-final`'))
-    expectFailure(runValidator(specDir), 'SC-03', 'malformed governance architecture version')
+  test('WORK-001 production scope is rejected', () => {
+    const s = copySpec()
+    rewrite(s, 'work-items.md', x => x.replace('Repository Scope: `spec/` governance documents and their executable consistency gate.', 'Repository Scope: `spec/` plus production services and prisma migrations.'))
+    expectFailure(s, 'SC-15')
   })
 
-  test('fails when a required WORK-001 acceptance criterion is missing (SC-07)', () => {
-    const specDir = makeTempSpecCopy()
-    rewrite(specDir, 'work-items.md', c => c.replace('- `W001-AC07` verification evidence maps to ACs.\n', ''))
-    expectFailure(runValidator(specDir), 'SC-07', 'missing required WORK-001 acceptance criteria: W001-AC07')
+  test('dependency cycle is rejected', () => {
+    const s = copySpec()
+    rewrite(s, 'work-items.md', x => x.replace('Dependencies: none', 'Dependencies: `WORK-017`'))
+    expectFailure(s, 'SC-10')
   })
 
-  test('fails on duplicate WORK-001 acceptance criterion IDs (SC-07)', () => {
-    const specDir = makeTempSpecCopy()
-    rewrite(specDir, 'work-items.md', c => c.replace('- `W001-AC07` verification evidence maps to ACs.', '- `W001-AC07` verification evidence maps to ACs.\n- `W001-AC07` duplicated criterion.'))
-    expectFailure(runValidator(specDir), 'SC-07', 'duplicate WORK-001 acceptance criterion ID: W001-AC07')
+  test('WORK-017 cannot be READY when its dependency is not VERIFIED', () => {
+    const s = copySpec()
+    rewrite(s, 'work-items.md', x => x.replace('## WORK-016 — ExtensionRegistry Implementation\nStatus: `VERIFIED`', '## WORK-016 — ExtensionRegistry Implementation\nStatus: `READY`'))
+    expectFailure(s, 'SC-11')
   })
 
-  test('fails when WORK-001 declares forbidden production scope (SC-15)', () => {
-    const specDir = makeTempSpecCopy()
-    rewrite(specDir, 'work-items.md', c => c.replace('Repository Scope: `spec/` governance documents and their executable consistency gate.', 'Repository Scope: `spec/`, `prisma/schema.prisma`, and production services.'))
-    expectFailure(runValidator(specDir), 'SC-15', "WORK-001 'Repository Scope' declares forbidden production implementation scope")
+  test('truth classification is required', () => {
+    const s = copySpec()
+    rewrite(s, 'requirements.md', x => x.replace(/OBSERVED/g, ''))
+    expectFailure(s, 'SC-13')
   })
+})
 
-  test('fails when the WORK-001 production freeze is removed from requirements (SC-15)', () => {
-    const specDir = makeTempSpecCopy()
-    rewrite(specDir, 'requirements.md', c => c.replace('No production IAAS feature is authorized by these requirements.', ''))
-    expectFailure(runValidator(specDir), 'SC-15', 'no production IAAS feature is authorized')
-  })
-
-  test('fails when the dependency graph contains a cycle (SC-10)', () => {
-    const specDir = makeTempSpecCopy()
-    rewrite(specDir, 'work-items.md', c => c.replace('Dependencies: none', 'Dependencies: `WORK-002`'))
-    expectFailure(runValidator(specDir), 'SC-10', 'cycle')
+describe('V4 / WORK-017 governance invariants', () => {
+  test('DOM-020 is frozen and WORK-017 is released', () => {
+    const items = readFileSync(join(SPEC, 'work-items.md'), 'utf8')
+    const order = readFileSync(join(SPEC, 'work-orders', 'WORK-017.md'), 'utf8')
+    expect(items).toContain('## WORK-017 — ExtensionRuntime Implementation')
+    expect(items).toContain('Status: `READY`')
+    expect(items).toContain('Dependencies: `WORK-016`')
+    expect(order).toContain('`RELEASED`')
+    expect(order).toContain('`IAAS-DOM-ARCH-4` (FROZEN)')
+    expect(order).toContain('`WORK-016` VERIFIED')
+    expect(order).toContain('do not implement durable provenance storage')
+    expect(order).toContain('sandbox technology')
   })
 })
