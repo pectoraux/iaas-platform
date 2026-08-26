@@ -129,3 +129,46 @@ describe('WORK-002 — RECONCILIATION-MATRIX.md', () => {
     expect(matrix).toContain('| PROPOSED | 0 |')
   })
 })
+
+// =============================================================================
+// AR-004 regression — Data Plane / Economic Pipeline independence (code-level)
+// =============================================================================
+// The architect's AR-004 finding corrected a spec summary that implied the
+// Data Plane depends on the Economic Pipeline. The frozen architecture keeps
+// them independent in BOTH directions. Rule 11 (constitution §16) already
+// statically enforces Data-Plane ✗-> Economic. These tests enforce the REVERSE
+// direction at the code level: the generic economic pipeline MUST NOT import
+// any Phase 14 data-plane service, so an accidental Economic -> Data Plane
+// dependency cannot be introduced silently.
+// =============================================================================
+
+describe('WORK-002 — AR-004 regression: Economic Pipeline ✗-> Data Plane (code)', () => {
+  const ECONOMIC_PIPELINE = readFileSync(
+    join(REPO_ROOT, 'src', 'lib', 'control-plane', 'economic-pipeline.ts'),
+    'utf8',
+  )
+
+  const DATA_PLANE_SERVICES = [
+    'data-plane.service',
+    'routing.service',
+    'transport.service',
+    'delivery-confirmation.service',
+    'transform-record.service',
+  ]
+
+  for (const svc of DATA_PLANE_SERVICES) {
+    test(`economic-pipeline.ts does not import ${svc} (Economic ✗-> Data Plane)`, () => {
+      // Match both static and dynamic imports of the data-plane service.
+      const importPattern = new RegExp(`from\\s+['"][^'"]*${svc.replace(/\./g, '\\.')}['"]|import\\s*\\(\\s*['"][^'"]*${svc.replace(/\./g, '\\.')}['"]`)
+      expect(importPattern.test(ECONOMIC_PIPELINE)).toBe(false)
+    })
+  }
+
+  test('economic-pipeline.ts does not reference the Data Plane substrate as a dependency', () => {
+    // Belt-and-suspenders: the economic pipeline source must not mention any
+    // data-plane service module path at all (import or otherwise).
+    for (const svc of DATA_PLANE_SERVICES) {
+      expect(ECONOMIC_PIPELINE).not.toContain(svc)
+    }
+  })
+})

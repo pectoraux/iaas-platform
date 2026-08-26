@@ -45,7 +45,11 @@ No `INFERRED` or `PROPOSED` statement is promoted into historical fact.
 ## 2. Architectural Substrates
 
 The IAAS platform is organized into four substrates plus a governance layer.
-The dependency direction between substrates is frozen and one-way.
+The dependency direction between substrates is frozen and one-way. The Data
+Plane and the Economic Pipeline are **parallel substrates**: both are fed by
+the Runtime/Control Plane, but neither depends on the other (the Data Plane is
+independent of the generic Economic Pipeline in both directions — see §2.2
+rules 7–9 and `spec/domain-dependency-graph.md`).
 
 ```text
 GOVERNANCE (IAAS-GOV-ARCH-1, FROZEN)
@@ -59,8 +63,12 @@ CONTROL PLANE  -->  RUNTIME KERNEL  -->  ECONOMIC PIPELINE
     v                   v                     |
   (requests)      (Infrastructure |          (verticals import
                   Protocol | Hybrid)           generic pipeline;
-                  + DATA PLANE                 pipeline does NOT
-                  + EXECUTION LEASE             import verticals)
+                  + EXECUTION LEASE             pipeline does NOT
+                                               import verticals)
+
+DATA PLANE  (parallel substrate; depends on Node/Identity only;
+             independent of Economic Pipeline and Runtime kernel,
+             except the TransportAdapter contract interface)
 ```
 
 ### 2.1 Generic Kernel Boundary

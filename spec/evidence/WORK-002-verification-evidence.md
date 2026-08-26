@@ -4,6 +4,7 @@
 - Architecture Version: `IAAS-GOV-ARCH-1` (governance, FROZEN); `IAAS-DOM-ARCH-1` (domain, FROZEN — published by this Work Item)
 - Implementer: Z.ai
 - Prepared: 2026-08-25 (UTC)
+- Updated: 2026-08-25 (UTC) — AR-004 correction round: Data Plane / Economic Pipeline substrate-ordering fix + regression check
 - Status: **submitted for independent verification and Architect Review**
 
 > Per `spec/verification.md`, this document records objective evidence
@@ -37,22 +38,22 @@ The validator was evolved for WORK-002:
 - **SC-18 added**: `spec/domain-requirements.md` references `IAAS-DOM-ARCH-1`, uses stable `DOM-xxx` IDs, and distinguishes PROPOSED from implemented.
 - **SC-19 added**: `spec/domain-dependency-graph.md` references `IAAS-DOM-ARCH-1`, declares frozen anti-drift prohibitions, records the `Node -> Bundle` data-plane direction, and states the graph is acyclic.
 
-Success line counters updated: `required-files=13` (was 10), `checks=19` (was 16), plus new `domain-architecture=IAAS-DOM-ARCH-1`.
+Success line counters updated: `required-files=13` (was 10), `checks=20` (was 16; +SC-17/18/19/20), plus new `domain-architecture=IAAS-DOM-ARCH-1`.
 
 ## 3. Test Evidence
 
 ```text
 $ bun test tests/spec-consistency-validator.test.ts tests/pr-invariant-check.test.ts tests/work-002-baseline.test.ts --timeout 120000
- 72 pass
+ 80 pass
  0 fail
- 287 expect() calls
-Ran 72 tests across 3 files. [~1.65s]
+ 307 expect() calls
+Ran 80 tests across 3 files. [~1.75s]
 ```
 
 Breakdown:
-- `tests/spec-consistency-validator.test.ts`: 36 tests (25 WORK-001 + 11 WORK-002 domain cases). The WORK-001 SC-11 negative test was updated to reflect WORK-001's VERIFIED state (see §6).
+- `tests/spec-consistency-validator.test.ts`: 38 tests (25 WORK-001 + 13 WORK-002 domain cases incl. 2 SC-20/AR-004 cases). The WORK-001 SC-11 negative test was updated to reflect WORK-001's VERIFIED state (see §6).
 - `tests/pr-invariant-check.test.ts`: 18 tests (unchanged, WORK-001).
-- `tests/work-002-baseline.test.ts`: 18 new tests verifying the docs/ deliverables (REPOSITORY-BASELINE.md + RECONCILIATION-MATRIX.md existence, truth classifications, audit-area coverage, model-count reconciliation, contradiction recording, no-stop-condition, no INFERRED/PROPOSED promoted to fact).
+- `tests/work-002-baseline.test.ts`: 24 tests (18 docs/ deliverables + 6 AR-004 code-regression tests).
 
 ### WORK-002 negative-test coverage (SC-04 / SC-17 / SC-18 / SC-19)
 
@@ -159,3 +160,70 @@ No stop-condition was triggered:
 - No subsequent Work Item was started.
 
 Ready for independent verification and Architect Review.
+
+## 12. AR-004 Correction Round (Architect Review REQUEST_CHANGES)
+
+The Architect's independent review of the first WORK-002 submission returned
+`REQUEST_CHANGES` for a single architectural issue (AR-004). Everything else
+passed review. AR-004 is corrected below; no other WORK-002 content changed.
+
+### 12.1 AR-004 — Data Plane / Economic Pipeline substrate ordering
+
+**Defect.** `spec/domain-dependency-graph.md` stated the substrate ordering
+as `Identity/Resource > Network > ControlPlane > Runtime > Economic > DataPlane`.
+With `A -> B` defined as "A depends on B," this implied the Data Plane depends
+on the Economic Pipeline — contradicting the frozen architecture, which keeps
+the Data Plane independent of the generic economic pipeline (constitution §16
+rule 11; the detailed anti-drift edges were already correct).
+
+**Correction (specification/documentation only; no production code changed).**
+
+- `spec/domain-dependency-graph.md`: the linear substrate chain was replaced
+  with an explicit parallel-substrate model. The Data Plane and the Economic
+  Pipeline are now documented as **parallel substrates** fed by the
+  Runtime/Control Plane, neither depending on the other. The ASCII diagram now
+  shows Runtime branching to both Economic Pipeline and Data Plane.
+- Added the reverse anti-drift edge: `EconomicPipelineState ✗-> DataPlaneService
+  | RoutingService | TransportService | DeliveryConfirmation | TransformRecord`
+  (the Economic Pipeline MUST NOT depend on data-plane services). Rule 11
+  already statically enforced `DataPlane ✗-> Economic`; the reverse is now
+  declared explicitly so the independence is bidirectional in the spec.
+- `spec/domain-architecture.md` §2: updated to state the parallel-substrate
+  relationship explicitly and moved the Data Plane out of the runtime-kernel
+  line in the substrate diagram.
+
+**Regression check (mechanical, prevents re-introduction).**
+
+- **SC-20 added** to `scripts/spec-validator.ts`: (a) the domain dependency
+  graph MUST declare the `EconomicPipelineState ✗-> DataPlane` anti-drift edge;
+  (b) the graph MUST NOT present a linear substrate ordering with the Data
+  Plane downstream of the Economic Pipeline (`Economic > DataPlane` is
+  rejected). Two negative tests prove both halves.
+- **Code-level regression tests** added to `tests/work-002-baseline.test.ts`:
+  6 tests verify `src/lib/control-plane/economic-pipeline.ts` does not import
+  (statically or dynamically) or reference any of the 5 phase-14 data-plane
+  services. This prevents an accidental Economic → Data Plane code dependency.
+
+### 12.2 AR-004 verification evidence (current HEAD)
+
+```text
+$ bun run spec:validate
+SPEC VALIDATION PASSED
+architecture=IAAS-GOV-ARCH-1 domain-architecture=IAAS-DOM-ARCH-1 required-files=13 work-items=2 work-item-schema-fields=11 work001-acceptance-criteria=13 dependency-edges=1 checks=20
+exit=0
+
+$ bun test tests/spec-consistency-validator.test.ts tests/pr-invariant-check.test.ts tests/work-002-baseline.test.ts --timeout 120000
+ 80 pass / 0 fail / 307 expect() calls / 3 files
+```
+
+Validator counters: `checks=20` (was 19; +SC-20). Tests: 80 pass (was 72;
++2 SC-20 spec negative tests, +6 AR-004 code-regression tests). Deterministic
+(byte-identical across runs). Lint clean on all changed TS files.
+
+### 12.3 AR-004 diff scope (no production changes)
+
+The AR-004 correction touches only specification, documentation, validator,
+and test files — no `src/`, `prisma/`, or `mini-services/` files. The code-
+level regression test READS `src/lib/control-plane/economic-pipeline.ts` but
+does NOT modify it. The diff scope remains mechanically enforced by the CI
+diff-scope guard (step 7).

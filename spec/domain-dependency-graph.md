@@ -95,6 +95,10 @@ EconomicPipelineState ✗-> Storage
 EconomicPipelineState ✗-> Wireless
 EconomicPipelineState ✗-> Manufacturing
 EconomicPipelineState ✗-> economicStage (VppDispatchAssignment)
+EconomicPipelineState ✗-> DataPlaneService | RoutingService | TransportService
+                       | DeliveryConfirmation | TransformRecord
+                       (Data Plane is an independent substrate; the Economic
+                        Pipeline MUST NOT depend on data-plane services)
 
 InfrastructureRuntime ✗-> ProtocolRuntime
 ProtocolRuntime ✗-> InfrastructureRuntime
@@ -124,10 +128,27 @@ Kernel              ✗-> DataPlaneService | RoutingService | TransportService
 
 ## Acyclicity
 
-The domain primitive DAG is acyclic. The frozen direction is:
+The domain primitive DAG is acyclic. The Data Plane and the Economic Pipeline
+are **parallel substrates**: both are fed by the Runtime/Control Plane, but
+neither depends on the other. The Data Plane is independent of the generic
+Economic Pipeline in both directions (see the anti-drift edges above).
 
 ```text
-Identity/Resource (lowest) > Network > ControlPlane > Runtime > Economic > DataPlane
+                       Identity/Resource  (lowest)
+                                |
+                                v
+                             Network
+                                |
+                                v
+                          Control Plane
+                                |
+                                v
+                            Runtime
+                               / \
+                              v   v
+            Economic Pipeline     Data Plane
+            (depends on Runtime)  (depends on Node/Identity only;
+                                   independent of Economic Pipeline)
 ```
 
 Within the data plane:

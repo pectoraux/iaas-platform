@@ -847,6 +847,30 @@ if (!domainDependencyGraph.includes('acyclic')) {
   error('SC-19', 'spec/domain-dependency-graph.md does not state the graph is acyclic')
 }
 
+// SC-20 — Data Plane / Economic Pipeline independence (AR-004 regression).
+// The domain dependency graph MUST declare that the Economic Pipeline does NOT
+// depend on the Data Plane (the reverse of rule 11's Data-Plane ✗-> Economic).
+// This prevents the substrate summary from accidentally implying a Data Plane
+// dependency on the Economic layer. The graph must also NOT present a linear
+// substrate ordering that places the Data Plane downstream of the Economic
+// Pipeline (e.g. "... > Economic > DataPlane"), since with A->B = "A depends
+// on B" that would contradict the frozen independence.
+if (
+  !domainDependencyGraph.includes('EconomicPipelineState ✗-> DataPlaneService') &&
+  !domainDependencyGraph.includes('EconomicPipelineState ✗-> DataPlane')
+) {
+  error(
+    'SC-20',
+    'spec/domain-dependency-graph.md does not declare the Economic Pipeline -> Data Plane anti-drift prohibition (AR-004)',
+  )
+}
+if (/Economic\s*>\s*DataPlane/i.test(domainDependencyGraph) || /Economic\s*>\s*Data Plane/i.test(domainDependencyGraph)) {
+  error(
+    'SC-20',
+    'spec/domain-dependency-graph.md presents a linear substrate ordering with Data Plane downstream of Economic (AR-004): the Data Plane is a parallel substrate independent of the Economic Pipeline',
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Output (deterministic) and exit code contract
 // ---------------------------------------------------------------------------
@@ -869,6 +893,6 @@ process.stdout.write(
     `work-item-schema-fields=${SCHEMA_FIELD_COUNT} ` +
     `work001-acceptance-criteria=${EXPECTED_WORK001_ACS.length} ` +
     `dependency-edges=${declaredKeySet.size} ` +
-    `checks=19\n`,
+    `checks=20\n`,
 )
 process.exit(0)

@@ -103,7 +103,7 @@ describe('spec consistency validator — positive case', () => {
     expect(first.stdout).toContain('work-item-schema-fields=11')
     expect(first.stdout).toContain('work001-acceptance-criteria=13')
     expect(first.stdout).toContain('dependency-edges=1')
-    expect(first.stdout).toContain('checks=19')
+    expect(first.stdout).toContain('checks=20')
     expect(first.stderr).toBe('')
 
     // Determinism: a second run must produce byte-identical output.
@@ -481,5 +481,31 @@ describe('spec consistency validator — WORK-002 domain architecture cases', ()
     )
     const result = runValidator(specDir)
     expectFailure(result, 'SC-19', 'does not declare frozen anti-drift prohibitions (MUST NOT depend on)')
+  })
+
+  // SC-20 — AR-004 regression: Data Plane / Economic Pipeline independence.
+  test('fails when the Economic->DataPlane anti-drift edge is removed (SC-20, AR-004)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'domain-dependency-graph.md', (content) =>
+      content.replace('EconomicPipelineState ✗-> DataPlaneService', 'EconomicPipelineState X-> DataPlaneService'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-20', 'does not declare the Economic Pipeline -> Data Plane anti-drift prohibition (AR-004)')
+  })
+
+  test('fails when the substrate summary implies Data Plane depends on Economic (SC-20, AR-004)', () => {
+    // Reintroduce the exact AR-004 defect: a linear "Economic > DataPlane"
+    // summary that (with A->B = depends on) implies the Data Plane depends on
+    // the Economic Pipeline. The validator must reject this even if the
+    // detailed anti-drift edges are correct.
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'domain-dependency-graph.md', (content) =>
+      content.replace(
+        'The Data Plane and the Economic Pipeline\nare **parallel substrates**',
+        'The frozen direction is:\n\nIdentity/Resource > Network > ControlPlane > Runtime > Economic > DataPlane\n\nThe Data Plane and the Economic Pipeline are parallel',
+      ),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-20', 'presents a linear substrate ordering with Data Plane downstream of Economic (AR-004)')
   })
 })
