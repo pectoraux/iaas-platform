@@ -17,17 +17,49 @@ ARCHITECT_REVIEW -> IMPLEMENTATION_BLOCKED -> IMPLEMENTING
 WORK-001 through WORK-015 are `VERIFIED` in dependency order. `IAAS-DOM-ARCH-4` is the current frozen domain architecture.
 
 ## WORK-001 — WorkflowOS Specification and Governance Foundation
+
 Status: `VERIFIED`
+
 Architecture Version: `IAAS-GOV-ARCH-1`
+
 Dependencies: none
-Requirements: `GOV-001` through `GOV-008`; `W001-AC01` through `W001-AC13`.
+
+Requirements: `GOV-001` through `GOV-008`; acceptance criteria `W001-AC01` through `W001-AC13`.
+
 Objective: establish persistent governance/specification without changing IAAS production behavior.
-Repository Scope: `spec/` governance documents and executable consistency gate.
-Architecture Constraints: frozen governance architecture; no production implementation.
-Out of Scope: domain feature implementation, migrations, runtime changes, vertical networks.
-Acceptance Criteria: `W001-AC01` through `W001-AC13`.
-Required Verification: specification inspection; validator; negative tests; CI; diff inspection; Architect Review.
-Definition of Done: specification committed; validator/negative tests/CI green; no production diff; architect approves; merged and VERIFIED.
+
+Repository Scope: `spec/` governance documents and their executable consistency gate.
+
+Architecture Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` (no change without an approved ACR); no IAAS production implementation; no domain architecture creation (pending WORK-002).
+
+Out of Scope: domain feature implementation, migrations, runtime changes, vertical networks, Domain Architecture V1.
+
+Acceptance Criteria:
+
+- `W001-AC01` frozen governance architecture exists.
+- `W001-AC02` every Work Item names exactly one architecture version.
+- `W001-AC03` requirements and objective ACs are explicit.
+- `W001-AC04` dependencies and out-of-scope boundaries are explicit.
+- `W001-AC05` architecture changes require an ACR.
+- `W001-AC06` agent claims cannot establish PASS.
+- `W001-AC07` verification evidence maps to ACs.
+- `W001-AC08` Architect Review is distinct from Verification.
+- `W001-AC09` max one active implementation PR per Work Item.
+- `W001-AC10` dependency graph has no unresolved/circular dependencies.
+- `W001-AC11` truth classification supports OBSERVED/INFERRED/CONFIRMED/PROPOSED.
+- `W001-AC12` next Work Item is dependency-derived.
+- `W001-AC13` no IAAS production code changes in WORK-001.
+
+Required Verification:
+
+- repository specification inspection against every W001 acceptance criterion;
+- automated specification consistency check covering required documents, stable IDs, architecture-version references, dependency resolution, and forbidden WORK-001 production-scope changes;
+- negative tests proving the validator rejects representative specification inconsistencies;
+- CI execution of the consistency check;
+- PR diff inspection confirming only governance/specification artifacts changed;
+- independent Architect Review after verification evidence is available.
+
+Definition of Done: specification committed; automated consistency checks pass; negative tests pass; CI records the pass; production diff is empty; architect approves; PR merged; Work Item VERIFIED.
 
 ## WORK-002 — Repository Baseline and Domain Architecture V1
 Status: `VERIFIED`
@@ -228,15 +260,36 @@ Required Verification: ACR/V4 state inspection; V3 immutability; V4 freeze/promo
 Definition of Done: V4 frozen/canonical; DOM-P04 promoted; WORK-014 VERIFIED; WORK-015 merged and VERIFIED; no production implementation.
 
 ## WORK-016 — ExtensionRegistry Implementation
+
 Status: `READY`
+
 Architecture Version: `IAAS-GOV-ARCH-1`
+
 Domain Architecture: `IAAS-DOM-ARCH-4` (FROZEN)
+
 Dependencies: `WORK-015`
+
 Requirements: `DOM-019`; inherited V4 Extension Stack requirements.
+
 Objective: implement the service-layer ExtensionRegistry contract defined by frozen DOM-019.
+
 Repository Scope: ExtensionRegistry service, tenant-scoped persistence, targeted unit/PostgreSQL tests, anti-dependency tests, CI/specification evidence.
+
 Architecture Constraints: ExtensionRegistry is catalog/lifecycle authority and never executes; PostgreSQL is durable source; V4 frozen; no Runtime/Provenance implementation; no kernel/vertical/economic/data-plane coupling.
+
 Out of Scope: ExtensionRuntime, ExtensionProvenance storage/service, concrete extensions, sandbox technology, Marketplace, SDK, licensing, economic attribution, DOM-P05..P08, V4 changes, WORK-017.
-Acceptance Criteria: registration and lookup; version compatibility; certification/revocation metadata; authoritative lifecycle transitions; tenant isolation; deterministic idempotent registration; PostgreSQL durability; anti-dependencies; no execution ownership.
+
+Acceptance Criteria:
+
+- `W016-AC01` tenant-scoped extension catalog with lookup by (extensionType, extensionVersion).
+- `W016-AC02` version compatibility rules without executing extensions.
+- `W016-AC03` certification metadata (certifier identity/status) and revocation metadata (status/reason/revokedAt).
+- `W016-AC04` authoritative lifecycle transitions: registered → installed → activated ⇌ deactivated → revoked (terminal).
+- `W016-AC05` deterministic idempotent/concurrent registration convergence.
+- `W016-AC06` tenant isolation mechanically proven; cross-tenant lookup/registration cannot leak records.
+- `W016-AC07` PostgreSQL is the durable source of registry metadata.
+- `W016-AC08` static anti-dependency checks: no vertical/EconomicPipeline/Route/Transport/RuntimeRegistry/kernel imports; registry does not execute.
+
 Required Verification: unit, PostgreSQL, tenant-isolation, lifecycle/revocation, concurrency/idempotency, anti-dependency, validator, Typecheck, Architecture Contract Tests, PostgreSQL suite, lint, scope, independent Architect Review.
+
 Definition of Done: DOM-019 implemented without architecture drift; objective evidence recorded; one active PR; PR reviewed/approved/merged; WORK-016 VERIFIED by Architect.

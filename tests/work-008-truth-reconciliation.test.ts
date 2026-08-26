@@ -112,16 +112,16 @@ describe('WORK-008 — No unrelated promotion (W008-AC04)', () => {
 // ---------------------------------------------------------------------------
 
 describe('WORK-008 — Cross-document consistency (W008-AC05)', () => {
-  test('architecture.md registers V3 as FROZEN, V2 and V1 as SUPERSEDED', () => {
+  test('architecture.md registers V4 as FROZEN, V3/V2/V1 as SUPERSEDED', () => {
     const src = readSpec('architecture.md')
-    expect(src).toContain('`IAAS-DOM-ARCH-3` | FROZEN')
-    expect(src).toContain('`IAAS-DOM-ARCH-2` | SUPERSEDED')
+    expect(src).toContain('`IAAS-DOM-ARCH-4` | FROZEN')
+    expect(src).toContain('`IAAS-DOM-ARCH-3` | SUPERSEDED')
     expect(src).toContain('`IAAS-DOM-ARCH-1` | SUPERSEDED')
   })
 
-  test('architecture-lock.md registers V3 as current FROZEN domain version', () => {
+  test('architecture-lock.md registers V4 as current FROZEN domain version', () => {
     const src = readSpec('architecture-lock.md')
-    expect(src).toContain('IAAS-DOM-ARCH-3')
+    expect(src).toContain('IAAS-DOM-ARCH-4')
     expect(src).toContain('FROZEN')
   })
 

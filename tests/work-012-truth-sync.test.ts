@@ -80,14 +80,14 @@ describe('WORK-012 — Historical V1/V2 preserved (W012-AC03)', () => {
 // ---------------------------------------------------------------------------
 
 describe('WORK-012 — Cross-document consistency (W012-AC04)', () => {
-  test('architecture.md registers V3 as FROZEN', () => {
+  test('architecture.md registers V4 as FROZEN', () => {
     const src = readSpec('architecture.md')
-    expect(src).toContain('`IAAS-DOM-ARCH-3` | FROZEN')
+    expect(src).toContain('`IAAS-DOM-ARCH-4` | FROZEN')
   })
 
-  test('architecture-lock.md registers V3 as current', () => {
+  test('architecture-lock.md registers V4 as current', () => {
     const src = readSpec('architecture-lock.md')
-    expect(src).toContain('IAAS-DOM-ARCH-3')
+    expect(src).toContain('IAAS-DOM-ARCH-4')
   })
 
   test('dependency-graph.md states WORK-011 is VERIFIED and WORK-012 is eligible', () => {

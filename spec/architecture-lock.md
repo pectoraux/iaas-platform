@@ -1,9 +1,10 @@
 # IAAS Architecture Lock
 
-- Governance Architecture Version: `IAAS-GOV-ARCH-1` — FROZEN
-- Current Domain Architecture: `IAAS-DOM-ARCH-4` — FROZEN
-- Previous Domain Architecture: `IAAS-DOM-ARCH-3` — SUPERSEDED / IMMUTABLE HISTORICAL RECORD
-- Architecture Change Request: `ACR-003` — APPROVED
+- Governance Architecture Version: `IAAS-GOV-ARCH-1`
+- Status: **FROZEN**
+- Domain Architecture Version: `IAAS-DOM-ARCH-4` (FROZEN — published through ACR-003; changes require an ACR and a new version).
+- Previous Domain Architecture: `IAAS-DOM-ARCH-3` (SUPERSEDED — immutable historical record).
+- Superseded Domain Versions: `IAAS-DOM-ARCH-2` (via ACR-001) and `IAAS-DOM-ARCH-1` (via WORK-002) — immutable historical records.
 
 ## Frozen Rules
 
@@ -19,10 +20,7 @@
 10. Implementers may not silently redefine frozen architecture.
 11. Corrections remain attached to the same Work Item unless architecture changes.
 12. The implementation agent does not choose the next Work Item.
-13. `IAAS-DOM-ARCH-4` is the canonical current domain architecture.
-14. `IAAS-DOM-ARCH-3` remains immutable historical architecture.
-15. `DOM-P04` is superseded by `DOM-018..DOM-022` under approved `ACR-003`; production implementation is still separately Work-Item gated.
-16. `DOM-P05..DOM-P08` remain FUTURE/OPEN/RESEARCH.
+13. WORK-001 authorizes no production feature implementation.
 
 ## Workflow
 
