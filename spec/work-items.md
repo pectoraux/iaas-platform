@@ -177,3 +177,46 @@ Required Verification:
 - independent Architect Review.
 
 Definition of Done: runtime registration restored through the intended architecture; targeted failures eliminated; frozen architecture unchanged; CI evidence complete; PR merged; Work Item VERIFIED.
+
+## WORK-005 — Integration Test Fixture and Prerequisite Reliability
+
+Status: `READY`
+
+Architecture Version: `IAAS-GOV-ARCH-1`
+
+Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
+
+Dependencies: `WORK-004`
+
+Requirements: `BASE-004` through `BASE-006`; inherited PostgreSQL, tenant-isolation, generic Execution, and runtime boundaries from `IAAS-DOM-ARCH-2`.
+
+Objective: restore the remaining PostgreSQL integration-test baseline by making tenant-scoped operator/asset/device/capability prerequisites explicit and deterministic in the affected tests, without changing IAAS production behavior or architecture.
+
+Repository Scope: affected PostgreSQL integration tests under `tests/`, existing test fixture utilities/helpers under `tests/` only if a deterministic shared helper is warranted, targeted CI test selection, WORK-005 evidence, and governance/specification tests required by the new Work Item.
+
+Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-2` remain FROZEN; PostgreSQL remains canonical; tenant isolation is mandatory; no production auto-fixture behavior; RuntimeRegistry bootstrap semantics remain unchanged; no Data Plane/Economic Pipeline/ledger/runtime-boundary changes.
+
+Out of Scope: production changes merely to satisfy tests, global fixture redesign without evidence, new persistence abstractions, Prisma/schema changes without Architect escalation, unrelated TypeScript/architecture-contract failures, new network features, WORK-006+, frozen architecture changes.
+
+Acceptance Criteria:
+
+- `W005-AC01` every affected integration test explicitly establishes the operator/asset/device/capability prerequisites it consumes or uses a deterministic helper.
+- `W005-AC02` affected PostgreSQL integration tests pass from a clean database without relying on execution order or another test file's records.
+- `W005-AC03` no production IAAS service is changed solely to compensate for missing test fixtures.
+- `W005-AC04` tenant-scoped fixture isolation is mechanically tested.
+- `W005-AC05` runtime/execution/capacity/economic/Data Plane/vertical boundaries remain unchanged.
+- `W005-AC06` the residual operator+asset setup-failure class identified after WORK-004 is eliminated for affected tests.
+- `W005-AC07` unrelated pre-existing failures remain explicitly classified and untouched.
+- `W005-AC08` complete objective evidence is produced.
+
+Required Verification:
+
+- affected Phase 5.2/5.4 PostgreSQL tests;
+- affected Phase 8B/8C PostgreSQL tests;
+- explicit tenant-isolation regression test;
+- clean-database/no-cross-file-fixture evidence;
+- governance validator;
+- exact diff/scope inspection;
+- independent Architect Review.
+
+Definition of Done: affected tests establish prerequisites deterministically; residual fixture failures are eliminated; tenant isolation is regression-tested; no production behavior or frozen architecture changes; targeted CI passes; evidence complete; PR merged; Work Item VERIFIED.
