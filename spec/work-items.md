@@ -134,3 +134,46 @@ Required Verification:
 - independent Architect Review.
 
 Definition of Done: implementation committed; W003 acceptance criteria objectively verified; CI evidence recorded; no architecture drift; PR merged; Work Item VERIFIED.
+
+## WORK-004 — Runtime Registry Bootstrap Reliability
+
+Status: `READY`
+
+Architecture Version: `IAAS-GOV-ARCH-1`
+
+Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
+
+Dependencies: `WORK-003`
+
+Requirements: `BASE-001` through `BASE-003`; inherited runtime boundaries from `IAAS-DOM-ARCH-2`.
+
+Objective: restore the implemented Runtime Registry contract so published NetworkVersion runtime kinds resolve through the intended bootstrap path.
+
+Repository Scope: `src/lib/kernel/runtime/`, `src/lib/bootstrap/`, runtime initialization/registration entrypoints, targeted runtime-resolution/integration tests, and narrowly-scoped CI/test bootstrap configuration only if required by the existing architectural contract.
+
+Architecture Constraints: frozen governance/domain architecture; preserve the three runtime kinds, runtime isolation, HybridRuntime bridge rule, singleton registry behavior, and vertical neutrality.
+
+Out of Scope: runtime architecture redesign, new runtime kinds, Data Plane changes, Economic Pipeline changes, Prisma/schema redesign, unrelated baseline TypeScript fixes, new network features, WORK-005+.
+
+Acceptance Criteria:
+
+- `W004-AC01` infrastructure runtime resolves through the intended bootstrap path.
+- `W004-AC02` protocol runtime resolves through the intended bootstrap path.
+- `W004-AC03` registry stability/singleton behavior is preserved.
+- `W004-AC04` frozen runtime architecture and isolation rules remain unchanged.
+- `W004-AC05` Phase 5.1 runtime-resolution tests pass without weakening architectural expectations.
+- `W004-AC06` dependent Phase 5.2/5.4, Phase 8B/8C, and VPP execution-invariant runtime-registration failures are eliminated.
+- `W004-AC07` generic runtime code remains vertical-neutral.
+- `W004-AC08` no persistence/Data Plane/Economic Pipeline redesign occurs.
+- `W004-AC09` complete objective verification evidence is produced.
+
+Required Verification:
+
+- Phase 5.1 runtime-resolution tests;
+- registry stability tests;
+- dependent Phase 5.2/5.4, Phase 8B/8C, and VPP execution-invariant regressions;
+- static runtime-isolation checks;
+- CI evidence and exact diff inspection;
+- independent Architect Review.
+
+Definition of Done: runtime registration restored through the intended architecture; targeted failures eliminated; frozen architecture unchanged; CI evidence complete; PR merged; Work Item VERIFIED.
