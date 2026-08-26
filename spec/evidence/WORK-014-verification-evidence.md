@@ -1,4 +1,4 @@
-# WORK-014 — Verification Evidence (Implementer-Submitted)
+# WORK-014 — Verification Evidence (Implementer-Submitted, AR-014 correction round)
 
 - Work Item: `WORK-014`
 - Governing Architecture: `IAAS-GOV-ARCH-1` (FROZEN)
@@ -6,92 +6,70 @@
 - Architecture Change Request: `ACR-003` (UNDER_REVIEW)
 - Implementer: Z.ai
 - Prepared: 2026-08-26 (UTC)
-- Status: **submitted for independent Architect Review (ACR-003 + V4 candidate)**
+- Updated: 2026-08-26 (UTC) — AR-014-01..04 correction round
+- Status: **submitted for independent Architect Review**
 
-## 1. Deliverables
+## AR-014 Corrections
 
-| # | Deliverable | Path | Status |
-|---|---|---|---|
-| 1 | ACR-003 (Extension Stack promotion) | `spec/architecture-change-requests/ACR-003.md` | committed |
-| 2 | Candidate IAAS-DOM-ARCH-4 architecture | `spec/domain-architecture-v4.md` | committed |
-| 3 | V4 candidate domain requirements (DOM-018..021) | `spec/domain-requirements-v4.md` | committed |
-| 4 | V4 candidate dependency graph | `spec/domain-dependency-graph-v4.md` | committed |
-| 5 | Governance registration (architecture.md, lock, README) | updated | committed |
-| 6 | Regression tests (22 tests) | `tests/work-014-extension-arch.test.ts` | committed |
+### AR-014-01 — ExtensionProvenance persistence/ownership specified
 
-## 2. Extension Stack Contract (W014-AC02..AC04)
+Added §2.6 "ExtensionProvenance — Durable Provenance Record (proposed)" to V4 arch:
+- **Ownership**: owned by the provenance boundary (a service-layer provenance service), NOT by ExtensionRuntime. Runtime emits payload; provenance service owns storage. Runtime does NOT directly write to the database.
+- **Minimum identity/fingerprint**: tenantId, extensionType, extensionVersion, executionIdempotencyKey, inputHash, outputHash, resultStatus, resourceUsage, capabilitiesExercised, tenantApprovedCeiling, createdAt. Deterministic fingerprint: SHA-256 of the identity tuple.
+- **Idempotency**: 1:1 with idempotency key per tenant.
+- **Failure ordering**: emitted AFTER execution (success or failure). Failed = resultStatus='failed' + re-throw. No silent success.
+- **Tenant binding**: cross-tenant queries prohibited.
+- Added DOM-022 to V4 requirements.
+
+### AR-014-02 — Capability authority + resource-limit precedence
+
+Added §2.9 "Capability Authority and Resource-Limit Policy" with four-layer chain:
+1. Extension-declared request (what the extension wants)
+2. Tenant/operator authorization (approved ceiling — MAY be lower, MUST NOT be higher)
+3. Runtime-enforced ceiling (min of declared ∩ approved)
+4. Execution allowed/denied (denied → failure provenance)
+Precedence: tenant authorization is authoritative; extension cannot self-authorize.
+
+### AR-014-03 — Lifecycle authority + transition semantics
+
+Expanded §2.10 with:
+- Registry-owned transitions table (registered→installed→activated⇌deactivated→revoked)
+- Runtime-observed/enforced table (execution gate, in-flight on revocation)
+- Revoked is terminal (cannot transition back)
+- In-flight on revocation: completes current execution if within limits, then refuses all future; if exceeds time limit → terminated + failure provenance
+- Installation/uninstall: `installed` is a lifecycle state; `uninstall` is an administrative action (NOT a lifecycle state); provenance remains durable
+
+### AR-014-04 — CANDIDATE vs FROZEN-CONTRACT status consistency
+
+- All Extension classifications changed from `FROZEN-CONTRACT` to `PROPOSED CONTRACT`
+- V4 arch opening note: "All contracts, DAGs, and classifications below are **proposed** — they become frozen only upon V4 freeze"
+- V4 requirements: "PROPOSED CONTRACT by ACR-003 (candidate); becomes FROZEN-CONTRACT only upon V4 freeze"
+- V4 dependency graph: "(proposed)" labels throughout
+- No `FROZEN-CONTRACT` classification remains in V4 candidate documents
+
+## Verification Evidence
 
 ```text
-Extension (abstract pluggable operation contract)     → FROZEN-CONTRACT
-    ↓
-ExtensionRegistry (discovery/catalog/lifecycle)       → FROZEN-CONTRACT
-    ↓
-ExtensionRuntime (execution/isolation/provenance)     → FROZEN-CONTRACT
-    ↓
-ExtensionProvenance (immutable record — future)       → FUTURE
-```
-
-- Non-overlapping: Registry does NOT execute; Runtime does NOT own catalog; neither owns durable storage.
-- Security/isolation: capability scoping, resource limits, tenant isolation, provenance, failure containment — without selecting sandbox technology (OPEN/RESEARCH).
-- Extension→Transform: one-way (Extension may call TransformRuntime; Transform does NOT import Extension).
-
-## 3. DOM-P04 Non-Promotion (W014-AC08)
-
-- V1 `domain-requirements.md` DOM-P04 remains FUTURE (not SUPERSEDED).
-- V4 candidate `domain-requirements-v4.md` marks DOM-P04 as SUPERSEDED pending ACR-003 approval.
-- `architecture.md` registers V3 as FROZEN, V4 as CANDIDATE.
-- DOM-P05..P08 remain FUTURE.
-
-## 4. V3 Immutability (W014-AC09)
-
-- V3 `domain-architecture-v3.md` is not modified (still FROZEN).
-- V4 candidate is explicitly CANDIDATE (not FROZEN).
-- Zero production files (spec + tests only).
-
-## 5. Verification Evidence
-
-```text
-$ bun run spec:validate → exit 0, work-items=14, dependency-edges=13, checks=20
+$ bun run spec:validate → exit 0, work-items=14, dependency-edges=13
 $ bunx tsc --noEmit → 0 errors
-$ bun test (15 DB-free files) → 316 pass / 0 fail / 1101 expect() calls
+$ bun test (15 DB-free files) → 334 pass / 0 fail / 1151 expect() calls
 ```
 
-## 6. Acceptance Criterion Evidence Matrix
+Zero production files. V3 untouched. DOM-P04 NOT promoted.
 
-| AC | Evidence |
-|---|---|
-| W014-AC01 | ACR-003 has problem, scope, non-goals, questions, alternatives, decision gate |
-| W014-AC02 | Extension contract: execute/reverse/verify, capabilities, lifecycle, security |
-| W014-AC03 | ExtensionRegistry: discovery/catalog/lifecycle, does NOT execute |
-| W014-AC04 | ExtensionRuntime: execution/isolation, does NOT own catalog |
-| W014-AC05 | Tenant isolation, capability scoping, resource limits, provenance, sandbox OPEN |
-| W014-AC06 | Anti-dependencies explicit in V4 arch + V4 dependency graph |
-| W014-AC07 | Extension→Transform one-way; Transforms do NOT import Extension |
-| W014-AC08 | DOM-P04 remains FUTURE in V1; V4 candidate marks SUPERSEDED pending approval |
-| W014-AC09 | V3 immutable; V4 CANDIDATE; zero production files |
-| W014-AC10 | 316 DB-free tests pass; validator passes; typecheck 0; lint clean |
-| W014-AC11 | Submitted for Architect Review — ACR-003 decision pending |
-
-## 7. Diff Scope
+## Diff Scope
 
 ```text
-spec/architecture-change-requests/ACR-003.md          (new)
-spec/domain-architecture-v4.md                        (new)
-spec/domain-requirements-v4.md                        (new)
-spec/domain-dependency-graph-v4.md                    (new)
-spec/architecture.md                                  (V4 CANDIDATE row)
-spec/architecture-lock.md                             (V4 CANDIDATE line)
-spec/README.md                                        (V4 + ACR-003 index)
-spec/work-items.md                                    (heading fix + WORK-001 text restoration)
-tests/spec-consistency-validator.test.ts              (positive test + SC-06 fix)
-tests/work-014-extension-arch.test.ts                 (new — 22 regression tests)
-.github/workflows/ci.yml                              (add WORK-014 test)
-spec/evidence/WORK-014-verification-evidence.md      (this document)
+spec/architecture-change-requests/ACR-003.md
+spec/domain-architecture-v4.md        (rewritten: AR-014-01..04 corrections)
+spec/domain-requirements-v4.md        (rewritten: DOM-022 added, PROPOSED CONTRACT)
+spec/domain-dependency-graph-v4.md    (rewritten: proposed language)
+tests/work-014-extension-arch.test.ts (rewritten: 34 tests covering AR-014-01..04)
 ```
 
-Zero production files. No Prisma schema. No frozen V3 architecture modified.
+Plus unchanged from first submission: architecture.md, architecture-lock.md, README.md, work-items.md, ci.yml, spec-consistency-validator.test.ts, evidence doc.
 
-## 8. Implementer Boundary Statement
+## Implementer Boundary Statement
 
 - WORK-014 is **not** marked `VERIFIED`.
 - PR is **not** merged.
@@ -101,4 +79,3 @@ Zero production files. No Prisma schema. No frozen V3 architecture modified.
 - No subsequent Work Item started.
 
 Ready for independent Architect Review.
-

@@ -5,23 +5,23 @@
 - Architecture Change Request: `ACR-003`
 - Derived by: `WORK-014` from `spec/domain-architecture-v4.md`
 
-> This is the V4 candidate domain-primitive dependency graph. V3 remains
-> immutable; this is a candidate that will become canonical upon ACR-003
-> approval.
+> This is the V4 candidate domain-primitive dependency graph. All edges and
+> prohibitions below are **proposed** — they become frozen only upon V4 freeze.
+> V3 remains immutable; this is a candidate.
 
-## Extension Stack DAG (frozen direction)
+## Extension Stack DAG (proposed)
 
 ```text
 Extension (abstract contract)
     ↓
-ExtensionRegistry (discovery/catalog/lifecycle)
+ExtensionRegistry (discovery/catalog/lifecycle authority)
     ↓
 ExtensionRuntime (execution/isolation engine)
     ↓
-ExtensionProvenance (immutable record — future durable model)
+ExtensionProvenance (immutable durable provenance record)
 ```
 
-## Extension → Transform Relationship (one-way)
+## Extension → Transform Relationship (one-way, proposed)
 
 ```text
 ExtensionRuntime → TransformRuntime.executeTransform()
@@ -30,7 +30,7 @@ ExtensionRuntime → TransformRegistry (read-only lookup, does not mutate)
 
 Transform Stack does NOT import Extension Stack (one-way dependency).
 
-## Extension Stack Anti-Dependencies (MUST NOT depend on)
+## Extension Stack Anti-Dependencies (proposed — MUST NOT depend on)
 
 ```text
 ExtensionRegistry  ✗-> VPP | Compute | Storage | Wireless | Manufacturing
@@ -47,6 +47,8 @@ ExtensionRuntime   ✗-> RuntimeRegistry | InfrastructureRuntime | ProtocolRunti
 
 ExtensionRegistry  ✗-> Kernel (src/lib/kernel/)
 ExtensionRuntime   ✗-> Kernel (src/lib/kernel/)
+
+ExtensionRuntime   ✗-> ExtensionProvenance (runtime emits payload; provenance service owns storage)
 
 Kernel             ✗-> ExtensionRegistry | ExtensionRuntime
 EconomicPipeline   ✗-> ExtensionRegistry | ExtensionRuntime

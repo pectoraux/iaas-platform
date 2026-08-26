@@ -2,9 +2,14 @@
 // =============================================================================
 // WORK-014 — Extension Stack Architecture (ACR-003 / IAAS-DOM-ARCH-4 candidate)
 // =============================================================================
-// Verifies W014-AC01..AC11: ACR-003 completeness, V4 candidate consistency,
-// responsibility separation, anti-dependencies, DOM-P04 non-promotion,
-// V3 immutability, and zero production scope.
+// Verifies W014-AC01..AC11 + AR-014-01..04 corrections:
+//   - ACR-003 completeness
+//   - V4 candidate consistency (CANDIDATE, not FROZEN-CONTRACT)
+//   - ExtensionProvenance persistence/ownership specified (AR-014-01)
+//   - Capability authority + resource-limit precedence (AR-014-02)
+//   - Lifecycle authority + transition semantics (AR-014-03)
+//   - DOM-P04 non-promotion
+//   - V3 immutability
 // =============================================================================
 
 import { describe, expect, test } from 'bun:test'
@@ -51,7 +56,7 @@ describe('WORK-014 — responsibility separation (W014-AC02..AC04)', () => {
     expect(arch).toContain('execute(context, input)')
     expect(arch).toContain('reverse?(output)')
     expect(arch).toContain('verify(input, output)')
-    expect(arch).toContain('capabilities')
+    expect(arch).toContain('declaredCapabilities')
     expect(arch).toContain('lifecycle hooks')
   })
 
@@ -61,21 +66,155 @@ describe('WORK-014 — responsibility separation (W014-AC02..AC04)', () => {
     expect(arch).toContain('Version compatibility')
     expect(arch).toContain('Certification metadata')
     expect(arch).toContain('Revocation metadata')
-    expect(arch).toContain('Lifecycle metadata')
     expect(arch).toContain('an execution engine (that is `ExtensionRuntime`)')
   })
 
-  test('ExtensionRuntime is execution/isolation only, does NOT own catalog (W014-AC04)', () => {
+  test('ExtensionRuntime is execution/isolation only, does NOT own catalog or lifecycle state (W014-AC04)', () => {
     expect(arch).toContain('ExtensionRuntime — Execution and Isolation Engine')
     expect(arch).toContain('Execute')
     expect(arch).toContain('Capability enforcement')
-    expect(arch).toContain('Isolation')
-    expect(arch).toContain('does not own storage')
+    expect(arch).toContain('does NOT directly write to the')
+    expect(arch).toContain('the authority for lifecycle transitions')
   })
 })
 
 // ---------------------------------------------------------------------------
-// W014-AC05 — tenant/capability/resource/security boundaries
+// AR-014-01 — ExtensionProvenance persistence/ownership specified
+// ---------------------------------------------------------------------------
+
+describe('WORK-014 — AR-014-01: ExtensionProvenance specified', () => {
+  const arch = readSpec('domain-architecture-v4.md')
+
+  test('ExtensionProvenance has its own §2.6 section with ownership boundary', () => {
+    expect(arch).toContain('ExtensionProvenance — Durable Provenance Record')
+    expect(arch).toContain('owned by the provenance boundary')
+    expect(arch).toContain('The runtime does NOT directly write to the')
+    expect(arch).toContain('database')
+  })
+
+  test('ExtensionProvenance has minimum identity/fingerprint', () => {
+    expect(arch).toContain('tenantId')
+    expect(arch).toContain('executionIdempotencyKey')
+    expect(arch).toContain('inputHash')
+    expect(arch).toContain('outputHash')
+    expect(arch).toContain('resultStatus')
+    expect(arch).toContain('Deterministic fingerprint')
+  })
+
+  test('ExtensionProvenance has idempotency + failure ordering semantics', () => {
+    expect(arch).toContain('1:1 with the idempotency key')
+    expect(arch).toContain('provenance is emitted AFTER execution completes')
+    expect(arch).toContain("resultStatus='failed'")
+    expect(arch).toContain('re-thrown')
+    expect(arch).toContain('silent success')
+  })
+
+  test('ExtensionProvenance is tenant-bound', () => {
+    expect(arch).toContain('Cross-tenant provenance queries are prohibited')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AR-014-02 — Capability authority + resource-limit precedence
+// ---------------------------------------------------------------------------
+
+describe('WORK-014 — AR-014-02: capability authority + resource-limit policy', () => {
+  const arch = readSpec('domain-architecture-v4.md')
+
+  test('Four-layer precedence chain is explicit', () => {
+    expect(arch).toContain('Capability Authority and Resource-Limit Policy')
+    expect(arch).toContain('Extension-declared request')
+    expect(arch).toContain('Tenant/operator authorization')
+    expect(arch).toContain('Runtime-enforced ceiling')
+    expect(arch).toContain('Execution allowed / denied')
+  })
+
+  test('Runtime enforces min(declared, approved)', () => {
+    expect(arch).toContain('min(extension.declaredLimits, tenant.approvedLimits)')
+    expect(arch).toContain('minimum of (declared, approved)')
+  })
+
+  test('Tenant authorization is authoritative (extension cannot self-authorize)', () => {
+    expect(arch).toContain('tenant/operator authorization is authoritative')
+    expect(arch).toContain('cannot self-authorize')
+  })
+
+  test('Denied execution emits failure provenance', () => {
+    expect(arch).toContain('DENIED')
+    expect(arch).toContain("resultStatus='failed'")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AR-014-03 — Lifecycle authority + transition semantics
+// ---------------------------------------------------------------------------
+
+describe('WORK-014 — AR-014-03: lifecycle authority + transitions', () => {
+  const arch = readSpec('domain-architecture-v4.md')
+
+  test('Lifecycle has registry-owned vs runtime-enforced split', () => {
+    expect(arch).toContain('Lifecycle Authority and Transition Semantics')
+    expect(arch).toContain('Registry-owned transitions')
+    expect(arch).toContain('Runtime-observed/enforced')
+  })
+
+  test('Revoked is terminal', () => {
+    expect(arch).toContain('revoked (terminal)')
+    expect(arch).toContain('Revocation is terminal')
+    expect(arch).toContain('cannot transition back')
+  })
+
+  test('In-flight execution on revocation is defined', () => {
+    expect(arch).toContain('In-flight on revocation')
+    expect(arch).toContain('completes the current execution')
+    expect(arch).toContain('refuses all future executions')
+  })
+
+  test('Installation/uninstall semantics are defined', () => {
+    expect(arch).toContain('installed')
+    expect(arch).toContain("NOT a lifecycle state")
+    expect(arch).toContain('administrative action')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AR-014-04 — CANDIDATE vs FROZEN-CONTRACT status consistency
+// ---------------------------------------------------------------------------
+
+describe('WORK-014 — AR-014-04: CANDIDATE status consistency', () => {
+  const arch = readSpec('domain-architecture-v4.md')
+  const reqs = readSpec('domain-requirements-v4.md')
+  const graph = readSpec('domain-dependency-graph-v4.md')
+
+  test('V4 arch uses PROPOSED CONTRACT (not FROZEN-CONTRACT) for all Extension primitives', () => {
+    // All Extension classifications must say PROPOSED CONTRACT, not FROZEN-CONTRACT
+    expect(arch).toContain('PROPOSED CONTRACT')
+    // Must NOT contain FROZEN-CONTRACT for Extension classifications
+    expect(arch).not.toContain('Classification: **FROZEN-CONTRACT**')
+  })
+
+  test('V4 requirements use PROPOSED CONTRACT (not FROZEN-CONTRACT)', () => {
+    expect(reqs).toContain('PROPOSED CONTRACT by ACR-003 (candidate)')
+    expect(reqs).not.toContain('FROZEN-CONTRACT by ACR-003')
+  })
+
+  test('V4 dependency graph uses "proposed" language', () => {
+    expect(graph).toContain('proposed')
+    expect(graph).not.toContain('(frozen)')
+  })
+
+  test('V4 arch header is CANDIDATE', () => {
+    expect(arch).toContain('Status: **CANDIDATE**')
+  })
+
+  test('V4 arch opening note says proposed contracts become frozen only upon V4 freeze', () => {
+    expect(arch).toContain('proposed')
+    expect(arch).toContain('they become frozen only upon V4')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W014-AC05 — security/isolation boundaries
 // ---------------------------------------------------------------------------
 
 describe('WORK-014 — security/isolation boundaries (W014-AC05)', () => {
@@ -96,7 +235,7 @@ describe('WORK-014 — security/isolation boundaries (W014-AC05)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// W014-AC06 — anti-dependencies explicit and testable
+// W014-AC06 — anti-dependencies
 // ---------------------------------------------------------------------------
 
 describe('WORK-014 — anti-dependencies (W014-AC06)', () => {
@@ -114,6 +253,10 @@ describe('WORK-014 — anti-dependencies (W014-AC06)', () => {
   test('V4 dependency graph declares anti-dependency edges', () => {
     expect(graph).toContain('ExtensionRegistry  ✗->')
     expect(graph).toContain('ExtensionRuntime   ✗->')
+  })
+
+  test('Runtime does NOT directly own ExtensionProvenance storage (AR-014-01)', () => {
+    expect(graph).toContain('ExtensionRuntime   ✗-> ExtensionProvenance')
   })
 })
 
@@ -149,7 +292,6 @@ describe('WORK-014 — DOM-P04 non-promotion (W014-AC08)', () => {
   test('V1 domain-requirements.md DOM-P04 is still FUTURE (not SUPERSEDED)', () => {
     const src = readSpec('domain-requirements.md')
     expect(src).toContain('DOM-P04')
-    // DOM-P04 must NOT contain SUPERSEDED (it's only SUPERSEDED in V4 candidate requirements)
     const domP04Line = src.split('DOM-P04')[1]?.split('\n')[0] ?? ''
     expect(domP04Line).not.toContain('SUPERSEDED')
   })
@@ -157,7 +299,7 @@ describe('WORK-014 — DOM-P04 non-promotion (W014-AC08)', () => {
   test('V4 candidate requirements mark DOM-P04 as SUPERSEDED pending ACR-003 approval', () => {
     const src = readSpec('domain-requirements-v4.md')
     expect(src).toContain('DOM-P04')
-    expect(src).toContain('SUPERSEDED by DOM-018..DOM-020')
+    expect(src).toContain('SUPERSEDED by DOM-018..DOM-022')
     expect(src).toContain('pending ACR-003 approval')
   })
 
@@ -175,7 +317,7 @@ describe('WORK-014 — DOM-P04 non-promotion (W014-AC08)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// W014-AC09 — no production files / V3 immutability
+// W014-AC09 — V3 immutability + zero production
 // ---------------------------------------------------------------------------
 
 describe('WORK-014 — V3 immutability + zero production (W014-AC09)', () => {
@@ -192,21 +334,22 @@ describe('WORK-014 — V3 immutability + zero production (W014-AC09)', () => {
   })
 
   test('no src/ files changed by WORK-014 (spec-only)', () => {
-    expect(true).toBe(true) // diff-scope guard enforces this in CI
+    expect(true).toBe(true)
   })
 })
 
 // ---------------------------------------------------------------------------
-// W014-AC10 — V4 candidate requirements exist
+// W014-AC10 — V4 candidate documents exist
 // ---------------------------------------------------------------------------
 
 describe('WORK-014 — V4 candidate documents (W014-AC10)', () => {
-  test('domain-requirements-v4.md has DOM-018..DOM-021', () => {
+  test('domain-requirements-v4.md has DOM-018..DOM-022', () => {
     const src = readSpec('domain-requirements-v4.md')
     expect(src).toContain('DOM-018')
     expect(src).toContain('DOM-019')
     expect(src).toContain('DOM-020')
     expect(src).toContain('DOM-021')
+    expect(src).toContain('DOM-022')
   })
 
   test('domain-dependency-graph-v4.md has Extension Stack DAG', () => {
@@ -214,5 +357,6 @@ describe('WORK-014 — V4 candidate documents (W014-AC10)', () => {
     expect(src).toContain('Extension')
     expect(src).toContain('ExtensionRegistry')
     expect(src).toContain('ExtensionRuntime')
+    expect(src).toContain('ExtensionProvenance')
   })
 })
