@@ -17,24 +17,17 @@ ARCHITECT_REVIEW -> IMPLEMENTATION_BLOCKED -> IMPLEMENTING
 WORK-001 is VERIFIED. WORK-001 through WORK-016 are VERIFIED in dependency order. `IAAS-DOM-ARCH-4` is the current frozen domain architecture. WORK-017 is READY and is the only eligible implementation Work Item.
 
 ## WORK-001 — WorkflowOS Specification and Governance Foundation
-
 Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
 Dependencies: none
 Requirements: `GOV-001` through `GOV-008`; acceptance criteria `W001-AC01` through `W001-AC13`.
 Objective: establish persistent governance/specification without changing IAAS production behavior.
-Repository Scope: `spec/` governance documents and their executable consistency gate.
-Architecture Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` (no change without approved ACR); no production implementation; no domain feature implementation.
+Repository Scope: `spec/` governance documents and its executable consistency gate.
+Architecture Constraints: frozen governance architecture; no production implementation.
 Out of Scope: domain feature implementation, migrations, runtime changes, vertical networks.
 Acceptance Criteria: `W001-AC01` through `W001-AC13`.
-Required Verification:
-- repository specification inspection against every W001 acceptance criterion;
-- automated specification consistency check covering required documents, stable IDs, architecture-version references, dependency resolution, and forbidden WORK-001 production-scope changes;
-- negative tests proving the validator rejects representative specification inconsistencies;
-- CI execution of the consistency check;
-- PR diff inspection confirming only governance/specification artifacts changed;
-- independent Architect Review after verification evidence is available.
-Definition of Done: specification committed; automated consistency checks pass; negative tests pass; CI records the pass; production diff is empty; architect approves; PR merged; Work Item VERIFIED.
+Required Verification: specification inspection; automated consistency checks; negative validator tests; CI execution; exact scope inspection; independent Architect Review.
+Definition of Done: specification committed; checks and tests pass; CI records pass; Architect approves; PR merged; Work Item VERIFIED.
 
 ## WORK-002 — Repository Baseline and Domain Architecture V1
 Status: `VERIFIED`
@@ -67,7 +60,7 @@ Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
 Dependencies: `WORK-003`
 Requirements: `BASE-001` through `BASE-003`.
-Objective: restore runtime registry bootstrap/resolution behavior.
+Objective: restore runtime/bootstrap behavior.
 Repository Scope: runtime/bootstrap code and tests.
 Architecture Constraints: preserve runtime kinds, isolation, singleton behavior, vertical neutrality.
 Out of Scope: runtime redesign and unrelated subsystems.
@@ -134,7 +127,7 @@ Dependencies: `WORK-008`
 Requirements: `BASE-016`, `ACR-002` (APPROVED).
 Objective: freeze Transform → Registry → Runtime → Record boundary without implementation.
 Repository Scope: architecture/specification/tests only.
-Architecture Constraints: V2 immutable; no production TransformRegistry/Runtime implementation in this slice.
+Architecture Constraints: V2 immutable; no production Transform implementation in this slice.
 Out of Scope: production implementation, marketplace, SDK, sandbox, signatures.
 Acceptance Criteria: `W009-AC01` through `W009-AC08`.
 Required Verification: ACR traceability; V3 consistency; responsibility separation; regression tests; CI; scope; Architect Review.
@@ -147,7 +140,7 @@ Dependencies: `WORK-009`
 Requirements: `BASE-017`, `DOM-015`.
 Objective: implement generic service-layer TransformRegistry.
 Repository Scope: service, persistence, tests, architecture checks.
-Architecture Constraints: tenant-scoped catalog only; no execution; PostgreSQL durable source; no kernel/vertical/economic/data-plane coupling.
+Architecture Constraints: tenant-scoped catalog only; no execution; PostgreSQL durable; no kernel/vertical/economic/data-plane coupling.
 Out of Scope: Runtime, concrete transforms, marketplace, SDK, sandbox, signatures.
 Acceptance Criteria: `W010-AC01` through `W010-AC08`.
 Required Verification: unit/PG/tenant/concurrency/anti-dependency tests; validator; Typecheck; lint; CI; Architect Review.
@@ -159,7 +152,7 @@ Architecture Version: `IAAS-GOV-ARCH-1`
 Dependencies: `WORK-010`
 Requirements: `DOM-016`.
 Objective: implement service-layer TransformRuntime.
-Repository Scope: Runtime service, tests, architecture evidence.
+Repository Scope: runtime service and tests.
 Architecture Constraints: resolve only through Registry; immutable TransformRecord; no catalog ownership; no cross-layer coupling.
 Out of Scope: concrete transforms, marketplace, SDK, sandbox, signatures.
 Acceptance Criteria: `W011-AC01` through `W011-AC10`.
@@ -212,7 +205,7 @@ Dependencies: `WORK-014`
 Requirements: `ACR-003`; V4 `DOM-018..DOM-022`.
 Objective: persist approved ACR-003, freeze V4 as canonical, promote DOM-P04, preserve V3 immutable, release no production implementation.
 Repository Scope: governance/specification, Work Item/dependency records, regression tests, CI, evidence only.
-Architecture Constraints: V4 frozen; V3 immutable; no production implementation; no Prisma; no sandbox selection; DOM-P05..P08 future/open/research.
+Architecture Constraints: V4 frozen; V3 immutable; no production implementation; no Prisma; no sandbox selection; DOM-P05..DOM-P08 future/open/research.
 Out of Scope: Extension production code, Registry/Runtime implementation, Prisma, sandbox, Marketplace, SDK, licensing, economic attribution, concrete extensions, DOM-P05..P08 promotion.
 Acceptance Criteria: `W015-AC01` through `W015-AC11`.
 Required Verification: ACR/V4 state inspection; V3 immutability; V4 freeze/promotion tests; validator; Typecheck; Architecture Contract Tests; lint; CI; exact scope; Architect Review.
@@ -243,3 +236,16 @@ Out of Scope: ExtensionRegistry redesign except compliance fixes; durable Extens
 Acceptance Criteria: `W017-AC01` ExtensionRegistry-only resolution; `W017-AC02` activated-state execution gate; `W017-AC03` minimum(declared, approved) capability/resource ceiling; `W017-AC04` reverse/verify semantics; `W017-AC05` failure provenance emission + rethrow; `W017-AC06` deterministic idempotent replay convergence; `W017-AC07` tenant isolation; `W017-AC08` no catalog/lifecycle ownership; `W017-AC09` no durable provenance implementation; `W017-AC10` V4 anti-dependencies; `W017-AC11` all required gates and independent Architect Review.
 Required Verification: unit; PostgreSQL; lifecycle; capability/resource; failure/provenance payload; idempotency; tenant isolation; anti-dependency; validator; Typecheck; Architecture Contract Tests; PostgreSQL suite; lint; exact scope; Architect Review.
 Definition of Done: DOM-020 implemented without architecture drift; objective evidence recorded; one active PR; verification passes; Architect approves; PR merges; WORK-017 becomes VERIFIED.
+
+## WORK-018 — ExtensionProvenance Durable Persistence
+Status: `READY`
+Architecture Version: `IAAS-GOV-ARCH-1`
+Dependencies: `WORK-017`
+Requirements: `DOM-022`; inherited V4 provenance requirements.
+Objective: implement the service-layer durable ExtensionProvenance boundary required by frozen DOM-022, consuming provenance payloads emitted by ExtensionRuntime without taking Runtime execution ownership.
+Repository Scope: provenance service/boundary, PostgreSQL persistence, tenant-scoped immutable record, fingerprint/idempotency enforcement, targeted unit/PostgreSQL/architecture tests, CI/specification evidence.
+Architecture Constraints: service-layer boundary; PostgreSQL is durable source; immutable after creation; tenant-scoped; one durable record per tenant/idempotency key; runtime emits but does not own persistence; no extension execution; no Registry redesign; V4 frozen.
+Out of Scope: sandbox selection/implementation, concrete extensions, Marketplace, SDK, licensing, economic attribution, cryptographic certification mechanism, Registry/Runtime redesign, vertical/economic/data-plane/kernel coupling, DOM-P05..P08, WORK-019.
+Acceptance Criteria: `W018-AC01` immutable 11-field provenance schema; `W018-AC02` tenant isolation; `W018-AC03` SHA-256 fingerprint of frozen material fields; `W018-AC04` one durable record per tenant/idempotency key with concurrency convergence; `W018-AC05` success/failure provenance persistence including failed rethrow semantics; `W018-AC06` service boundary ownership separate from ExtensionRuntime; `W018-AC07` PostgreSQL durable source and no update/delete mutation path; `W018-AC08` no prohibited cross-layer dependencies; `W018-AC09` all required gates and independent Architect Review.
+Required Verification: unit; PostgreSQL; concurrent idempotency; tenant isolation; immutability; fingerprint determinism; failure provenance; anti-dependency; validator; Typecheck; Architecture Contract Tests; PostgreSQL suite; lint; exact scope; Architect Review.
+Definition of Done: DOM-022 implemented without architecture drift; objective evidence recorded; one active PR; verification passes; Architect approves; PR merges; WORK-018 becomes VERIFIED.
