@@ -41,6 +41,7 @@ import { instantiateTemplate } from '../src/lib/services/network.service'
 import { createOperator, createAsset, createDevice, assignAssetToNetwork } from '../src/lib/services/registry.service'
 import { recordBuyerFunding } from '../src/lib/services/ledger.service'
 import { createAndExecuteComputeJob } from '../src/lib/services/compute.service'
+import { initializeBootstrap } from '../src/lib/bootstrap'
 
 let tenantId: string
 let networkId: string
@@ -50,6 +51,10 @@ let assetId: string
 let provisioningSecret: string
 
 beforeAll(async () => {
+  // WORK-004 (BASE-001): initialize the bootstrap so resolveRuntime() finds
+  // the registered InfrastructureRuntime for the compute-gpu network.
+  initializeBootstrap()
+
   const tenant = await createTenant({
     name: 'Phase 8B Compute Pipeline',
     slug: `p8b-compute-${Date.now()}`,
