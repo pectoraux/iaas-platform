@@ -64,10 +64,13 @@ describe('WORK-010 — TransformRegistry architecture (W010-AC06, W010-AC07)', (
     expect(REGISTRY_SRC).toContain('Does NOT execute transforms')
   })
 
-  test('TransformRuntime remains absent from production code (W010-AC07)', () => {
-    // There must be NO transform-runtime.service.ts file.
+  test('TransformRuntime now exists (implemented by WORK-011, not by WORK-010)', () => {
+    // WORK-011 implemented TransformRuntime. The file now exists — this is
+    // expected. WORK-010's original assertion (absent) is updated to reflect
+    // the current state. The registry still does NOT execute transforms
+    // (that boundary is tested separately).
     const path = join(REPO_ROOT, 'src', 'lib', 'services', 'transform-runtime.service.ts')
-    expect(existsSync(path)).toBe(false)
+    expect(existsSync(path)).toBe(true)
   })
 
   test('TransformRegistry does NOT mutate TransformRecord (W010-AC07)', () => {

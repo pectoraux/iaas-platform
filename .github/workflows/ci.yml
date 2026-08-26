@@ -62,7 +62,7 @@ jobs:
       - name: Run specification consistency validator
         run: bun run spec:validate
       - name: Run specification validator negative tests
-        run: bun test tests/spec-consistency-validator.test.ts tests/pr-invariant-check.test.ts tests/work-002-baseline.test.ts tests/work-003-verified-evidence-context.test.ts tests/work-005-fixture-isolation.test.ts tests/work-008-truth-reconciliation.test.ts tests/work-009-transform-arch-freeze.test.ts tests/work-010-transform-registry.test.ts --timeout 120000
+        run: bun test tests/spec-consistency-validator.test.ts tests/pr-invariant-check.test.ts tests/work-002-baseline.test.ts tests/work-003-verified-evidence-context.test.ts tests/work-005-fixture-isolation.test.ts tests/work-008-truth-reconciliation.test.ts tests/work-009-transform-arch-freeze.test.ts tests/work-010-transform-registry.test.ts tests/work-011-transform-runtime.test.ts --timeout 120000
       - name: Verify one-active-PR invariant (W001-AC09, live GitHub state)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -181,7 +181,7 @@ jobs:
         run: bunx prisma db push --accept-data-loss
 
       - name: Run all integration tests
-        run: bun test tests/vpp-4-2-execution-invariants.test.ts tests/runtime-resolution-integration.test.ts tests/phase-5-2-execution-economics-separation.test.ts tests/phase-8b-compute-economic-pipeline.test.ts tests/phase-9b-persistent-protocol-state.test.ts tests/work-003-verified-evidence-pg.test.ts tests/work-010-transform-registry-pg.test.ts --timeout 120000
+        run: bun test tests/vpp-4-2-execution-invariants.test.ts tests/runtime-resolution-integration.test.ts tests/phase-5-2-execution-economics-separation.test.ts tests/phase-8b-compute-economic-pipeline.test.ts tests/phase-9b-persistent-protocol-state.test.ts tests/work-003-verified-evidence-pg.test.ts tests/work-010-transform-registry-pg.test.ts tests/work-011-transform-runtime-pg.test.ts --timeout 120000
 
       - name: Run runtime resolution tests
         run: bun test tests/runtime-resolution.test.ts --timeout 30000
