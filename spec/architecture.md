@@ -5,8 +5,8 @@
 | Artifact | Version | Status |
 |---|---|---|
 | Governance Architecture | `IAAS-GOV-ARCH-1` | FROZEN |
-| Domain Architecture | `IAAS-DOM-ARCH-1` | SUPERSEDED |
 | Domain Architecture | `IAAS-DOM-ARCH-2` | FROZEN |
+| Domain Architecture | `IAAS-DOM-ARCH-1` | SUPERSEDED |
 
 `IAAS-DOM-ARCH-1` remains the immutable historical record produced by WORK-002.
 
