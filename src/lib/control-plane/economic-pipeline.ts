@@ -43,6 +43,11 @@
 import { db } from '@/lib/db'
 import type { ExtendedTransactionClient } from '@/lib/db'
 import { createHash } from 'crypto'
+import {
+  createVerifiedEvidenceContext,
+  isVerifiedEvidenceContext,
+  type VerifiedEvidenceContext,
+} from '@/lib/domain/verified-evidence-context'
 
 // ---------------------------------------------------------------------------
 // Stages
@@ -140,6 +145,188 @@ export async function initEconomicPipeline(input: {
       settlementIdempotencyKey: keys.settlement,
     },
   })
+}
+
+// ---------------------------------------------------------------------------
+// VerifiedEvidenceContext handoff — IAAS-DOM-ARCH-2 (ACR-001 / WORK-003)
+// ---------------------------------------------------------------------------
+// The generic, vertical-neutral boundary for already-verified economic
+// evidence. A vertical (e.g. VPP) performs its own evidence + verification +
+// baseline calculation, constructs a VerifiedEvidenceContext, and hands it
+// here. This function validates the durable references against PostgreSQL and
+// pre-populates the checkpoint so processEconomicPipeline skips the evidence
+// + verification stages and proceeds directly to Contribution → Reward →
+// Ledger → Settlement.
+//
+// This replaces the prior vertical-specific convention of directly mutating
+// EconomicPipelineState.eventId/attestationId from the vertical. The generic
+// pipeline now owns the pre-population boundary; verticals only construct the
+// context (W003-AC03 / W003-AC05).
+//
+// Durable PostgreSQL Event/Attestation remain the source of truth (ACR-001 §8;
+// W003-AC08). Stale/invalid references follow the existing reconciliation
+// recovery rules: a referenced Event/Attestation that cannot be validated is
+// rejected (throw), forcing the caller to re-establish the durable evidence —
+// consistent with reconcileEconomicPipeline's stale/NULL recovery (W003-AC05).
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of applying a VerifiedEvidenceContext to a pipeline checkpoint.
+ * Records the validated durable identities and the stage the checkpoint was
+ * advanced to.
+ */
+export interface AppliedVerifiedEvidence {
+  executionAssignmentId: string
+  validatedEventId: string
+  validatedAttestationId: string
+  stage: EconomicStage
+}
+
+/**
+ * Apply a VerifiedEvidenceContext to an assignment's economic-pipeline
+ * checkpoint.
+ *
+ * Steps:
+ *   1. require the checkpoint to exist (initEconomicPipeline must have run).
+ *   2. validate the context's durable references against PostgreSQL:
+ *        - Event exists, belongs to the same tenant, and its externalEventId
+ *          (deterministic identity) matches the context.evidenceIdentity.
+ *        - Attestation exists, belongs to the same tenant + Event, and its
+ *          verificationPolicyVersion matches the context.verificationPolicyVersion.
+ *        - The Event's NetworkVersion.networkId matches the context.networkId.
+ *   3. pre-populate the checkpoint with the validated durable IDs and advance
+ *      the stage to VERIFIED, so processEconomicPipeline skips evidence +
+ *      verification and proceeds to Contribution → Reward → Ledger → Settlement.
+ *
+ * If any durable reference is stale/invalid, this throws (rejection), forcing
+ * the caller to re-establish durable evidence. This preserves the existing
+ * reconciliation recovery behavior (stale/NULL references are not silently
+ * accepted).
+ *
+ * VERTICAL NEUTRALITY: this function imports NO vertical service. It accepts
+ * only the generic VerifiedEvidenceContext (W003-AC03).
+ */
+export async function applyVerifiedEvidence(input: {
+  executionAssignmentId: string
+  context: VerifiedEvidenceContext
+}): Promise<AppliedVerifiedEvidence> {
+  const { executionAssignmentId, context } = input
+
+  if (!isVerifiedEvidenceContext(context)) {
+    throw new Error(
+      `applyVerifiedEvidence: invalid VerifiedEvidenceContext for assignment '${executionAssignmentId}'.`,
+    )
+  }
+
+  // 1. The checkpoint must exist.
+  const state = await db.economicPipelineState.findUnique({
+    where: { executionAssignmentId },
+  })
+  if (!state) {
+    throw new Error(
+      `applyVerifiedEvidence: EconomicPipelineState not found for assignment '${executionAssignmentId}'. Call initEconomicPipeline first.`,
+    )
+  }
+
+  // Tenant scope integrity: the context's tenantId must match the checkpoint's.
+  if (context.tenantId !== state.tenantId) {
+    throw new Error(
+      `applyVerifiedEvidence: tenant scope mismatch (context=${context.tenantId}, checkpoint=${state.tenantId}) for assignment '${executionAssignmentId}'.`,
+    )
+  }
+
+  // 2. Validate the durable Event reference.
+  const event = await db.event.findUnique({
+    where: { id: context.eventId },
+    include: {
+      networkVersion: { select: { id: true, networkId: true, version: true } },
+      attestations: { select: { id: true, verificationPolicyVersion: true, status: true } },
+    },
+  })
+  if (!event || event.tenantId !== context.tenantId) {
+    throw new Error(
+      `applyVerifiedEvidence: referenced Event '${context.eventId}' not found in tenant '${context.tenantId}' (stale/invalid reference) for assignment '${executionAssignmentId}'.`,
+    )
+  }
+  // Deterministic identity validation (Event.externalEventId is the
+  // idempotency key; reconcileEconomicPipeline uses eventIdempotencyKey).
+  const expectedIdentity = state.eventIdempotencyKey
+  if (event.externalEventId && event.externalEventId !== context.evidenceIdentity) {
+    throw new Error(
+      `applyVerifiedEvidence: evidenceIdentity mismatch (context=${context.evidenceIdentity}, event.externalEventId=${event.externalEventId}) for assignment '${executionAssignmentId}'.`,
+    )
+  }
+  if (expectedIdentity && event.externalEventId && event.externalEventId !== expectedIdentity) {
+    throw new Error(
+      `applyVerifiedEvidence: Event.externalEventId '${event.externalEventId}' does not match the checkpoint's deterministic eventIdempotencyKey '${expectedIdentity}' for assignment '${executionAssignmentId}'.`,
+    )
+  }
+  // Network scope integrity.
+  if (event.networkVersion.networkId !== context.networkId) {
+    throw new Error(
+      `applyVerifiedEvidence: network scope mismatch (context=${context.networkId}, event=${event.networkVersion.networkId}) for assignment '${executionAssignmentId}'.`,
+    )
+  }
+
+  // AR-005 — Provenance validation: the context's (verificationPolicyId,
+  // verificationPolicyVersion) tuple MUST be authoritative against the durable
+  // NetworkVersion that produced the Event/Attestation, not just the
+  // Attestation field. The context.verificationPolicyId is the NetworkVersion
+  // id whose verification policy produced the attestation; it MUST equal the
+  // Event's networkVersionId. The context.verificationPolicyVersion MUST equal
+  // that NetworkVersion's own version number. This prevents a context from
+  // claiming provenance from a different NetworkVersion than the durable
+  // evidence actually belongs to (even if the version number happens to match).
+  if (context.verificationPolicyId !== event.networkVersionId) {
+    throw new Error(
+      `applyVerifiedEvidence: verificationPolicyId mismatch (context=${context.verificationPolicyId}, durable Event.networkVersionId=${event.networkVersionId}) for assignment '${executionAssignmentId}'. The context's verification policy id must be the NetworkVersion that produced the durable evidence.`,
+    )
+  }
+  if (event.networkVersion.version !== context.verificationPolicyVersion) {
+    throw new Error(
+      `applyVerifiedEvidence: verificationPolicyVersion mismatch (context=${context.verificationPolicyVersion}, durable NetworkVersion.version=${event.networkVersion.version}) for assignment '${executionAssignmentId}'. The context's verification policy version must match the durable NetworkVersion's version.`,
+    )
+  }
+
+  // 3. Validate the durable Attestation reference.
+  const attestation = event.attestations.find((a) => a.id === context.attestationId)
+  if (!attestation) {
+    throw new Error(
+      `applyVerifiedEvidence: referenced Attestation '${context.attestationId}' not found on Event '${context.eventId}' (stale/invalid reference) for assignment '${executionAssignmentId}'.`,
+    )
+  }
+  // The Attestation's verificationPolicyVersion MUST also match the durable
+  // NetworkVersion version (and thus the context). This is belt-and-suspenders
+  // with the AR-005 check above: the Attestation was produced by the same
+  // policy version as the durable NetworkVersion that owns the Event.
+  if (attestation.verificationPolicyVersion !== event.networkVersion.version) {
+    throw new Error(
+      `applyVerifiedEvidence: Attestation.verificationPolicyVersion (${attestation.verificationPolicyVersion}) does not match the durable NetworkVersion.version (${event.networkVersion.version}) for assignment '${executionAssignmentId}'.`,
+    )
+  }
+  if (attestation.status !== 'verified') {
+    throw new Error(
+      `applyVerifiedEvidence: referenced Attestation '${context.attestationId}' is not verified (status='${attestation.status}') for assignment '${executionAssignmentId}'.`,
+    )
+  }
+
+  // 4. Pre-populate the checkpoint with the validated durable IDs and advance
+  //    to VERIFIED. processEconomicPipeline will skip evidence + verification.
+  await db.economicPipelineState.update({
+    where: { executionAssignmentId },
+    data: {
+      eventId: event.id,
+      attestationId: attestation.id,
+      stage: ECONOMIC_STAGE.VERIFIED,
+    },
+  })
+
+  return {
+    executionAssignmentId,
+    validatedEventId: event.id,
+    validatedAttestationId: attestation.id,
+    stage: ECONOMIC_STAGE.VERIFIED,
+  }
 }
 
 // ---------------------------------------------------------------------------
