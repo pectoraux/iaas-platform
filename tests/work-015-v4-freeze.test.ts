@@ -14,54 +14,50 @@ const deps = read('dependency-graph.md')
 const acr = read('architecture-change-requests/ACR-003.md')
 const v3 = read('domain-architecture-v3.md')
 
-describe('WORK-015 — V4 freeze and DOM-P04 truth promotion', () => {
+describe('WORK-015/016 — frozen V4 state and next-work release', () => {
   test('ACR-003 is approved and authoritative', () => {
     expect(acr).toContain('Status: `APPROVED`')
-    expect(acr).toContain('New Architecture Version: `IAAS-DOM-ARCH-4` (FROZEN)')
-    expect(acr).toContain('DOM-P04')
+    expect(acr).toContain('IAAS-DOM-ARCH-4` (FROZEN)')
   })
-
   test('V4 is frozen and canonical', () => {
     expect(arch).toContain('Status: **FROZEN**')
     expect(arch).toContain('current canonical domain architecture')
     expect(req).toContain('Domain Architecture: `IAAS-DOM-ARCH-4` (FROZEN)')
     expect(graph).toContain('Domain Architecture: `IAAS-DOM-ARCH-4` (FROZEN)')
   })
-
-  test('V3 remains untouched and historical', () => {
+  test('V3 remains immutable historical architecture', () => {
     expect(v3).toContain('IAAS-DOM-ARCH-3')
     expect(v3).toContain('FROZEN')
     expect(arch).toContain('V3 is not modified in place')
   })
-
   test('DOM-018..DOM-022 are frozen acceptance-bearing contracts', () => {
-    for (const id of ['DOM-018', 'DOM-019', 'DOM-020', 'DOM-021', 'DOM-022']) {
-      expect(req).toContain(id)
-    }
+    for (const id of ['DOM-018', 'DOM-019', 'DOM-020', 'DOM-021', 'DOM-022']) expect(req).toContain(id)
     expect(req).toContain('FROZEN-CONTRACT')
     expect(req).not.toContain('candidate')
   })
-
-  test('DOM-P04 is superseded only in the current V4 requirements', () => {
+  test('DOM-P04 is promoted only in current frozen V4', () => {
     expect(req).toContain('DOM-P04 (V1): **SUPERSEDED by DOM-018..DOM-022 under approved ACR-003**')
-    expect(arch).toContain('`DOM-P04` is **SUPERSEDED**')
-    expect(deps).toContain('WORK-014 -> WORK-015')
+    const v1 = read('domain-requirements.md')
+    expect(v1).toContain('DOM-P04')
+    expect(v1).not.toContain('DOM-P04 (V1): **SUPERSEDED')
   })
-
-  test('historical V1 requirements are preserved', () => {
-    const v1req = read('domain-requirements.md')
-    expect(v1req).toContain('DOM-P04 — TransformRegistry')
-    expect(v1req).toContain('FUTURE')
+  test('DOM-P05..P08 remain future/open/research', () => {
+    expect(req).toContain('DOM-P05..DOM-P08: remain FUTURE/OPEN/RESEARCH')
   })
-
-  test('WORK-014 is VERIFIED and WORK-015 is READY', () => {
+  test('WORK-015 is VERIFIED and WORK-016 is READY', () => {
     expect(items).toContain('## WORK-015 — IAAS-DOM-ARCH-4 Freeze and DOM-P04 Truth Promotion')
+    expect(items).toContain('## WORK-016 — ExtensionRegistry Implementation')
+    expect(items).toContain('Status: `VERIFIED`')
     expect(items).toContain('Status: `READY`')
-    expect(deps).toContain('WORK-001 through WORK-014 are VERIFIED')
-    expect(deps).toContain('WORK-015 is READY')
+    expect(deps).toContain('WORK-014 -> WORK-015')
+    expect(deps).toContain('WORK-015 -> WORK-016')
+    expect(deps).toContain('WORK-016 is READY')
   })
-
-  test('no later implementation Work Item is released', () => {
-    expect(items).not.toContain('WORK-016')
+  test('WORK-016 is released only against frozen V4', () => {
+    const order = read('work-orders/WORK-016.md')
+    expect(order).toContain('Status\n`RELEASED`')
+    expect(order).toContain('`IAAS-DOM-ARCH-4` (FROZEN)')
+    expect(order).toContain('`WORK-015` VERIFIED')
+    expect(order).toContain('Do not start WORK-017')
   })
 })
