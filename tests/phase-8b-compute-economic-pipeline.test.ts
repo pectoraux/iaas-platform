@@ -172,7 +172,12 @@ describe('Phase 8B: compute end-to-end economic pipeline', () => {
     expect(result.settlementId).toBeTruthy()
     const settlement = await db.settlement.findUnique({ where: { id: result.settlementId } })
     expect(settlement).toBeTruthy()
-    expect(settlement!.status).toBe('completed')
+    // WORK-005 (AR-006): the economic pipeline's createSettlement stage
+    // creates the settlement instruction with status 'created'. Settlement
+    // is completed by a separate processSettlementOutbox step
+    // (worker.service), not by the pipeline itself. The previous assertion
+    // expected 'completed' — the correct status after the pipeline is 'created'.
+    expect(settlement!.status).toBe('created')
 
     // 8. Ledger entries exist (double-entry: operator credit + platform fee)
     // The ledger posting is linked to the reward via the idempotency key.
@@ -289,13 +294,19 @@ describe('Phase 8C: failure path', () => {
     ).rejects.toThrow()
 
     // Verify: exactly ONE new commitment was created by this job.
+    // WORK-005 (AR-006): use orderBy createdAt desc so the first element is
+    // deterministically the newest commitment (the one created by this failed
+    // job). The previous code took the last element without an orderBy, which
+    // was non-deterministic and could pick a Phase 8B commitment (status
+    // 'consumed') instead of the failed job's commitment (status 'released').
     const commitmentsAfter = await db.capacityCommitment.findMany({
       where: { tenantId, sourceType: 'compute_job' },
+      orderBy: { createdAt: 'desc' },
     })
     expect(commitmentsAfter.length).toBe(commitmentsBefore + 1)
 
-    // The new commitment is the one created by the failed job.
-    const failedCommitment = commitmentsAfter[commitmentsAfter.length - 1]
+    // The new commitment is the one created by the failed job (newest first).
+    const failedCommitment = commitmentsAfter[0]
 
     // Verify: THAT EXACT commitment was released (status = 'released').
     // This proves the stable computeJobId works — releaseCommitment found
