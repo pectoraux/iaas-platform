@@ -133,7 +133,12 @@ export async function registerTransform(
     })
   } catch (err: unknown) {
     // Prisma P2002: unique constraint violation — another concurrent call won.
-    if (err instanceof Error && err.message.includes('P2002')) {
+    // The error code may be in err.code (PrismaClientKnownRequestError) or
+    // in the message. Check both.
+    const isP2002 = (err as { code?: string; message?: string })?.code === 'P2002'
+      || (err instanceof Error && err.message.includes('P2002'))
+      || (err instanceof Error && err.message.includes('Unique constraint failed'))
+    if (isP2002) {
       const winner = await db.transformRegistryEntry.findUnique({
         where: {
           tenantId_transformType_transformVersion: {
