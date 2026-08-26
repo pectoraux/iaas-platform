@@ -86,6 +86,10 @@ const REQUIRED_SPEC_FILES: ReadonlyArray<string> = [
   'architecture-change-request.md',
   'verification.md',
   'work-orders/WORK-001.md',
+  // WORK-002 domain architecture layer (IAAS-DOM-ARCH-1).
+  'domain-architecture.md',
+  'domain-requirements.md',
+  'domain-dependency-graph.md',
 ]
 
 // Files that spec/README.md must index in its Documents section
@@ -95,6 +99,7 @@ const README_INDEXED_FILES: ReadonlyArray<string> = REQUIRED_SPEC_FILES.filter(
 )
 
 const GOV_VERSION_PATTERN = /^IAAS-GOV-ARCH-\d+$/
+const DOM_VERSION_PATTERN = /^IAAS-DOM-ARCH-\d+$/
 const WORK_ITEM_PATTERN = /^WORK-\d+$/
 const AC_PATTERN = /^W001-AC\d{2}$/
 const EXPECTED_WORK001_ACS: readonly string[] = Array.from({ length: 13 }, (_, i) =>
@@ -353,6 +358,10 @@ const workOrderTemplate = spec['work-order-template.md'] ?? ''
 const acr = spec['architecture-change-request.md'] ?? ''
 const verification = spec['verification.md'] ?? ''
 const workOrder = spec['work-orders/WORK-001.md'] ?? ''
+// WORK-002 domain architecture layer.
+const domainArchitecture = spec['domain-architecture.md'] ?? ''
+const domainRequirements = spec['domain-requirements.md'] ?? ''
+const domainDependencyGraph = spec['domain-dependency-graph.md'] ?? ''
 
 // SC-02 — README indexes every core specification document.
 for (const file of README_INDEXED_FILES) {
@@ -393,20 +402,46 @@ if (archVersionMatch && !/FROZEN/.test(archVersionMatch[2] ?? '')) {
   error('SC-03', 'spec/architecture.md does not mark the governance architecture FROZEN')
 }
 
-// SC-04 — domain architecture remains pending WORK-002 (version model parity).
+// SC-04 — canonical domain architecture IAAS-DOM-ARCH-1 is registered, frozen,
+// and consistent between architecture.md and architecture-lock.md.
+// (WORK-001 pinned the domain architecture to "PENDING WORK-002"; WORK-002
+// fulfills that placeholder by publishing IAAS-DOM-ARCH-1. The "pending" line
+// in architecture-lock.md transitions to the registered FROZEN version. This
+// is the Work-Order-authorized evolution of the placeholder, NOT a change to
+// the frozen governance rules 1–13.)
 const domVersionMatch = architecture.match(
   /\|\s*Domain Architecture\s*\|\s*`([^`]+)`\s*\|\s*([^\n|]+)\|/,
 )
 if (!domVersionMatch) {
   error('SC-04', 'spec/architecture.md does not register a Domain Architecture version row')
-} else if (!/PENDING/i.test(domVersionMatch[2] ?? '')) {
+} else if (!DOM_VERSION_PATTERN.test(domVersionMatch[1] ?? '')) {
   error(
     'SC-04',
-    `spec/architecture.md must keep the domain architecture pending WORK-002 (found status: ${domVersionMatch[2]?.trim()})`,
+    `spec/architecture.md registers a malformed Domain Architecture version: ${domVersionMatch[1]} (expected IAAS-DOM-ARCH-\\d+)`,
+  )
+} else if (!/FROZEN/i.test(domVersionMatch[2] ?? '')) {
+  error(
+    'SC-04',
+    `spec/architecture.md must mark the Domain Architecture FROZEN (found status: ${domVersionMatch[2]?.trim()})`,
   )
 }
-if (!lock.includes('Domain Architecture Version: pending WORK-002')) {
-  error('SC-04', 'spec/architecture-lock.md must keep the domain architecture pending WORK-002')
+const domVersion = domVersionMatch ? domVersionMatch[1] : null
+const lockDomVersionMatch = lock.match(/Domain Architecture Version:\s*`([^`]+)`/)
+if (!lockDomVersionMatch) {
+  error('SC-04', 'spec/architecture-lock.md does not declare a Domain Architecture Version')
+} else if (!DOM_VERSION_PATTERN.test(lockDomVersionMatch[1] ?? '')) {
+  error(
+    'SC-04',
+    `spec/architecture-lock.md declares a malformed Domain Architecture Version: ${lockDomVersionMatch[1]} (expected IAAS-DOM-ARCH-\\d+)`,
+  )
+} else if (!/FROZEN/i.test(lock)) {
+  error('SC-04', 'spec/architecture-lock.md must mark the Domain Architecture FROZEN')
+}
+if (domVersion && lockDomVersionMatch && domVersion !== lockDomVersionMatch[1]) {
+  error(
+    'SC-04',
+    `domain architecture version inconsistent: architecture.md declares ${domVersion} but architecture-lock.md declares ${lockDomVersionMatch[1]}`,
+  )
 }
 
 const registeredVersions: ReadonlySet<string> = new Set(
@@ -607,8 +642,10 @@ for (const key of graphKeySet) {
   }
 }
 
-// SC-11 — dependency eligibility gate: WORK-002 cannot be eligible before
-// WORK-001 is VERIFIED (GOV-008 / frozen rule 9).
+// SC-11 — dependency eligibility gate (GOV-008 / frozen rule 9). A Work Item
+// whose dependencies are not all VERIFIED MUST NOT hold an active status.
+// (WORK-001 is now VERIFIED, so WORK-002 is eligible; the graph must document
+// that WORK-001 is VERIFIED as the release condition for WORK-002.)
 for (const item of workItems) {
   const depsResolved = item.dependencies.every((dep) => workItemById.has(dep))
   if (!depsResolved) continue // already reported by SC-09
@@ -622,10 +659,10 @@ for (const item of workItems) {
     )
   }
 }
-if (!dependencyGraphMd.toLowerCase().includes('work-002 is blocked until work-001 is verified')) {
+if (!dependencyGraphMd.toLowerCase().includes('work-001 is verified')) {
   error(
     'SC-11',
-    'spec/dependency-graph.md does not state that WORK-002 is blocked until WORK-001 is VERIFIED',
+    'spec/dependency-graph.md does not state that WORK-001 is VERIFIED (the WORK-002 eligibility release condition)',
   )
 }
 
@@ -749,6 +786,68 @@ if (!workOrderTemplate.includes('STOP CONDITIONS') || !workOrderTemplate.include
 }
 
 // ---------------------------------------------------------------------------
+// WORK-002 — Domain Architecture layer (IAAS-DOM-ARCH-1)
+// ---------------------------------------------------------------------------
+// SC-17 — spec/domain-architecture.md declares the canonical domain
+// architecture version, marks it FROZEN, and distinguishes implemented /
+// future / open-research concepts (W002-AC02). The version must match the
+// version registered in spec/architecture.md (SC-04).
+if (!domainArchitecture.includes('IAAS-DOM-ARCH-1')) {
+  error('SC-17', 'spec/domain-architecture.md does not declare IAAS-DOM-ARCH-1')
+}
+if (!/Status:\s*\*\*FROZEN\*\*/.test(domainArchitecture)) {
+  error('SC-17', 'spec/domain-architecture.md does not mark IAAS-DOM-ARCH-1 FROZEN')
+}
+if (!domainArchitecture.includes('IAAS-GOV-ARCH-1')) {
+  error('SC-17', 'spec/domain-architecture.md does not reference the governing architecture IAAS-GOV-ARCH-1')
+}
+// The domain architecture MUST explicitly distinguish implemented, future, and
+// open/research concepts (W002-AC02 / DOM V1 rules).
+for (const marker of ['IMPLEMENTED', 'FUTURE', 'OPEN / RESEARCH', 'FROZEN-CONTRACT']) {
+  if (!domainArchitecture.includes(marker)) {
+    error('SC-17', `spec/domain-architecture.md is missing required status distinction: ${marker}`)
+  }
+}
+// The domain architecture MUST record the canonical dependency direction for
+// the data-plane primitives (DOM V1 rules).
+if (!domainArchitecture.includes('Node') || !domainArchitecture.includes('Bundle') || !domainArchitecture.includes('Route') || !domainArchitecture.includes('TransportExecution')) {
+  error('SC-17', 'spec/domain-architecture.md does not record the data-plane primitive dependency direction (Node, Bundle, Route, TransportExecution)')
+}
+
+// SC-18 — spec/domain-requirements.md derives domain requirements from
+// IAAS-DOM-ARCH-1 using stable DOM-xxx IDs (W002-AC03). Each implemented
+// requirement must reference the architecture version.
+if (!domainRequirements.includes('IAAS-DOM-ARCH-1')) {
+  error('SC-18', 'spec/domain-requirements.md does not reference IAAS-DOM-ARCH-1')
+}
+if (!/DOM-\d{3}/.test(domainRequirements)) {
+  error('SC-18', 'spec/domain-requirements.md declares no stable DOM-xxx requirement IDs')
+}
+// Domain requirements must NOT promote PROPOSED items into acceptance-bearing
+// requirements (GOV-006 truth classification).
+if (!domainRequirements.includes('PROPOSED')) {
+  error('SC-18', 'spec/domain-requirements.md does not distinguish PROPOSED requirements from implemented ones (GOV-006)')
+}
+
+// SC-19 — spec/domain-dependency-graph.md derives a domain primitive DAG from
+// IAAS-DOM-ARCH-1 that is acyclic with no unresolved dependencies (W002-AC03).
+if (!domainDependencyGraph.includes('IAAS-DOM-ARCH-1')) {
+  error('SC-19', 'spec/domain-dependency-graph.md does not reference IAAS-DOM-ARCH-1')
+}
+// The domain graph must declare the frozen anti-drift prohibitions (MUST NOT
+// depend on) so the canonical direction is explicit, not implicit.
+if (!domainDependencyGraph.includes('✗->') && !domainDependencyGraph.includes('MUST NOT depend on')) {
+  error('SC-19', 'spec/domain-dependency-graph.md does not declare frozen anti-drift prohibitions (MUST NOT depend on)')
+}
+// The domain graph must record the frozen data-plane direction.
+if (!domainDependencyGraph.includes('Node -> Bundle') && !/Node\s*->\s*Bundle/.test(domainDependencyGraph)) {
+  error('SC-19', 'spec/domain-dependency-graph.md does not record the frozen data-plane direction (Node -> Bundle)')
+}
+if (!domainDependencyGraph.includes('acyclic')) {
+  error('SC-19', 'spec/domain-dependency-graph.md does not state the graph is acyclic')
+}
+
+// ---------------------------------------------------------------------------
 // Output (deterministic) and exit code contract
 // ---------------------------------------------------------------------------
 
@@ -764,11 +863,12 @@ if (errors.length > 0) {
 process.stdout.write('SPEC VALIDATION PASSED\n')
 process.stdout.write(
   `architecture=${archVersion ?? 'unknown'} ` +
+    `domain-architecture=${domVersion ?? 'unknown'} ` +
     `required-files=${REQUIRED_SPEC_FILES.length} ` +
     `work-items=${workItems.length} ` +
     `work-item-schema-fields=${SCHEMA_FIELD_COUNT} ` +
     `work001-acceptance-criteria=${EXPECTED_WORK001_ACS.length} ` +
     `dependency-edges=${declaredKeySet.size} ` +
-    `checks=16\n`,
+    `checks=19\n`,
 )
 process.exit(0)

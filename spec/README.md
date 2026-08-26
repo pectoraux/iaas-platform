@@ -12,6 +12,9 @@ This directory is the persistent planning and governance layer for IAAS implemen
 - `work-order-template.md` — canonical implementation-agent handoff format.
 - `architecture-change-request.md` — controlled architecture evolution protocol.
 - `verification.md` — evidence and verification protocol.
+- `domain-architecture.md` — canonical Domain Architecture V1 (`IAAS-DOM-ARCH-1`, FROZEN).
+- `domain-requirements.md` — domain requirements derived from `IAAS-DOM-ARCH-1`.
+- `domain-dependency-graph.md` — domain primitive dependency DAG derived from `IAAS-DOM-ARCH-1`.
 
 ## Authority Model
 
