@@ -214,17 +214,52 @@ export class InMemoryExtensionProvenanceSink implements ExtensionProvenanceSink 
   }
 }
 
-// Module-level default sink. Application bootstrap may install a durable sink
-// (future WORK). Tests inject sinks per-call via the execution input.
-const defaultSink = new InMemoryExtensionProvenanceSink()
+// Module-level default sink. The default is an in-memory recorder suitable
+// for tests and environments without a database. Production deployments
+// install a durable sink (e.g. DurableExtensionProvenanceSink from
+// extension-provenance.service) via setDefaultExtensionProvenanceSink() at
+// application bootstrap.
+//
+// ARCHITECTURAL BOUNDARY (V4 §2.4 / DOM-022 AC06): the Runtime does NOT own
+// durable persistence and does NOT import the provenance service. The durable
+// sink is INJECTED by application bootstrap (or test setup) through the sink
+// interface, preserving the Runtime-emits / provenance-service-persists
+// separation. The Runtime depends only on the ExtensionProvenanceSink
+// interface, never on the concrete durable implementation.
+let defaultSink: ExtensionProvenanceSink = new InMemoryExtensionProvenanceSink()
 
 /**
  * Get the module-level default ExtensionProvenanceSink. Used when no sink is
- * provided in the execution input. The default is an in-memory recorder (NOT
- * durable) — production deployments must install a durable sink (future WORK).
+ * provided in the execution input. The default is an in-memory recorder;
+ * production deployments install a durable sink via
+ * {@link setDefaultExtensionProvenanceSink} at bootstrap.
  */
 export function getDefaultExtensionProvenanceSink(): ExtensionProvenanceSink {
   return defaultSink
+}
+
+/**
+ * Install the module-level default ExtensionProvenanceSink. Called by
+ * application bootstrap (or test setup) to install a durable sink (e.g.
+ * DurableExtensionProvenanceSink). The Runtime does NOT import the durable
+ * sink implementation — it is injected through this setter, preserving the
+ * Runtime-emits / provenance-service-persists separation (V4 §2.4 / DOM-022
+ * AC06).
+ *
+ * Accepts any object implementing the ExtensionProvenanceSink interface. The
+ * caller is responsible for constructing the durable sink (which may import
+ * @/lib/db — the Runtime module never does).
+ */
+export function setDefaultExtensionProvenanceSink(sink: ExtensionProvenanceSink): void {
+  defaultSink = sink
+}
+
+/**
+ * Test helper: reset the default sink to the in-memory recorder. Production
+ * code should NOT call this — it is for test isolation only.
+ */
+export function __resetDefaultExtensionProvenanceSinkForTesting(): void {
+  defaultSink = new InMemoryExtensionProvenanceSink()
 }
 
 // ---------------------------------------------------------------------------

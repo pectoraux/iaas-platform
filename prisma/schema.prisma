@@ -106,6 +106,8 @@ model Tenant {
   transformRegistryEntries TransformRegistryEntry[]
   // WORK-016: ExtensionRegistryEntry — tenant-scoped extension catalog entries.
   extensionRegistryEntries ExtensionRegistryEntry[]
+  // WORK-018: ExtensionProvenance — tenant-scoped immutable durable provenance records.
+  extensionProvenanceRecords ExtensionProvenance[]
 
   @@index([slug])
 }
@@ -2752,5 +2754,62 @@ model ExtensionRegistryEntry {
   @@index([certificationStatus])
   @@index([revocationStatus])
   @@index([lifecycleState])
+  @@index([createdAt])
+}
+
+// -----------------------------------------------------------------------------
+// WORK-018 (IAAS-DOM-ARCH-4 / DOM-022): ExtensionProvenance
+//
+// The service-layer immutable durable provenance record for Extension execution.
+// Consumes payloads emitted by ExtensionRuntime (WORK-017) through the
+// ExtensionProvenanceSink boundary contract, and persists them to PostgreSQL.
+//
+// Architectural boundaries (frozen by IAAS-DOM-ARCH-4 §2.4 / DOM-022):
+//   - Service-layer, NOT kernel.
+//   - Owned by a dedicated provenance boundary service (ExtensionProvenanceService),
+//     NOT by ExtensionRuntime. Runtime emits; provenance service persists.
+//   - IMMUTABLE after creation — no update/delete path is exposed by the service.
+//   - PostgreSQL is the durable source of truth.
+//   - Tenant isolation is mandatory; cross-tenant queries are prohibited.
+//   - One durable record per (tenantId, executionIdempotencyKey) — concurrent
+//     writes converge (P2002 catch + re-read).
+//   - SHA-256 fingerprint over the frozen material fields
+//     (tenantId, extensionType, extensionVersion, executionIdempotencyKey,
+//      inputHash, outputHash, resultStatus) — V4 §2.4.
+//   - Provenance is emitted after both success and failure; failed execution
+//     records resultStatus='failed' (Runtime re-throws the original error).
+// -----------------------------------------------------------------------------
+model ExtensionProvenance {
+  id                      String   @id @default(cuid())
+  tenantId                String
+  extensionType           String
+  extensionVersion        String
+  executionIdempotencyKey String
+  inputHash               String
+  outputHash              String
+  resultStatus            String   // success | failed — MATERIAL to fingerprint
+  // Resource usage exercised (over-approximates to effective ceiling without sandbox).
+  resourceUsageJson       String   @default("{}") // JSON: { cpuMs, memoryBytes, timeMs }
+  // Capabilities exercised (over-approximates to effective ceiling without sandbox).
+  capabilitiesExercisedJson String @default("[]") // JSON array of capability strings
+  // The tenant/operator-approved ceiling recorded for audit.
+  tenantApprovedCeilingJson String @default("{}") // JSON: { capabilities: [], resourceLimits: {} }
+  // Failure metadata (only present when resultStatus='failed'). NON-identity-bearing.
+  failureMetadataJson     String   @default("{}") // JSON: { error, errorType, denialReason? }
+  // SHA-256 fingerprint of the material fields (V4 §2.4). Unique — identical
+  // payloads converge to the same record (replay convergence).
+  fingerprint             String   @unique
+  createdAt               DateTime @default(now())
+
+  tenant                  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // One durable record per (tenantId, executionIdempotencyKey) — concurrent
+  // writes with the same key converge (P2002 catch + re-read in the service).
+  @@unique([tenantId, executionIdempotencyKey])
+  @@index([tenantId])
+  @@index([extensionType])
+  @@index([extensionVersion])
+  @@index([resultStatus])
+  @@index([fingerprint])
   @@index([createdAt])
 }

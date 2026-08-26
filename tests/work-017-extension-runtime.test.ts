@@ -193,12 +193,20 @@ describe('WORK-017 — ExtensionRuntime provenance boundary (W017-AC09)', () => 
     expect(RUNTIME_SRC).toMatch(/tenantId[\s\S]*extensionType[\s\S]*extensionVersion[\s\S]*executionIdempotencyKey[\s\S]*inputHash[\s\S]*outputHash[\s\S]*resultStatus/)
   })
 
-  test('ExtensionProvenance storage remains absent from production code', () => {
-    // No Prisma model for ExtensionProvenance should exist (DOM-022 is future).
+  test('ExtensionProvenance storage IS implemented (WORK-018) but Runtime does NOT own it', () => {
+    // WORK-018 implements the durable ExtensionProvenance model + service.
+    // The model now exists in the schema. The boundary that remains:
+    // ExtensionRuntime does NOT import the provenance service or @/lib/db.
     const schemaPath = join(REPO_ROOT, 'prisma', 'schema.prisma')
     const schema = readFileSync(schemaPath, 'utf8')
-    expect(schema).not.toMatch(/model\s+ExtensionProvenance\b/)
-    expect(schema).not.toMatch(/model\s+ExtensionProvenanceRecord\b/)
+    expect(schema).toMatch(/model\s+ExtensionProvenance\b/)
+
+    // The Runtime must NOT import the provenance service (reverse dependency
+    // prohibition — provenance service persists; Runtime only emits to the
+    // sink interface).
+    expect(RUNTIME_SRC).not.toMatch(/from\s+['"][^'"]*extension-provenance/)
+    expect(RUNTIME_SRC).not.toMatch(/^import.*@\/lib\/db/m)
+    expect(RUNTIME_SRC).not.toContain("from '@/lib/db'")
   })
 })
 
