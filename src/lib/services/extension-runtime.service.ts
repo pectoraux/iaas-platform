@@ -684,19 +684,22 @@ function checkExecutionAuthority(
   registryEntry: ExtensionRegistryEntryResult,
   ceiling: ExtensionCapabilityCeiling,
 ): ExtensionDenialReason | undefined {
+  // Revocation gate — checked FIRST because revokeExtension transitions BOTH
+  // revocationStatus='revoked' AND lifecycleState='revoked'. A revoked
+  // extension must report `revoked` (not `lifecycle_not_activated`) as the
+  // specific denial reason for provenance and audit clarity.
+  if (registryEntry.revocationStatus === 'revoked') {
+    return {
+      kind: 'revoked',
+      reason: `extension is revoked: ${registryEntry.revocationReason ?? 'no reason given'}`,
+    }
+  }
+
   // Lifecycle gate: only `activated` may execute.
   if (registryEntry.lifecycleState !== 'activated') {
     return {
       kind: 'lifecycle_not_activated',
       reason: `extension lifecycle state is '${registryEntry.lifecycleState}', not 'activated'`,
-    }
-  }
-
-  // Revocation gate (redundant with lifecycle since revoke→revoked, but explicit).
-  if (registryEntry.revocationStatus === 'revoked') {
-    return {
-      kind: 'revoked',
-      reason: `extension is revoked: ${registryEntry.revocationReason ?? 'no reason given'}`,
     }
   }
 
