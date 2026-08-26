@@ -14,7 +14,9 @@ ARCHITECT_REVIEW -> ARCHITECTURE_CHANGE_REQUIRED -> ARCHITECTURE_CHANGE_REQUEST
 ARCHITECT_REVIEW -> IMPLEMENTATION_BLOCKED -> IMPLEMENTING
 ```
 
-## WORK-001 — WorkflowOS Specification and Governance Foundation
+## VERIFIED historical Work Items
+
+### WORK-001 — WorkflowOS Specification and Governance Foundation
 
 Status: `VERIFIED`
 
@@ -28,12 +30,11 @@ Objective: establish persistent governance/specification without changing IAAS p
 
 Repository Scope: `spec/` governance documents and their executable consistency gate.
 
-Architecture Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` (no change without an approved ACR); no IAAS production implementation; no domain architecture creation (pending WORK-002).
+Architecture Constraints: frozen governance architecture; no production implementation; no domain feature implementation.
 
-Out of Scope: domain feature implementation, migrations, runtime changes, vertical networks, Domain Architecture V1.
+Out of Scope: domain features, migrations, runtime changes, vertical networks.
 
 Acceptance Criteria:
-
 - `W001-AC01` frozen governance architecture exists.
 - `W001-AC02` every Work Item names exactly one architecture version.
 - `W001-AC03` requirements and objective ACs are explicit.
@@ -48,491 +49,191 @@ Acceptance Criteria:
 - `W001-AC12` next Work Item is dependency-derived.
 - `W001-AC13` no IAAS production code changes in WORK-001.
 
-Required Verification:
+Required Verification: specification validator; negative validator tests; CI evidence; exact diff/scope inspection; independent Architect Review.
 
-- repository specification inspection against every W001 acceptance criterion;
-- automated specification consistency check covering required documents, stable IDs, architecture-version references, dependency resolution, and forbidden WORK-001 production-scope changes;
-- negative tests proving the validator rejects representative specification inconsistencies;
-- CI execution of the consistency check;
-- PR diff inspection confirming only governance/specification artifacts changed;
-- independent Architect Review after verification evidence is available.
+Definition of Done: governance specification committed and verified; PR merged; Work Item VERIFIED.
 
-Definition of Done: specification committed; automated consistency checks pass; negative tests pass; CI records the pass; production diff is empty; architect approves; PR merged; Work Item VERIFIED.
-
-## WORK-002 — Repository Baseline and Domain Architecture V1
+### WORK-002 — Repository Baseline and Domain Architecture V1
 
 Status: `VERIFIED`
-
 Architecture Version: `IAAS-GOV-ARCH-1`
-
 Dependencies: `WORK-001`
+Requirements: truth-classified repository baseline; canonical `IAAS-DOM-ARCH-1`.
+Objective: audit repository architecture/code/schema/tests/CI/history and establish the canonical V1 domain architecture.
+Repository Scope: `docs/architecture/` and `spec/` domain architecture layer.
+Architecture Constraints: derived only from verified baseline; architecture changes require ACR/new version.
+Out of Scope: broad refactors and future feature implementation.
+Acceptance Criteria: `W002-AC01` baseline is truth-classified; `W002-AC02` V1 is published/registered; `W002-AC03` requirements/dependency graph exist; `W002-AC04` scope is bounded.
+Required Verification: baseline inspection; specification validation; Architect Review.
+Definition of Done: baseline and V1 architecture committed and verified.
 
-Requirements: truth-classified repository baseline covering architecture documents, code, schema, tests, CI, and history; deliverables `docs/architecture/REPOSITORY-BASELINE.md`, canonical Domain Architecture V1, domain requirements, domain dependency graph.
-
-Objective: audit architecture documents, code, schema, tests, CI, and history into a truth-classified repository baseline and canonical `IAAS-DOM-ARCH-1`.
-
-Repository Scope: `docs/architecture/` baseline documents and the `spec/` domain architecture layer, as authorized by the WORK-002 Work Order.
-
-Architecture Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` governs all changes; the domain architecture is derived only from the verified repository baseline; domain architecture changes require an approved ACR and a new version.
-
-Out of Scope: broad refactors, unrelated feature expansion, and future-feature implementation.
-
-Acceptance Criteria:
-
-- `W002-AC01` repository baseline exists and is truth-classified.
-- `W002-AC02` canonical `IAAS-DOM-ARCH-1` is published and registered.
-- `W002-AC03` domain requirements and domain dependency graph exist.
-- `W002-AC04` no scope beyond the repository baseline audit and domain architecture V1.
-
-Required Verification: repository baseline inspection against truth classifications; automated specification consistency validation; independent Architect Review after WORK-001 is VERIFIED.
-
-Definition of Done: repository baseline committed; canonical domain architecture approved by the Architect; domain requirements and dependency graph committed; Work Item VERIFIED.
-
-## WORK-003 — VerifiedEvidenceContext Implementation
+### WORK-003 — VerifiedEvidenceContext Implementation
 
 Status: `VERIFIED`
-
 Architecture Version: `IAAS-GOV-ARCH-1`
-
 Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
-
 Architecture Change Request: `ACR-001` (APPROVED)
-
 Dependencies: `WORK-002`
+Requirements: `DOM-013` and ACR-001.
+Objective: implement the frozen VerifiedEvidenceContext boundary.
+Repository Scope: evidence/economic boundary services, VPP adapter, tests, governance evidence.
+Architecture Constraints: preserve durable evidence sources, kernel boundary, and Data Plane/Economic Pipeline independence.
+Out of Scope: ledger redesign, Data Plane redesign, Transform/Extension work.
+Acceptance Criteria: `W003-AC01` through `W003-AC09` prove immutable context, durable references, generic acceptance, VPP production, reconciliation, kernel/economic boundaries, PostgreSQL, and regression evidence.
+Required Verification: static architecture checks, unit/PG tests, VPP integration, anti-dependency tests, CI, Architect Review.
+Definition of Done: W003 criteria verified and merged.
 
-Requirements: `DOM-013`; ACR-001; inherited V2 rules in `IAAS-DOM-ARCH-2`.
-
-Objective: implement the frozen `VerifiedEvidenceContext` contract defined by `IAAS-DOM-ARCH-2`, replacing the implicit vertical-specific pre-validated-evidence convention with an explicit generic boundary.
-
-Repository Scope: existing evidence/verification services, generic economic pipeline integration, VPP adapter integration, targeted tests, and governance-specification tests required to prove the V2 contract.
-
-Architecture Constraints: `IAAS-DOM-ARCH-2` is FROZEN; `IAAS-GOV-ARCH-1` is FROZEN; do not create a kernel primitive; preserve durable Event/VerificationResult/Attestation as source of truth; preserve Data Plane ↔ Economic Pipeline independence; verticals may produce the context but generic code may not import vertical services.
-
-Out of Scope: ledger redesign, new economic primitives, changes to the Data Plane, TransformRegistry/Runtime, Extension/Marketplace/SDK work, broad VPP refactor, schema redesign unrelated to the context contract, architecture-version changes.
-
-Acceptance Criteria:
-
-- `W003-AC01` immutable `VerifiedEvidenceContext` contract exists at the evidence/economic boundary.
-- `W003-AC02` context references durable Event/Attestation identities and verification policy/version without duplicating durable payloads.
-- `W003-AC03` generic Economic Pipeline accepts the context without importing any vertical service.
-- `W003-AC04` VPP produces the context while retaining its domain-specific baseline/dispatch semantics.
-- `W003-AC05` reconciliation validates context references and preserves existing stale/invalid-reference recovery behavior.
-- `W003-AC06` context is not owned by the kernel and is not a ledger/accounting primitive.
-- `W003-AC07` Data Plane ↔ Economic Pipeline independence remains intact and is mechanically regression-tested.
-- `W003-AC08` PostgreSQL remains the durable source of truth; no SQLite or in-memory-only replacement is introduced.
-- `W003-AC09` all implementation and regression tests pass, with objective evidence recorded.
-
-Required Verification:
-
-- static architecture/import checks;
-- unit tests for context construction/immutability;
-- PostgreSQL integration tests for durable-reference validation;
-- VPP-to-context integration test;
-- stale/invalid-reference recovery tests;
-- Data Plane ↔ Economic Pipeline anti-dependency regression checks;
-- CI evidence and PR diff inspection;
-- independent Architect Review.
-
-Definition of Done: implementation committed; W003 acceptance criteria objectively verified; CI evidence recorded; no architecture drift; PR merged; Work Item VERIFIED.
-
-## WORK-004 — Runtime Registry Bootstrap Reliability
+### WORK-004 — Runtime Registry Bootstrap Reliability
 
 Status: `VERIFIED`
-
 Architecture Version: `IAAS-GOV-ARCH-1`
-
 Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
-
 Dependencies: `WORK-003`
+Requirements: `BASE-001` through `BASE-003`.
+Objective: restore runtime registry bootstrap/resolution behavior.
+Repository Scope: runtime/bootstrap code and targeted tests.
+Architecture Constraints: preserve three runtime kinds, isolation, singleton behavior, vertical neutrality.
+Out of Scope: runtime redesign and unrelated subsystems.
+Acceptance Criteria: `W004-AC01` through `W004-AC09`.
+Required Verification: runtime resolution, registry stability, dependent integration tests, architecture checks, CI, Architect Review.
+Definition of Done: runtime registration verified and merged.
 
-Requirements: `BASE-001` through `BASE-003`; inherited runtime boundaries from `IAAS-DOM-ARCH-2`.
-
-Objective: restore the implemented Runtime Registry contract so published NetworkVersion runtime kinds resolve through the intended bootstrap path.
-
-Repository Scope: `src/lib/kernel/runtime/`, `src/lib/bootstrap/`, runtime initialization/registration entrypoints, targeted runtime-resolution/integration tests, and narrowly-scoped CI/test bootstrap configuration only if required by the existing architectural contract.
-
-Architecture Constraints: frozen governance/domain architecture; preserve the three runtime kinds, runtime isolation, HybridRuntime bridge rule, singleton registry behavior, and vertical neutrality.
-
-Out of Scope: runtime architecture redesign, new runtime kinds, Data Plane changes, Economic Pipeline changes, Prisma/schema redesign, unrelated baseline TypeScript fixes, new network features, WORK-005+.
-
-Acceptance Criteria:
-
-- `W004-AC01` infrastructure runtime resolves through the intended bootstrap path.
-- `W004-AC02` protocol runtime resolves through the intended bootstrap path.
-- `W004-AC03` registry stability/singleton behavior is preserved.
-- `W004-AC04` frozen runtime architecture and isolation rules remain unchanged.
-- `W004-AC05` Phase 5.1 runtime-resolution tests pass without weakening architectural expectations.
-- `W004-AC06` dependent Phase 5.2/5.4, Phase 8B/8C, and VPP execution-invariant runtime-registration failures are eliminated.
-- `W004-AC07` generic runtime code remains vertical-neutral.
-- `W004-AC08` no persistence/Data Plane/Economic Pipeline redesign occurs.
-- `W004-AC09` complete objective verification evidence is produced.
-
-Required Verification:
-
-- Phase 5.1 runtime-resolution tests;
-- registry stability tests;
-- dependent Phase 5.2/5.4, Phase 8B/8C, and VPP execution-invariant regressions;
-- static runtime-isolation checks;
-- CI evidence and exact diff inspection;
-- independent Architect Review.
-
-Definition of Done: runtime registration restored through the intended architecture; targeted failures eliminated; frozen architecture unchanged; CI evidence complete; PR merged; Work Item VERIFIED.
-
-## WORK-005 — Integration Test Fixture and Prerequisite Reliability
+### WORK-005 — Integration Test Fixture and Prerequisite Reliability
 
 Status: `VERIFIED`
-
 Architecture Version: `IAAS-GOV-ARCH-1`
-
 Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
-
 Dependencies: `WORK-004`
+Requirements: `BASE-004` through `BASE-006`.
+Objective: make affected PostgreSQL integration fixtures explicit and deterministic.
+Repository Scope: affected tests/helpers only.
+Architecture Constraints: no production auto-fixtures; PostgreSQL and tenant isolation remain canonical.
+Out of Scope: production work and schema redesign.
+Acceptance Criteria: `W005-AC01` through `W005-AC08`.
+Required Verification: affected PG suites, isolation tests, validator, exact scope, Architect Review.
+Definition of Done: fixture failures eliminated and verified.
 
-Requirements: `BASE-004` through `BASE-006`; inherited PostgreSQL, tenant-isolation, generic Execution, and runtime boundaries from `IAAS-DOM-ARCH-2`.
-
-Objective: restore the remaining PostgreSQL integration-test baseline by making tenant-scoped operator/asset/device/capability prerequisites explicit and deterministic in the affected tests, without changing IAAS production behavior or architecture.
-
-Repository Scope: affected PostgreSQL integration tests under `tests/`, existing test fixture utilities/helpers under `tests/` only if a deterministic shared helper is warranted, targeted CI test selection, WORK-005 evidence, and governance/specification tests required by the new Work Item.
-
-Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-2` remain FROZEN; PostgreSQL remains canonical; tenant isolation is mandatory; no production auto-fixture behavior; RuntimeRegistry bootstrap semantics remain unchanged; no Data Plane/Economic Pipeline/ledger/runtime-boundary changes.
-
-Out of Scope: production changes merely to satisfy tests, global fixture redesign without evidence, new persistence abstractions, Prisma/schema changes without Architect escalation, unrelated TypeScript/architecture-contract failures, new network features, WORK-006+, frozen architecture changes.
-
-Acceptance Criteria:
-
-- `W005-AC01` every affected integration test explicitly establishes the operator/asset/device/capability prerequisites it consumes or uses a deterministic helper.
-- `W005-AC02` affected PostgreSQL integration tests pass from a clean database without relying on execution order or another test file's records.
-- `W005-AC03` no production IAAS service is changed solely to compensate for missing test fixtures.
-- `W005-AC04` tenant-scoped fixture isolation is mechanically tested.
-- `W005-AC05` runtime/execution/capacity/economic/Data Plane/vertical boundaries remain unchanged.
-- `W005-AC06` the residual operator+asset setup-failure class identified after WORK-004 is eliminated for affected tests.
-- `W005-AC07` unrelated pre-existing failures remain explicitly classified and untouched.
-- `W005-AC08` complete objective evidence is produced.
-
-Required Verification:
-
-- affected Phase 5.2/5.4 PostgreSQL tests;
-- affected Phase 8B/8C PostgreSQL tests;
-- explicit tenant-isolation regression test;
-- clean-database/no-cross-file-fixture evidence;
-- governance validator;
-- exact diff/scope inspection;
-- independent Architect Review.
-
-Definition of Done: affected tests establish prerequisites deterministically; residual fixture failures are eliminated; tenant isolation is regression-tested; no production behavior or frozen architecture changes; targeted CI passes; evidence complete; PR merged; Work Item VERIFIED.
-
-## WORK-006 — Baseline Typecheck and Architecture Contract Recovery
+### WORK-006 — Baseline Typecheck and Architecture Contract Recovery
 
 Status: `VERIFIED`
-
 Architecture Version: `IAAS-GOV-ARCH-1`
-
 Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
-
 Dependencies: `WORK-005`
+Requirements: `BASE-007` through `BASE-010`.
+Objective: eliminate in-scope baseline Typecheck and Architecture Contract failures without redesign.
+Repository Scope: minimal production/type-contract corrections and related tests.
+Architecture Constraints: preserve runtime, economic, Data Plane, and vertical-neutrality boundaries.
+Out of Scope: new primitives, broad refactors, compiler suppression.
+Acceptance Criteria: `W006-AC01` through `W006-AC10`.
+Required Verification: baseline captures, Typecheck, architecture tests, PG, validator, lint, scope, Architect Review.
+Definition of Done: in-scope baseline failures eliminated and verified.
 
-Requirements: `BASE-007` through `BASE-010`; inherited architecture/runtime/economic/Data Plane boundaries.
-
-Objective: eliminate the remaining Typecheck and Architecture Contract Test failures on the verified baseline without redesigning IAAS architecture.
-
-Repository Scope: `src/` only where a real compiler/type/architecture defect is demonstrated; `tests/architecture-contract.test.ts` and directly related tests when assertions are stale; targeted regression tests; targeted CI/configuration; WORK-006 evidence; governance test updates required only because WORK-006 is issued.
-
-Architecture Constraints: frozen `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-2`; preserve InfrastructureRuntime / ProtocolRuntime / HybridRuntime boundaries; preserve Data Plane ↔ Economic Pipeline independence; generic kernel/runtime code remains vertical-neutral; PostgreSQL remains canonical.
-
-Out of Scope: new domain primitives/network features; runtime/economic/data-plane/transform/extension/marketplace/SDK redesign; Prisma schema changes without escalation; broad refactoring; `any`/`@ts-ignore`/compiler suppression; frozen architecture changes; WORK-007+.
-
-Acceptance Criteria:
-
-- `W006-AC01` clean-main TypeScript failures are captured, classified, and traced.
-- `W006-AC02` all in-scope TypeScript errors are eliminated and final `tsc --noEmit` is clean for the baseline.
-- `W006-AC03` all Architecture Contract Test failures are captured and classified.
-- `W006-AC04` all in-scope Architecture Contract Test failures are eliminated without weakening frozen architecture rules.
-- `W006-AC05` every production/type-contract correction is minimal and regression-tested.
-- `W006-AC06` no new vertical/runtime/economic/Data Plane coupling is introduced.
-- `W006-AC07` PostgreSQL integration tests remain green.
-- `W006-AC08` validator, architecture tests, typecheck, lint, targeted regressions, and scope evidence are recorded.
-- `W006-AC09` every residual out-of-scope failure is documented and assigned to a future bounded Work Item.
-- `W006-AC10` no frozen architecture is modified in place.
-
-Required Verification:
-
-- clean-main Typecheck baseline capture;
-- complete Architecture Contract Test suite;
-- final `bunx tsc --noEmit`;
-- targeted regression tests for all implementation corrections;
-- PostgreSQL integration suite;
-- governance specification validator;
-- lint;
-- exact diff/scope inspection;
-- independent Architect Review.
-
-Definition of Done: Typecheck and Architecture Contract failures within scope are eliminated; residuals are evidenced; PostgreSQL remains green; no architecture drift; PR merged; Work Item VERIFIED.
-
-## WORK-007 — Typecheck Residual Closure and TypeScript Project Boundaries
+### WORK-007 — Typecheck Residual Closure and TypeScript Project Boundaries
 
 Status: `VERIFIED`
-
 Architecture Version: `IAAS-GOV-ARCH-1`
-
 Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
-
 Dependencies: `WORK-006`
+Requirements: `BASE-011` through `BASE-014`.
+Objective: close residual Typecheck failures and establish explicit TS project boundaries.
+Repository Scope: VPP typing defect, TS configuration, targeted tests/CI.
+Architecture Constraints: no suppression, no architecture redesign.
+Out of Scope: new domain/network features.
+Acceptance Criteria: `W007-AC01` through `W007-AC10`.
+Required Verification: Typecheck, boundary tests, architecture/PG/validator/lint/scope gates, Architect Review.
+Definition of Done: Typecheck clean and residuals classified.
 
-Requirements: `BASE-011` through `BASE-014`; inherited frozen runtime, vertical-neutrality, and repository-governance boundaries.
-
-Objective: close the five residual Typecheck failures left after WORK-006 without weakening the compiler gate: fix the genuine production `baselineEngine` defect and establish explicit, testable TypeScript project boundaries for `examples/` and `skills/` rather than silently excluding broken code.
-
-Repository Scope: `src/lib/services/vpp.service.ts` and directly related production types; root and auxiliary `tsconfig*.json` / TypeScript project configuration required to establish explicit boundaries; targeted auxiliary configuration/tests; targeted regression tests; CI/test configuration required to validate the boundaries; WORK-007 evidence; governance test updates required solely because WORK-007 is issued.
-
-Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-2` remain FROZEN; do not change RuntimeRegistry, InfrastructureRuntime, ProtocolRuntime, HybridRuntime, Economic Pipeline, Data Plane, ledger, or Prisma schema; generic kernel/runtime code remains vertical-neutral; PostgreSQL remains canonical; do not weaken TypeScript strictness or introduce compiler-wide suppression.
-
-Out of Scope: new domain primitives/network features; runtime/economic/data-plane architecture redesign; unrelated dependency expansion; `any`, `@ts-ignore`, `@ts-expect-error`, `skipLibCheck`, or broad unexplained exclusions; frozen architecture changes; WORK-008+.
-
-Acceptance Criteria:
-
-- `W007-AC01` residual Typecheck failures are reproduced and classified with concrete evidence.
-- `W007-AC02` baselineEngine production Typecheck failure is eliminated without suppression while preserving dynamic-import behavior.
-- `W007-AC03` TypeScript project boundaries are explicit and each auxiliary tree is either validated by its own project configuration or explicitly classified as non-application material.
-- `W007-AC04` no broken auxiliary TypeScript code is silently hidden by an unexplained broad exclusion.
-- `W007-AC05` final IAAS application `tsc --noEmit` is clean.
-- `W007-AC06` Architecture Contract Tests, PostgreSQL integration tests, specification validation, and lint remain green.
-- `W007-AC07` frozen runtime architecture, vertical neutrality, and Data Plane ↔ Economic Pipeline independence remain intact.
-- `W007-AC08` regression tests prove the baselineEngine typing boundary and TypeScript project-boundary decision.
-- `W007-AC09` residual auxiliary-project failures, if any, are explicitly classified and assigned rather than concealed.
-- `W007-AC10` no frozen architecture version is modified and no ACR is required unless a genuine architectural contradiction is demonstrated.
-
-Required Verification:
-
-- clean-main residual Typecheck capture;
-- final IAAS application `tsc --noEmit`;
-- any auxiliary TypeScript project checks established by WORK-007;
-- baselineEngine targeted regression test;
-- Architecture Contract Test suite;
-- PostgreSQL integration suite;
-- specification validator;
-- lint;
-- exact diff/scope verification;
-- independent Architect Review.
-
-Definition of Done: residual Typecheck failures are objectively classified; baselineEngine is fixed with regression evidence; TypeScript project boundaries are explicit and validated; IAAS application Typecheck is clean; all existing CI gates remain green; evidence is recorded; PR merged; Work Item VERIFIED.
-
-## WORK-008 — Architecture Truth Reconciliation and Verified-Evidence Promotion
+### WORK-008 — Architecture Truth Reconciliation and Verified-Evidence Promotion
 
 Status: `VERIFIED`
-
 Architecture Version: `IAAS-GOV-ARCH-1`
-
 Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
-
 Dependencies: `WORK-007`
+Requirements: `BASE-015`, governance requirements.
+Objective: reconcile verified repository reality into the current domain planning layer.
+Repository Scope: specification and reconciliation evidence only.
+Architecture Constraints: V2 frozen; unrelated future primitives remain future.
+Out of Scope: production code and unrelated promotions.
+Acceptance Criteria: `W008-AC01` through `W008-AC08`.
+Required Verification: truth inventory, historical preservation, regression tests, full gates, Architect Review.
+Definition of Done: truth drift reconciled and verified.
 
-Requirements: `BASE-015`; `GOV-001`, `GOV-003`, `GOV-006`, `GOV-008`.
-
-Objective: synchronize the canonical planning/specification layer with verified repository reality after WORK-003 and WORK-007. The V1-derived domain requirements still label `DOM-P01 VerifiedEvidenceContext` as `PROPOSED`, even though ACR-001 was approved, `IAAS-DOM-ARCH-2` was frozen, and WORK-003 was implemented and VERIFIED.
-
-Repository Scope: `spec/` specification documents; `docs/architecture/` only for reconciliation/addendum evidence; directly related specification tests; CI configuration only when required.
-
-Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-2` remain FROZEN; no production code changes; no new domain primitives; no new ACRs unless a genuine contradiction is discovered; no promotion of unrelated FUTURE items; frozen architecture versions are not modified in place (historical V1 preserved with addendum).
-
-Out of Scope: production code changes, frozen architecture mutation, new primitives, promoting TransformRegistry/TransformRuntime/Extensions/Marketplace/SDK/Fragmentation, new ACRs without genuine contradiction, WORK-009+.
-
-Acceptance Criteria:
-
-- `W008-AC01` truth drift inventory: every stale statement captured with source, current statement, verified evidence, classification, required correction.
-- `W008-AC02` VerifiedEvidenceContext is no longer represented as merely proposed in the current domain requirements/index; identified as implemented under IAAS-DOM-ARCH-2, traced to ACR-001 and WORK-003.
-- `W008-AC03` IAAS-DOM-ARCH-1 remains immutable historical architecture; wording not silently rewritten.
-- `W008-AC04` no other DOM-Pxx future/open/research item is promoted without its own verified architecture decision.
-- `W008-AC05` cross-document consistency: domain-architecture.md, domain-architecture-v2.md, domain-requirements.md, architecture.md, architecture-lock.md, work-items.md, dependency-graph.md remain mutually consistent.
-- `W008-AC06` regression protection: deterministic specification tests detect a future reversion that incorrectly labels a VERIFIED primitive as merely proposed.
-- `W008-AC07` no production changes (src/, prisma/, runtime, economic, Data Plane, vertical).
-- `W008-AC08` governance gates remain green (validator, architecture-contract, Typecheck, PostgreSQL, lint, diff-scope).
-
-Required Verification:
-
-- truth-drift inventory;
-- updated current-domain requirement/index state;
-- historical V1 unchanged evidence;
-- regression test proving the verified-evidence promotion cannot silently revert;
-- full CI evidence;
-- exact diff/scope evidence;
-- independent Architect Review.
-
-Definition of Done: truth drift is inventoried; VerifiedEvidenceContext is correctly represented as implemented/current; historical V1 remains immutable; unrelated future primitives remain future/proposed; regression protection is added; all governance and engineering CI gates remain green; PR submitted; Architect Review approves; PR merged; WORK-008 becomes VERIFIED only after independent Architect Review.
-
-## WORK-009 — Transform Stack Architecture Freeze
+### WORK-009 — Transform Stack Architecture Freeze
 
 Status: `VERIFIED`
-
 Architecture Version: `IAAS-GOV-ARCH-1`
-
-Domain Architecture: `IAAS-DOM-ARCH-3` (target — to be frozen by this Work Item)
-
+Domain Architecture: `IAAS-DOM-ARCH-3` (FROZEN)
 Dependencies: `WORK-008`
+Requirements: `BASE-016`, `ACR-002` (APPROVED).
+Objective: freeze the Transform → Registry → Runtime → Record boundary without implementation.
+Repository Scope: architecture/specification/tests only.
+Architecture Constraints: V2 immutable; no production TransformRegistry/Runtime implementation in this slice.
+Out of Scope: production implementation, marketplace, SDK, sandbox, signatures.
+Acceptance Criteria: `W009-AC01` through `W009-AC08`.
+Required Verification: ACR traceability, V3 consistency, responsibility separation, regression tests, CI, scope, Architect Review.
+Definition of Done: V3 frozen and verified.
 
-Requirements: `BASE-016`; `ACR-002` (APPROVED).
-
-Objective: produce and freeze `IAAS-DOM-ARCH-3`, promoting the Transform Stack boundary (Transform → TransformRegistry → TransformRuntime → TransformRecord) from FUTURE to FROZEN-CONTRACT without implementing TransformRegistry or TransformRuntime in production.
-
-Repository Scope: `spec/` architecture/requirements/dependency-graph documents; governance-layer registration; targeted specification/architecture regression tests; CI configuration only when required.
-
-Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-2` remain FROZEN (V2 not modified in place); no production implementation; no Prisma schema changes; no `src/` changes; no TransformRegistry/TransformRuntime services; no marketplace/SDK/sandbox/economic/data-plane implementation; no premature technology decisions.
-
-Out of Scope: production implementation of TransformRegistry/TransformRuntime, Prisma schema changes, marketplace/extension/SDK work, economic integration, data-plane implementation, sandbox technology selection, cryptographic-signature infrastructure, plugin packaging, WORK-010+.
-
-Acceptance Criteria:
-
-- `W009-AC01` ACR-002 traceability is explicit.
-- `W009-AC02` IAAS-DOM-ARCH-3 is complete, internally consistent, and registered as the frozen canonical architecture.
-- `W009-AC03` Transform/Registry/Runtime responsibilities are non-overlapping.
-- `W009-AC04` TransformRecord remains immutable provenance and service-layer only.
-- `W009-AC05` all dependency and anti-dependency directions are explicit.
-- `W009-AC06` discovery/version/certification/revocation/execution/verification/failure/idempotency boundaries are explicit without over-specifying technology.
-- `W009-AC07` production implementation remains prohibited; next implementation Work Item blocked until WORK-009 VERIFIED.
-- `W009-AC08` regression tests prove architecture-version integrity, V2 immutability, and zero production-code scope.
-
-Required Verification:
-
-- ACR-002 traceability;
-- IAAS-DOM-ARCH-3 completeness + registration;
-- Transform Stack responsibility separation;
-- anti-dependency direction evidence;
-- regression tests;
-- validator + CI evidence;
-- exact diff/scope verification;
-- independent Architect Review.
-
-Definition of Done: IAAS-DOM-ARCH-3 is frozen and registered; Transform Stack contract is complete; V2 remains immutable; no production implementation; regression protection added; all CI gates green; PR submitted; Architect Review approves; PR merged; WORK-009 becomes VERIFIED only after independent Architect Review.
-
-## WORK-010 — TransformRegistry Implementation
+### WORK-010 — TransformRegistry Implementation
 
 Status: `VERIFIED`
-
 Architecture Version: `IAAS-GOV-ARCH-1`
-
 Domain Architecture: `IAAS-DOM-ARCH-3` (FROZEN)
-
 Dependencies: `WORK-009`
+Requirements: `BASE-017`, `DOM-015`.
+Objective: implement the generic service-layer TransformRegistry.
+Repository Scope: service, persistence, tests, architecture checks.
+Architecture Constraints: tenant-scoped catalog only; no execution; PostgreSQL durable source; no kernel/vertical/economic/data-plane coupling.
+Out of Scope: Runtime, concrete transforms, marketplace, SDK, sandbox, signatures.
+Acceptance Criteria: `W010-AC01` through `W010-AC08`.
+Required Verification: unit/PG/tenant/concurrency/anti-dependency tests, validator, Typecheck, lint, CI, Architect Review.
+Definition of Done: Registry verified and merged.
 
-Requirements: `BASE-017`, `DOM-015`; inherited V1/V2/V3 boundaries.
-
-Objective: implement the frozen `TransformRegistry` contract as the first Transform Stack implementation slice.
-
-Repository Scope: service-layer TransformRegistry implementation, registry persistence, targeted domain/unit/PostgreSQL tests, static anti-dependency tests, CI/specification updates, evidence.
-
-Architecture Constraints: `IAAS-DOM-ARCH-3` FROZEN; service-layer only; tenant-scoped; discovery/catalog and version compatibility only; no execution; no marketplace; no kernel ownership; no RuntimeRegistry; no vertical/EconomicPipeline/Route/Transport imports; PostgreSQL durable source of truth; TransformRuntime remains unimplemented.
-
-Out of Scope: TransformRuntime implementation; concrete Transform implementations; marketplace/licensing; sandbox technology; SDK; signatures/certification cryptography; TransformRecord semantics changes; Data Plane changes; EconomicPipeline; RuntimeRegistry; kernel changes; new architecture version.
-
-Acceptance Criteria:
-
-- `W010-AC01` service-layer TransformRegistry with tenant-scoped lookup by (transformType, transformVersion).
-- `W010-AC02` version compatibility rules without executing transforms.
-- `W010-AC03` certification metadata (certifier identity/status) and revocation metadata (status/reason/revokedAt).
-- `W010-AC04` PostgreSQL durable source; concurrent/idempotent registration deterministic.
-- `W010-AC05` tenant isolation mechanically proven.
-- `W010-AC06` static checks prove no vertical/EconomicPipeline/Route/Transport/RuntimeRegistry/kernel imports.
-- `W010-AC07` TransformRuntime absent; registry does not execute or mutate TransformRecord.
-- `W010-AC08` all targeted tests, validator, typecheck, lint, PostgreSQL, diff/scope pass.
-
-Required Verification:
-
-- unit tests for registration, lookup, compatibility, certification/revocation, idempotency;
-- PostgreSQL integration tests for tenant isolation and concurrent registration;
-- static import/anti-dependency tests;
-- explicit test that registry does not execute transforms;
-- explicit test that TransformRuntime remains unimplemented;
-- full CI evidence and exact PR diff inspection;
-- independent Architect Review.
-
-Definition of Done: registry implementation satisfies DOM-015 without architecture drift; TransformRuntime remains unimplemented; PostgreSQL evidence green; CI gates pass; PR merged; Work Item VERIFIED by the Architect.
-
-## WORK-011 — TransformRuntime Implementation
+### WORK-011 — TransformRuntime Implementation
 
 Status: `VERIFIED`
-
 Architecture Version: `IAAS-GOV-ARCH-1`
-
 Domain Architecture: `IAAS-DOM-ARCH-3` (FROZEN)
-
 Dependencies: `WORK-010`
+Requirements: `DOM-016`.
+Objective: implement the service-layer TransformRuntime.
+Repository Scope: Runtime service, tests, architecture evidence.
+Architecture Constraints: resolve only through Registry; emit immutable TransformRecord; no catalog ownership; no vertical/economic/data-plane/kernel coupling.
+Out of Scope: concrete transforms, marketplace, SDK, sandbox, signatures.
+Acceptance Criteria: `W011-AC01` through `W011-AC10`.
+Required Verification: unit/PG/idempotency/failure/provenance/anti-dependency tests plus all gates.
+Definition of Done: Runtime verified and merged.
 
-Requirements: `DOM-016`; inherited V1/V2/V3 boundaries.
-
-Objective: implement the frozen `TransformRuntime` contract as the second Transform Stack implementation slice.
-
-Repository Scope: service-layer TransformRuntime implementation, targeted unit/PostgreSQL tests, static anti-dependency tests, CI/specification updates, evidence.
-
-Architecture Constraints: `IAAS-DOM-ARCH-3` FROZEN; TransformRegistry is sole catalog authority; TransformRuntime executes, does not discover; TransformRecord is durable provenance authority; service-layer; tenant-scoped; no vertical/EconomicPipeline/Route/Transport/RuntimeRegistry/kernel imports; no concrete VPP/Compute transforms; no marketplace/SDK/sandbox/signatures.
-
-Out of Scope: concrete Transform implementations; marketplace; SDK; sandbox; signatures; TransformRecord semantics changes; TransformRegistry modification; new architecture version.
-
-Acceptance Criteria:
-
-- `W011-AC01` service-layer TransformRuntime exists; resolves via TransformRegistry.
-- `W011-AC02` resolves Transforms exclusively through TransformRegistry.
-- `W011-AC03` execute, reverse, estimateCost, verify dispatch through TransformContract.
-- `W011-AC04` emits immutable TransformRecord after execution with 7-element provenance.
-- `W011-AC05` tenant isolation mechanically proven.
-- `W011-AC06` static checks prove no vertical/EconomicPipeline/Route/Transport/RuntimeRegistry/kernel imports.
-- `W011-AC07` explicit failure semantics; failures emit failed provenance + re-throw.
-- `W011-AC08` idempotent execution convergence.
-- `W011-AC09` TransformRegistry remains catalog authority.
-- `W011-AC10` no concrete transform implementations embedded; no marketplace/kernel/economic/transport coupling.
-
-Required Verification:
-
-- unit tests for runtime dispatch and failure semantics;
-- PostgreSQL integration tests for registry resolution, execution, idempotency, provenance emission, tenant isolation, failure behavior;
-- regression tests proving TransformRegistry remains catalog authority;
-- regression tests proving TransformRecord created once and not mutated;
-- static anti-dependency architecture tests;
-- proof no concrete transform implementation is embedded;
-- specification validator; typecheck; Architecture Contract Tests; PostgreSQL; lint; diff/scope.
-
-Definition of Done: TransformRuntime satisfies DOM-016 without architecture drift; TransformRegistry and TransformRecord boundaries preserved; CI gates pass; PR merged; Work Item VERIFIED by the Architect.
-
-## WORK-012 — Transform Stack Truth Synchronization
+### WORK-012 — Transform Stack Truth Synchronization
 
 Status: `VERIFIED`
-
 Architecture Version: `IAAS-GOV-ARCH-1`
-
 Domain Architecture: `IAAS-DOM-ARCH-3` (FROZEN)
-
 Dependencies: `WORK-011`
+Requirements: truth synchronization; governance requirements.
+Objective: reconcile V3 specifications with verified Transform Stack reality.
+Repository Scope: `spec/` and regression tests only.
+Architecture Constraints: V3 remains frozen; no promotion of DOM-P04..P08.
+Out of Scope: production behavior and architecture changes.
+Acceptance Criteria: `W012-AC01` through `W012-AC06`.
+Required Verification: validator, truth-regression tests, architecture/Typecheck/PG/lint/scope gates, Architect Review.
+Definition of Done: V3 synchronized and verified.
 
-Requirements: truth synchronization after WORK-010/011 VERIFIED; `GOV-001`, `GOV-003`, `GOV-006`.
+### WORK-013 — Transform Stack End-to-End Conformance and Integration Hardening
 
-Objective: reconcile the V3 specification layer with verified repository reality after TransformRegistry (WORK-010) and TransformRuntime (WORK-011) implementation, without modifying frozen architecture or production behavior.
+Status: `VERIFIED`
+Architecture Version: `IAAS-GOV-ARCH-1`
+Domain Architecture: `IAAS-DOM-ARCH-3` (FROZEN)
+Dependencies: `WORK-012`
+Requirements: `DOM-014` through `DOM-017`.
+Objective: prove Registry → Runtime → Record works as one coherent subsystem.
+Repository Scope: conformance tests, architecture regression tests, CI/test configuration, evidence.
+Architecture Constraints: Registry is catalog authority; Runtime is executor; Record is immutable provenance; PostgreSQL durable; no vertical/economic/data-plane/kernel coupling; no concrete transform.
+Out of Scope: new Transform primitives, architecture changes, concrete transforms, marketplace, SDK, sandbox, economic/data-plane redesign.
+Acceptance Criteria: `W013-AC01` through `W013-AC11`.
+Required Verification: end-to-end PG tests, tenant isolation, idempotency, failure/provenance, anti-dependency tests, validator, Typecheck, architecture suite, lint, scope, Architect Review.
+Definition of Done: W013 objectively verified; PR merged; Work Item VERIFIED by the Architect.
 
-Repository Scope: `spec/` specification documents; governance-layer registration; targeted specification regression tests.
-
-Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-3` remain FROZEN; no production changes; no Prisma changes; no architecture-version change; no TransformRegistry/Runtime behavior changes; no promotion of DOM-P04..P08.
-
-Out of Scope: production code changes, Prisma schema, architecture-version change, TransformRegistry/Runtime behavior, DOM-P04..P08 promotion, new feature implementation, WORK-013+.
-
-Acceptance Criteria:
-
-- `W012-AC01` V3 requirement classifications reflect implemented/verified state (DOM-014/015/016).
-- `W012-AC02` DOM-017 remains implemented/confirmed.
-- `W012-AC03` Historical V1/V2 documents preserved (not rewritten in place).
-- `W012-AC04` architecture.md, architecture-lock.md, V3 requirements, V3 architecture, V3 dependency graph, work-items, evidence agree on current state.
-- `W012-AC05` Regression tests prevent future drift between verified Work Items and stale implementation-pending/FUTURE labels.
-- `W012-AC06` DOM-P04..P08 remain FUTURE/OPEN/RESEARCH (not promoted).
-
-Required Verification:
-
-- specification validator;
-- truth-reconciliation regression tests;
-- all existing Architecture Contract Tests;
-- Typecheck;
-- PostgreSQL Integration Tests;
-- Lint;
-- exact diff/scope inspection.
-
-Definition of Done: V3 status truth is synchronized; historical versions remain intact; no unrelated future primitive promoted; regression protection exists; all CI gates green; PR submitted for independent Architect Review.
-
-## WORK-013 — Transform Stack End-to-End Conformance and Integration Hardening
+## WORK-014 — Extension Stack Architecture and ACR-003
 
 Status: `READY`
 
@@ -540,42 +241,33 @@ Architecture Version: `IAAS-GOV-ARCH-1`
 
 Domain Architecture: `IAAS-DOM-ARCH-3` (FROZEN)
 
-Dependencies: `WORK-012`
+Architecture Change Request: `ACR-003` (DRAFT)
 
-Requirements: `DOM-014`, `DOM-015`, `DOM-016`, `DOM-017`; inherited V3 anti-dependency and PostgreSQL requirements.
+Dependencies: `WORK-013`
 
-Objective: prove the implemented Transform Stack behaves correctly as one coherent subsystem across TransformRegistry, TransformRuntime, TransformRecord, tenant isolation, idempotency, failure semantics, and architectural boundaries, without introducing concrete vertical transforms or new architecture.
+Requirements: `ACR-003`; `GOV-001`, `GOV-003`, `GOV-005`, `GOV-006`, `GOV-008`; historical `DOM-P04`.
 
-Repository Scope: service-layer TransformRegistry/TransformRuntime integration tests, TransformRecord integration tests, specification/architecture regression tests needed to prove the V3 contracts, CI/test configuration required to run the bounded conformance suite, and WORK-013 evidence.
+Objective: produce a complete, reviewable Extension Stack architecture proposal for Extension, ExtensionRegistry, and ExtensionRuntime and prepare candidate `IAAS-DOM-ARCH-4` without implementing extensions or silently promoting DOM-P04.
 
-Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-3` remain FROZEN; registry remains the sole catalog authority; runtime remains the sole executor; TransformRecord remains immutable provenance; PostgreSQL remains the durable source of truth; tenant isolation is mandatory; no vertical services, EconomicPipeline, Route/Transport, RuntimeRegistry, or kernel coupling; no concrete transform implementation is introduced.
+Repository Scope: `spec/` architecture/change-control documents, regression tests, dependency graph, Work Item/Work Order records, and validation evidence.
 
-Out of Scope: new Transform primitives, architecture-version changes, concrete compression/encryption/VPP/Compute transforms, marketplace/licensing, SDK, sandbox technology, cryptographic certification architecture, TransformRegistry/Runtime redesign, Prisma schema redesign, Economic Pipeline integration, Data Plane changes, extensions, WORK-014+.
+Architecture Constraints: V3 remains FROZEN until an explicit ACR approval and new architecture freeze; DOM-P04 remains FUTURE/OPEN/RESEARCH; no production implementation; no Prisma changes; no sandbox technology selection; no marketplace/SDK/concrete extensions; no Transform Stack boundary changes.
+
+Out of Scope: Extension production code, sandbox implementation/selection, marketplace, SDK, licensing, economic attribution, cryptographic certification mechanism, schema redesign, and DOM-P05..P08 promotion.
 
 Acceptance Criteria:
+- `W014-AC01` ACR-003 has explicit scope, non-goals, questions, and promotion rule.
+- `W014-AC02` Extension identity/versioning, capability, compatibility, lifecycle, revocation, and failure semantics are explicit.
+- `W014-AC03` Registry is discovery/catalog/lifecycle authority and never executes.
+- `W014-AC04` Runtime is execution/isolation authority and never owns catalog state.
+- `W014-AC05` tenancy, capabilities, resource limits, and security/isolation are explicit without premature sandbox selection.
+- `W014-AC06` anti-dependencies to vertical/economic/data-plane/runtime/kernel layers are explicit and testable.
+- `W014-AC07` Extension and Transform responsibilities remain distinct.
+- `W014-AC08` DOM-P04 remains future until ACR-003 is approved and V4 is frozen.
+- `W014-AC09` no production/Prisma/V3 mutation is introduced by the proposal.
+- `W014-AC10` specification/architecture/lint/typecheck/scope gates pass.
+- `W014-AC11` Architect explicitly approves or returns ACR-003; no implementation Work Item is released automatically.
 
-- `W013-AC01` an end-to-end integration path proves registry registration → runtime resolution → execution → immutable TransformRecord provenance.
-- `W013-AC02` tenant isolation is proven across registry lookup, runtime resolution, execution, and provenance.
-- `W013-AC03` deterministic idempotency is proven across repeated identical execution attempts.
-- `W013-AC04` failure paths produce explicit failed provenance and do not create contradictory durable state.
-- `W013-AC05` TransformRegistry remains catalog/discovery authority and never executes transforms.
-- `W013-AC06` TransformRuntime remains the sole executor and resolves through TransformRegistry.
-- `W013-AC07` TransformRecord remains immutable, service-layer provenance and is not mutated after creation.
-- `W013-AC08` V3 anti-dependencies remain mechanically enforced: no vertical/EconomicPipeline/Route/Transport/RuntimeRegistry/kernel imports.
-- `W013-AC09` PostgreSQL is the durable source of registry/provenance state and tests prove clean-database determinism.
-- `W013-AC10` no concrete transform implementation, new architecture version, schema redesign, or unrelated production behavior is introduced.
-- `W013-AC11` the complete bounded conformance suite and all existing governance/engineering CI gates pass with objective evidence.
+Required Verification: ACR completeness; candidate V4 consistency; responsibility separation; security/tenant/lifecycle invariants; anti-dependencies; V3 immutability; DOM-P04 non-promotion; validator; Typecheck; Architecture Contract Tests; lint; scope; Architect Review.
 
-Required Verification:
-
-- PostgreSQL end-to-end registry → runtime → provenance integration suite;
-- tenant-isolation integration tests;
-- idempotency/replay convergence tests;
-- failure/provenance consistency tests;
-- TransformRegistry authority regression tests;
-- TransformRecord immutability tests;
-- static anti-dependency architecture tests;
-- specification validator; Typecheck; Architecture Contract Tests; PostgreSQL; lint; exact diff/scope inspection;
-- independent Architect Review.
-
-Definition of Done: W013 acceptance criteria are objectively verified; all existing gates remain green; no architecture drift or concrete transform implementation is introduced; evidence is recorded; PR merged; Work Item VERIFIED by the Architect.
+Definition of Done: ACR-003 and candidate V4 are complete and reviewable; no production implementation; gates green; Architect issues the explicit ACR/architecture verdict; no subsequent implementation starts automatically.
