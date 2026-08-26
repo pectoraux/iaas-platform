@@ -1,0 +1,1 @@
+WORK-018 release gate: WORK-017 is VERIFIED and WORK-018 is READY/RELEASED under frozen IAAS-DOM-ARCH-4. No production implementation is included.
