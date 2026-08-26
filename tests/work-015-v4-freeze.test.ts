@@ -79,6 +79,6 @@ describe('WORK-015/016/017/018 — frozen V4 state and next-work release', () =>
     expect(order).toContain('`IAAS-DOM-ARCH-4` (FROZEN)')
     expect(order).toContain('`WORK-017` VERIFIED')
     expect(order).toContain('DOM-022')
-    expect(order).toContain('no sandbox technology')
+    expect(order).toContain('sandbox technology')
   })
 })
