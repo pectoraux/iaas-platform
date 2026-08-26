@@ -109,22 +109,44 @@ export async function registerTransform(
     return toResult(existing)
   }
 
-  const created = await db.transformRegistryEntry.create({
-    data: {
-      tenantId,
-      transformType: input.transformType,
-      transformVersion: input.transformVersion,
-      description: input.description ?? '',
-      compatibleVersionsJson: JSON.stringify(input.compatibleVersions ?? []),
-      certifierIdentity: input.certifierIdentity ?? null,
-      certificationStatus: input.certificationStatus ?? 'uncertified',
-      inputContentTypesJson: JSON.stringify(input.inputContentTypes ?? []),
-      outputContentTypesJson: JSON.stringify(input.outputContentTypes ?? []),
-      reversibility: input.reversibility ?? false,
-      lossiness: input.lossiness ?? false,
-      idempotencyKey: input.idempotencyKey,
-    },
-  })
+  // WORK-010: handle concurrent registration race. Multiple concurrent calls
+  // may pass the findUnique check before any create commits. The unique
+  // constraint (tenantId, transformType, transformVersion) causes a P2002
+  // error on the loser(s). Catch it and re-read the winning entry.
+  let created
+  try {
+    created = await db.transformRegistryEntry.create({
+      data: {
+        tenantId,
+        transformType: input.transformType,
+        transformVersion: input.transformVersion,
+        description: input.description ?? '',
+        compatibleVersionsJson: JSON.stringify(input.compatibleVersions ?? []),
+        certifierIdentity: input.certifierIdentity ?? null,
+        certificationStatus: input.certificationStatus ?? 'uncertified',
+        inputContentTypesJson: JSON.stringify(input.inputContentTypes ?? []),
+        outputContentTypesJson: JSON.stringify(input.outputContentTypes ?? []),
+        reversibility: input.reversibility ?? false,
+        lossiness: input.lossiness ?? false,
+        idempotencyKey: input.idempotencyKey,
+      },
+    })
+  } catch (err: unknown) {
+    // Prisma P2002: unique constraint violation — another concurrent call won.
+    if (err instanceof Error && err.message.includes('P2002')) {
+      const winner = await db.transformRegistryEntry.findUnique({
+        where: {
+          tenantId_transformType_transformVersion: {
+            tenantId,
+            transformType: input.transformType,
+            transformVersion: input.transformVersion,
+          },
+        },
+      })
+      if (winner) return toResult(winner)
+    }
+    throw err
+  }
 
   await appendAudit({
     tenantId,
