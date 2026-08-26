@@ -100,6 +100,30 @@ Any remaining Typecheck or Architecture Contract failure outside WORK-006 scope 
 
 Acceptance: `W006-AC08` and `W006-AC09` pass through the WORK-006 residual-baseline evidence.
 
+## BASE-011 — Baseline Engine Type Safety
+
+Production dynamic imports MUST expose their types through supported TypeScript constructs; namespace-style typing of a runtime import MUST NOT produce compiler errors or require suppression.
+
+Acceptance: `W007-AC01` and `W007-AC02` pass with targeted regression evidence.
+
+## BASE-012 — Explicit TypeScript Project Boundaries
+
+The repository MUST explicitly distinguish the IAAS application TypeScript project from auxiliary TypeScript trees. A project is either compiled by the root application configuration or validated by its own explicit project configuration.
+
+Acceptance: `W007-AC03` passes with configuration inspection and executable compiler evidence.
+
+## BASE-013 — No Silent Auxiliary-Code Exclusion
+
+Auxiliary examples/skills MUST NOT be removed from compiler coverage through unexplained broad exclusions. Any exclusion MUST correspond to an explicit project-boundary decision with its own validation or documented non-project classification.
+
+Acceptance: `W007-AC04` and `W007-AC09` pass.
+
+## BASE-014 — Residual Typecheck Closure
+
+The final IAAS application Typecheck MUST be clean while all other CI gates remain green.
+
+Acceptance: `W007-AC05` through `W007-AC08` pass with Typecheck, Architecture Contract, PostgreSQL, validator, lint, and regression evidence.
+
 ## WORK-001 Freeze
 
 No production IAAS feature is authorized by these requirements. Domain requirements are derived by WORK-002 after baseline audit.
