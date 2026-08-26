@@ -61,7 +61,7 @@ Definition of Done: specification committed; automated consistency checks pass; 
 
 ## WORK-002 — Repository Baseline and Domain Architecture V1
 
-Status: `READY`
+Status: `VERIFIED`
 
 Architecture Version: `IAAS-GOV-ARCH-1`
 
