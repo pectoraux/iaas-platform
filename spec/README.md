@@ -12,13 +12,17 @@ This directory is the persistent planning and governance layer for IAAS implemen
 - `work-order-template.md` — canonical implementation-agent handoff format.
 - `architecture-change-request.md` — controlled architecture evolution protocol.
 - `architecture-change-requests/ACR-001.md` — approved promotion of VerifiedEvidenceContext.
+- `architecture-change-requests/ACR-002.md` — approved promotion of Transform Stack boundary.
 - `verification.md` — evidence and verification protocol.
 - `domain-architecture.md` — immutable Domain Architecture V1 (`IAAS-DOM-ARCH-1`, SUPERSEDED).
-- `domain-architecture-v2.md` — current canonical Domain Architecture V2 (`IAAS-DOM-ARCH-2`, FROZEN).
+- `domain-architecture-v2.md` — immutable Domain Architecture V2 (`IAAS-DOM-ARCH-2`, SUPERSEDED).
+- `domain-architecture-v3.md` — canonical Domain Architecture V3 (`IAAS-DOM-ARCH-3`, FROZEN).
 - `domain-requirements.md` — V1 domain requirements.
 - `domain-requirements-v2.md` — V2 domain requirements (`DOM-013`).
+- `domain-requirements-v3.md` — V3 domain requirements (`DOM-014`..`DOM-017`).
 - `domain-dependency-graph.md` — V1 domain primitive dependency DAG.
 - `domain-dependency-graph-v2.md` — V2 dependency delta for VerifiedEvidenceContext.
+- `domain-dependency-graph-v3.md` — V3 dependency delta for Transform Stack.
 
 ## Authority Model
 

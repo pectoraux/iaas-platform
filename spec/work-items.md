@@ -318,7 +318,7 @@ Definition of Done: residual Typecheck failures are objectively classified; base
 
 ## WORK-008 — Architecture Truth Reconciliation and Verified-Evidence Promotion
 
-Status: `READY`
+Status: `VERIFIED`
 
 Architecture Version: `IAAS-GOV-ARCH-1`
 
@@ -358,3 +358,47 @@ Required Verification:
 - independent Architect Review.
 
 Definition of Done: truth drift is inventoried; VerifiedEvidenceContext is correctly represented as implemented/current; historical V1 remains immutable; unrelated future primitives remain future/proposed; regression protection is added; all governance and engineering CI gates remain green; PR submitted; Architect Review approves; PR merged; WORK-008 becomes VERIFIED only after independent Architect Review.
+
+## WORK-009 — Transform Stack Architecture Freeze
+
+Status: `READY`
+
+Architecture Version: `IAAS-GOV-ARCH-1`
+
+Domain Architecture: `IAAS-DOM-ARCH-3` (target — to be frozen by this Work Item)
+
+Dependencies: `WORK-008`
+
+Requirements: `BASE-016`; `ACR-002` (APPROVED).
+
+Objective: produce and freeze `IAAS-DOM-ARCH-3`, promoting the Transform Stack boundary (Transform → TransformRegistry → TransformRuntime → TransformRecord) from FUTURE to FROZEN-CONTRACT without implementing TransformRegistry or TransformRuntime in production.
+
+Repository Scope: `spec/` architecture/requirements/dependency-graph documents; governance-layer registration; targeted specification/architecture regression tests; CI configuration only when required.
+
+Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-2` remain FROZEN (V2 not modified in place); no production implementation; no Prisma schema changes; no `src/` changes; no TransformRegistry/TransformRuntime services; no marketplace/SDK/sandbox/economic/data-plane implementation; no premature technology decisions.
+
+Out of Scope: production implementation of TransformRegistry/TransformRuntime, Prisma schema changes, marketplace/extension/SDK work, economic integration, data-plane implementation, sandbox technology selection, cryptographic-signature infrastructure, plugin packaging, WORK-010+.
+
+Acceptance Criteria:
+
+- `W009-AC01` ACR-002 traceability is explicit.
+- `W009-AC02` IAAS-DOM-ARCH-3 is complete, internally consistent, and registered as the frozen canonical architecture.
+- `W009-AC03` Transform/Registry/Runtime responsibilities are non-overlapping.
+- `W009-AC04` TransformRecord remains immutable provenance and service-layer only.
+- `W009-AC05` all dependency and anti-dependency directions are explicit.
+- `W009-AC06` discovery/version/certification/revocation/execution/verification/failure/idempotency boundaries are explicit without over-specifying technology.
+- `W009-AC07` production implementation remains prohibited; next implementation Work Item blocked until WORK-009 VERIFIED.
+- `W009-AC08` regression tests prove architecture-version integrity, V2 immutability, and zero production-code scope.
+
+Required Verification:
+
+- ACR-002 traceability;
+- IAAS-DOM-ARCH-3 completeness + registration;
+- Transform Stack responsibility separation;
+- anti-dependency direction evidence;
+- regression tests;
+- validator + CI evidence;
+- exact diff/scope verification;
+- independent Architect Review.
+
+Definition of Done: IAAS-DOM-ARCH-3 is frozen and registered; Transform Stack contract is complete; V2 remains immutable; no production implementation; regression protection added; all CI gates green; PR submitted; Architect Review approves; PR merged; WORK-009 becomes VERIFIED only after independent Architect Review.

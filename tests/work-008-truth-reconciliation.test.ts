@@ -112,34 +112,36 @@ describe('WORK-008 — No unrelated promotion (W008-AC04)', () => {
 // ---------------------------------------------------------------------------
 
 describe('WORK-008 — Cross-document consistency (W008-AC05)', () => {
-  test('architecture.md registers V2 as FROZEN and V1 as SUPERSEDED', () => {
+  test('architecture.md registers V3 as FROZEN, V2 and V1 as SUPERSEDED', () => {
     const src = readSpec('architecture.md')
-    expect(src).toContain('`IAAS-DOM-ARCH-2` | FROZEN')
+    expect(src).toContain('`IAAS-DOM-ARCH-3` | FROZEN')
+    expect(src).toContain('`IAAS-DOM-ARCH-2` | SUPERSEDED')
     expect(src).toContain('`IAAS-DOM-ARCH-1` | SUPERSEDED')
   })
 
-  test('architecture-lock.md registers V2 as current FROZEN domain version', () => {
+  test('architecture-lock.md registers V3 as current FROZEN domain version', () => {
     const src = readSpec('architecture-lock.md')
-    expect(src).toContain('IAAS-DOM-ARCH-2')
+    expect(src).toContain('IAAS-DOM-ARCH-3')
     expect(src).toContain('FROZEN')
   })
 
-  test('dependency-graph.md states WORK-007 is VERIFIED and WORK-008 is eligible', () => {
+  test('dependency-graph.md states WORK-008 is VERIFIED and WORK-009 is eligible', () => {
     const src = readSpec('dependency-graph.md')
-    expect(src).toContain('WORK-007 is VERIFIED')
+    expect(src).toContain('WORK-001 is VERIFIED')
     expect(src).toContain('WORK-008')
+    expect(src).toContain('WORK-009')
   })
 
-  test('work-items.md records WORK-007 as VERIFIED and WORK-008 as READY', () => {
+  test('work-items.md records WORK-008 as VERIFIED and WORK-009 as READY', () => {
     const src = readSpec('work-items.md')
-    // WORK-007 status
-    const w007 = src.split('## WORK-007')[1]?.split('## WORK-008')[0] ?? ''
-    expect(w007).toContain('Status: `VERIFIED`')
-    // WORK-008 exists and is READY
-    expect(src).toContain('## WORK-008')
-    const w008 = src.split('## WORK-008')[1] ?? ''
-    expect(w008).toContain('Status: `READY`')
-    expect(w008).toContain('BASE-015')
+    // WORK-008 status
+    const w008 = src.split('## WORK-008')[1]?.split('## WORK-009')[0] ?? ''
+    expect(w008).toContain('Status: `VERIFIED`')
+    // WORK-009 exists and is READY
+    expect(src).toContain('## WORK-009')
+    const w009 = src.split('## WORK-009')[1] ?? ''
+    expect(w009).toContain('Status: `READY`')
+    expect(w009).toContain('BASE-016')
   })
 })
 
