@@ -91,16 +91,23 @@ beforeAll(async () => {
 
   // Create a Bundle for the transform payload reference.
   // Need active source + destination Nodes for Bundle creation.
+  // Nodes require a ParticipantIdentity to exist first.
+  const sourceParticipant = await db.participantIdentity.create({
+    data: { tenantId },
+  })
+  const destParticipant = await db.participantIdentity.create({
+    data: { tenantId },
+  })
   const { registerNode, activateNode } = await import('../src/lib/services/node.service')
   const sourceNode = await registerNode(tenantId, {
-    participantId: 'test-participant-source',
+    participantId: sourceParticipant.id,
     nodeKind: 'generic',
     displayName: 'Source Node',
     idempotencyKey: `node-src-${Date.now()}`,
   })
   await activateNode(tenantId, sourceNode.id)
   const destNode = await registerNode(tenantId, {
-    participantId: 'test-participant-dest',
+    participantId: destParticipant.id,
     nodeKind: 'generic',
     displayName: 'Dest Node',
     idempotencyKey: `node-dest-${Date.now()}`,
