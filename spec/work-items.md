@@ -220,3 +220,50 @@ Required Verification:
 - independent Architect Review.
 
 Definition of Done: affected tests establish prerequisites deterministically; residual fixture failures are eliminated; tenant isolation is regression-tested; no production behavior or frozen architecture changes; targeted CI passes; evidence complete; PR merged; Work Item VERIFIED.
+
+## WORK-006 — Baseline Typecheck and Architecture Contract Recovery
+
+Status: `READY`
+
+Architecture Version: `IAAS-GOV-ARCH-1`
+
+Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
+
+Dependencies: `WORK-005`
+
+Requirements: `BASE-007` through `BASE-010`; inherited architecture/runtime/economic/Data Plane boundaries.
+
+Objective: eliminate the remaining Typecheck and Architecture Contract Test failures on the verified baseline without redesigning IAAS architecture.
+
+Repository Scope: `src/` only where a real compiler/type/architecture defect is demonstrated; `tests/architecture-contract.test.ts` and directly related tests when assertions are stale; targeted regression tests; targeted CI/configuration; WORK-006 evidence; governance test updates required only because WORK-006 is issued.
+
+Architecture Constraints: frozen `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-2`; preserve InfrastructureRuntime / ProtocolRuntime / HybridRuntime boundaries; preserve Data Plane ↔ Economic Pipeline independence; generic kernel/runtime code remains vertical-neutral; PostgreSQL remains canonical.
+
+Out of Scope: new domain primitives/network features; runtime/economic/data-plane/transform/extension/marketplace/SDK redesign; Prisma schema changes without escalation; broad refactoring; `any`/`@ts-ignore`/compiler suppression; frozen architecture changes; WORK-007+.
+
+Acceptance Criteria:
+
+- `W006-AC01` clean-main TypeScript failures are captured, classified, and traced.
+- `W006-AC02` all in-scope TypeScript errors are eliminated and final `tsc --noEmit` is clean for the baseline.
+- `W006-AC03` all Architecture Contract Test failures are captured and classified.
+- `W006-AC04` all in-scope Architecture Contract Test failures are eliminated without weakening frozen architecture rules.
+- `W006-AC05` every production/type-contract correction is minimal and regression-tested.
+- `W006-AC06` no new vertical/runtime/economic/Data Plane coupling is introduced.
+- `W006-AC07` PostgreSQL integration tests remain green.
+- `W006-AC08` validator, architecture tests, typecheck, lint, targeted regressions, and scope evidence are recorded.
+- `W006-AC09` every residual out-of-scope failure is documented and assigned to a future bounded Work Item.
+- `W006-AC10` no frozen architecture is modified in place.
+
+Required Verification:
+
+- clean-main Typecheck baseline capture;
+- complete Architecture Contract Test suite;
+- final `bunx tsc --noEmit`;
+- targeted regression tests for all implementation corrections;
+- PostgreSQL integration suite;
+- governance specification validator;
+- lint;
+- exact diff/scope inspection;
+- independent Architect Review.
+
+Definition of Done: Typecheck and Architecture Contract failures within scope are eliminated; residuals are evidenced; PostgreSQL remains green; no architecture drift; PR merged; Work Item VERIFIED.
