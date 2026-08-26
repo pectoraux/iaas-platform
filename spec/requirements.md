@@ -40,6 +40,24 @@ The implementation agent MUST stay within the Work Order and stop on architectur
 
 Only Work Items whose dependencies are VERIFIED may become implementation-eligible.
 
+## BASE-001 — Runtime Bootstrap Resolution
+
+The intended IAAS bootstrap path MUST register the implemented runtime kinds required by published `NetworkVersion.runtimeKind` values so `RuntimeRegistry.resolve()` can return the canonical runtime implementation.
+
+Acceptance: `W004-AC01` infrastructure resolves; `W004-AC02` protocol resolves; `W004-AC03` registry stability is preserved.
+
+## BASE-002 — Runtime Boundary Preservation
+
+Restoring runtime registration MUST NOT alter the frozen InfrastructureRuntime / ProtocolRuntime / HybridRuntime boundaries or introduce vertical-specific runtime dependencies.
+
+Acceptance: `W004-AC04` and `W004-AC07` pass through static architecture evidence.
+
+## BASE-003 — Baseline Regression Recovery
+
+The repository's existing runtime-resolution dependent tests MUST no longer fail solely because runtime registries are empty at execution time.
+
+Acceptance: `W004-AC05` and `W004-AC06` pass with CI evidence.
+
 ## WORK-001 Freeze
 
 No production IAAS feature is authorized by these requirements. Domain requirements are derived by WORK-002 after baseline audit.
