@@ -57,9 +57,11 @@ import {
   initEconomicPipeline,
   processEconomicPipeline,
   reconcileEconomicPipeline,
+  applyVerifiedEvidence,
   ECONOMIC_STAGE,
   type EconomicStage,
 } from '@/lib/control-plane/economic-pipeline'
+import { createVerifiedEvidenceContext } from '@/lib/domain/verified-evidence-context'
 import {
   acquireExecutionLease,
   completeExecutionLease,
@@ -1037,15 +1039,32 @@ export async function executeDispatchAssignment(
       networkId: assignment.dispatch.program.networkId,
     })
 
-    // Pre-populate the checkpoint with the already-existing Event + Attestation
-    // so the pipeline skips the evidence + verification stages.
-    await db.economicPipelineState.update({
-      where: { executionAssignmentId: assignment.executionAssignmentId },
-      data: {
-        eventId: event.id,
-        attestationId: attestation.id,
-        stage: ECONOMIC_STAGE.VERIFIED,
-      },
+    // IAAS-DOM-ARCH-2 (ACR-001 / WORK-003): VPP constructs a generic
+    // VerifiedEvidenceContext carrying the already-verified durable Event +
+    // Attestation identities and the verification policy/version, then hands
+    // it to the generic pipeline's applyVerifiedEvidence boundary. The
+    // generic pipeline validates the durable references against PostgreSQL and
+    // pre-populates the checkpoint so processEconomicPipeline skips the
+    // evidence + verification stages and proceeds to Contribution → Reward →
+    // Ledger → Settlement.
+    //
+    // This replaces the prior vertical-specific convention of directly mutating
+    // EconomicPipelineState.eventId/attestationId from VPP. VPP retains its
+    // domain-specific baseline calculation and dispatch semantics; only the
+    // pre-validated-evidence transport is generalized (W003-AC04).
+    const evidenceContext = createVerifiedEvidenceContext({
+      tenantId,
+      networkId: assignment.dispatch.program.networkId,
+      eventId: event.id,
+      attestationId: attestation.id,
+      verificationPolicyId: programVersion.id,
+      verificationPolicyVersion: programVersion.version,
+      evidenceIdentity: eventId, // the deterministic externalEventId / idempotency key
+      issuedAt: attestation.createdAt.toISOString(),
+    })
+    await applyVerifiedEvidence({
+      executionAssignmentId: assignment.executionAssignmentId,
+      context: evidenceContext,
     })
 
     const economicResult = await processEconomicPipeline({
