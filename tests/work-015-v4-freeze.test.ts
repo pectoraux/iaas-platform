@@ -14,7 +14,7 @@ const deps = read('dependency-graph.md')
 const acr = read('architecture-change-requests/ACR-003.md')
 const v3 = read('domain-architecture-v3.md')
 
-describe('WORK-015/016 — frozen V4 state and next-work release', () => {
+describe('WORK-015/016/017/018 — frozen V4 state and next-work release', () => {
   test('ACR-003 is approved and authoritative', () => {
     expect(acr).toContain('Status: `APPROVED`')
     expect(acr).toContain('IAAS-DOM-ARCH-4` (FROZEN)')
@@ -44,16 +44,20 @@ describe('WORK-015/016 — frozen V4 state and next-work release', () => {
   test('DOM-P05..P08 remain future/open/research', () => {
     expect(req).toContain('DOM-P05..DOM-P08: remain FUTURE/OPEN/RESEARCH')
   })
-  test('WORK-015/016 are VERIFIED and WORK-017 is READY', () => {
-    expect(items).toContain('## WORK-015 — IAAS-DOM-ARCH-4 Freeze and DOM-P04 Truth Promotion')
-    expect(items).toContain('## WORK-016 — ExtensionRegistry Implementation')
-    expect(items).toContain('## WORK-017 — ExtensionRuntime Implementation')
+  test('WORK-015/016/017 are VERIFIED and WORK-018 is READY', () => {
+    for (const id of [
+      '## WORK-015 — IAAS-DOM-ARCH-4 Freeze and DOM-P04 Truth Promotion',
+      '## WORK-016 — ExtensionRegistry Implementation',
+      '## WORK-017 — ExtensionRuntime Implementation',
+      '## WORK-018 — ExtensionProvenance Durable Persistence',
+    ]) expect(items).toContain(id)
     expect(items).toContain('Status: `VERIFIED`')
     expect(items).toContain('Status: `READY`')
     expect(deps).toContain('WORK-014 -> WORK-015')
     expect(deps).toContain('WORK-015 -> WORK-016')
     expect(deps).toContain('WORK-016 -> WORK-017')
-    expect(deps).toContain('WORK-017 is READY')
+    expect(deps).toContain('WORK-017 -> WORK-018')
+    expect(deps).toContain('WORK-018 is READY')
   })
   test('WORK-016 is released only against frozen V4', () => {
     const order = read('work-orders/WORK-016.md')
@@ -68,5 +72,13 @@ describe('WORK-015/016 — frozen V4 state and next-work release', () => {
     expect(order).toContain('`IAAS-DOM-ARCH-4` (FROZEN)')
     expect(order).toContain('`WORK-016` VERIFIED')
     expect(order).toContain('DOM-020')
+  })
+  test('WORK-018 is released only against frozen V4 and WORK-017 VERIFIED', () => {
+    const order = read('work-orders/WORK-018.md')
+    expect(order).toContain('`RELEASED`')
+    expect(order).toContain('`IAAS-DOM-ARCH-4` (FROZEN)')
+    expect(order).toContain('`WORK-017` VERIFIED')
+    expect(order).toContain('DOM-022')
+    expect(order).toContain('sandbox technology')
   })
 })

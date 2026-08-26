@@ -40,7 +40,7 @@ function expectFailure(specDir: string, check: string) {
 }
 
 describe('spec validator — current repository', () => {
-  test('passes deterministically with the V4 / 17-item specification', () => {
+  test('passes deterministically with the V4 / 18-item specification', () => {
     const a = run(SPEC)
     const b = run(SPEC)
     expect(a.code).toBe(0)
@@ -48,8 +48,8 @@ describe('spec validator — current repository', () => {
     expect(a.stderr).toBe('')
     expect(a.stdout).toContain('SPEC VALIDATION PASSED')
     expect(a.stdout).toContain('domain-architecture=IAAS-DOM-ARCH-4')
-    expect(a.stdout).toContain('work-items=17')
-    expect(a.stdout).toContain('dependency-edges=16')
+    expect(a.stdout).toContain('work-items=18')
+    expect(a.stdout).toContain('dependency-edges=17')
     expect(a.stdout).toBe(b.stdout)
   })
 })
@@ -63,7 +63,7 @@ describe('spec validator — mandatory negative cases', () => {
 
   test('unresolved dependency is rejected', () => {
     const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('Dependencies: `WORK-015`', 'Dependencies: `WORK-999`'))
+    rewrite(s, 'work-items.md', x => x.replace('Dependencies: `WORK-017`', 'Dependencies: `WORK-999`'))
     expectFailure(s, 'SC-09')
   })
 
@@ -75,13 +75,13 @@ describe('spec validator — mandatory negative cases', () => {
 
   test('missing WORK-001 acceptance criterion is rejected', () => {
     const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('- `W001-AC07` verification evidence maps to ACs.\n', ''))
+    rewrite(s, 'work-items.md', x => x.replace('- `W001-AC07` verification evidence maps to acceptance criteria.\n', ''))
     expectFailure(s, 'SC-07')
   })
 
   test('WORK-001 production scope is rejected', () => {
     const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('Repository Scope: `spec/` governance documents and their executable consistency gate.', 'Repository Scope: `spec/` plus production services and prisma migrations.'))
+    rewrite(s, 'work-items.md', x => x.replace('Repository Scope: `spec/` governance documents and its executable consistency gate.', 'Repository Scope: `spec/` plus production services and prisma migrations.'))
     expectFailure(s, 'SC-15')
   })
 
@@ -91,9 +91,9 @@ describe('spec validator — mandatory negative cases', () => {
     expectFailure(s, 'SC-10')
   })
 
-  test('WORK-017 cannot be READY when its dependency is not VERIFIED', () => {
+  test('WORK-018 cannot be READY when its dependency is not VERIFIED', () => {
     const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('## WORK-016 — ExtensionRegistry Implementation\nStatus: `VERIFIED`', '## WORK-016 — ExtensionRegistry Implementation\nStatus: `READY`'))
+    rewrite(s, 'work-items.md', x => x.replace('## WORK-017 — ExtensionRuntime Implementation\nStatus: `VERIFIED`', '## WORK-017 — ExtensionRuntime Implementation\nStatus: `READY`'))
     expectFailure(s, 'SC-11')
   })
 
@@ -104,17 +104,20 @@ describe('spec validator — mandatory negative cases', () => {
   })
 })
 
-describe('V4 / WORK-017 governance invariants', () => {
-  test('DOM-020 is frozen and WORK-017 is released', () => {
+describe('V4 / WORK-017 and WORK-018 governance invariants', () => {
+  test('DOM-020 is frozen, WORK-017 is verified, and WORK-018 is released', () => {
     const items = readFileSync(join(SPEC, 'work-items.md'), 'utf8')
-    const order = readFileSync(join(SPEC, 'work-orders', 'WORK-017.md'), 'utf8')
+    const order = readFileSync(join(SPEC, 'work-orders', 'WORK-018.md'), 'utf8')
     expect(items).toContain('## WORK-017 — ExtensionRuntime Implementation')
-    expect(items).toContain('Status: `READY`')
+    expect(items).toContain('Status: `VERIFIED`')
     expect(items).toContain('Dependencies: `WORK-016`')
+    expect(items).toContain('## WORK-018 — ExtensionProvenance Durable Persistence')
+    expect(items).toContain('Status: `READY`')
+    expect(items).toContain('Dependencies: `WORK-017`')
     expect(order).toContain('`RELEASED`')
     expect(order).toContain('`IAAS-DOM-ARCH-4` (FROZEN)')
-    expect(order).toContain('`WORK-016` VERIFIED')
-    expect(order).toContain('do not implement durable provenance storage')
+    expect(order).toContain('`WORK-017` VERIFIED')
+    expect(order).toContain('PostgreSQL')
     expect(order).toContain('sandbox technology')
   })
 })
