@@ -14,26 +14,16 @@ ARCHITECT_REVIEW -> ARCHITECTURE_CHANGE_REQUIRED -> ARCHITECTURE_CHANGE_REQUEST
 ARCHITECT_REVIEW -> IMPLEMENTATION_BLOCKED -> IMPLEMENTING
 ```
 
-## VERIFIED historical Work Items
-
 ## WORK-001 — WorkflowOS Specification and Governance Foundation
 
 Status: `VERIFIED`
-
 Architecture Version: `IAAS-GOV-ARCH-1`
-
 Dependencies: none
-
 Requirements: `GOV-001` through `GOV-008`; acceptance criteria `W001-AC01` through `W001-AC13`.
-
 Objective: establish persistent governance/specification without changing IAAS production behavior.
-
 Repository Scope: `spec/` governance documents and their executable consistency gate.
-
-Architecture Constraints: frozen governance architecture; no production implementation; no domain feature implementation.
-
+Architecture Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` governs all changes; no IAAS production implementation; no domain architecture creation.
 Out of Scope: domain feature implementation, migrations, runtime changes, vertical networks.
-
 Acceptance Criteria:
 - `W001-AC01` frozen governance architecture exists.
 - `W001-AC02` every Work Item names exactly one architecture version.
@@ -48,16 +38,13 @@ Acceptance Criteria:
 - `W001-AC11` truth classification supports OBSERVED/INFERRED/CONFIRMED/PROPOSED.
 - `W001-AC12` next Work Item is dependency-derived.
 - `W001-AC13` no IAAS production code changes in WORK-001.
-
 Required Verification:
-
 - repository specification inspection against every W001 acceptance criterion;
 - automated specification consistency check covering required documents, stable IDs, architecture-version references, dependency resolution, and forbidden WORK-001 production-scope changes;
 - negative tests proving the validator rejects representative specification inconsistencies;
 - CI execution of the consistency check;
 - PR diff inspection confirming only governance/specification artifacts changed;
 - independent Architect Review after verification evidence is available.
-
 Definition of Done: specification committed; automated consistency checks pass; negative tests pass; CI records the pass; production diff is empty; architect approves; PR merged; Work Item VERIFIED.
 
 ## WORK-002 — Repository Baseline and Domain Architecture V1
@@ -68,9 +55,9 @@ Dependencies: `WORK-001`
 Requirements: truth-classified repository baseline; canonical `IAAS-DOM-ARCH-1`.
 Objective: audit repository architecture/code/schema/tests/CI/history and establish the canonical V1 domain architecture.
 Repository Scope: `docs/architecture/` and `spec/` domain architecture layer.
-Architecture Constraints: derived only from verified baseline; architecture changes require ACR/new version.
+Architecture Constraints: frozen governance architecture `IAAS-GOV-ARCH-1` governs all changes; domain architecture derived from verified baseline; architecture changes require ACR/new version.
 Out of Scope: broad refactors and future feature implementation.
-Acceptance Criteria: `W002-AC01` baseline is truth-classified; `W002-AC02` V1 is published/registered; `W002-AC03` requirements/dependency graph exist; `W002-AC04` scope is bounded.
+Acceptance Criteria: `W002-AC01` baseline truth-classified; `W002-AC02` V1 published/registered; `W002-AC03` requirements/dependency graph exist; `W002-AC04` scope bounded.
 Required Verification: baseline inspection; specification validation; Architect Review.
 Definition of Done: baseline and V1 architecture committed and verified.
 
@@ -84,7 +71,7 @@ Dependencies: `WORK-002`
 Requirements: `DOM-013` and ACR-001.
 Objective: implement the frozen VerifiedEvidenceContext boundary.
 Repository Scope: evidence/economic boundary services, VPP adapter, tests, governance evidence.
-Architecture Constraints: preserve durable evidence sources, kernel boundary, and Data Plane/Economic Pipeline independence.
+Architecture Constraints: preserve durable evidence sources, kernel boundary, Data Plane/Economic Pipeline independence.
 Out of Scope: ledger redesign, Data Plane redesign, Transform/Extension work.
 Acceptance Criteria: `W003-AC01` through `W003-AC09` prove immutable context, durable references, generic acceptance, VPP production, reconciliation, kernel/economic boundaries, PostgreSQL, and regression evidence.
 Required Verification: static architecture checks, unit/PG tests, VPP integration, anti-dependency tests, CI, Architect Review.
@@ -242,39 +229,43 @@ Definition of Done: W013 objectively verified; PR merged; Work Item VERIFIED by 
 
 ## WORK-014 — Extension Stack Architecture and ACR-003
 
-Status: `READY`
-
+Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
-
-Domain Architecture: `IAAS-DOM-ARCH-3` (FROZEN)
-
-Architecture Change Request: `ACR-003` (DRAFT)
-
+Domain Architecture: `IAAS-DOM-ARCH-3` (FROZEN at time of Work Item)
+Architecture Change Request: `ACR-003` (APPROVED)
 Dependencies: `WORK-013`
-
 Requirements: `ACR-003`; `GOV-001`, `GOV-003`, `GOV-005`, `GOV-006`, `GOV-008`; historical `DOM-P04`.
-
-Objective: produce a complete, reviewable Extension Stack architecture proposal for Extension, ExtensionRegistry, and ExtensionRuntime and prepare candidate `IAAS-DOM-ARCH-4` without implementing extensions or silently promoting DOM-P04.
-
+Objective: produce, review, and approve the Extension Stack architecture proposal that became IAAS-DOM-ARCH-4.
 Repository Scope: `spec/` architecture/change-control documents, regression tests, dependency graph, Work Item/Work Order records, and validation evidence.
+Architecture Constraints: V3 remained FROZEN during review; no production implementation; no Prisma changes; no sandbox technology selection; no marketplace/SDK/concrete extensions.
+Out of Scope: Extension production code, sandbox implementation, marketplace, SDK, licensing, economic attribution, cryptographic mechanism, schema redesign, DOM-P05..P08 promotion.
+Acceptance Criteria: `W014-AC01` through `W014-AC11` including ACR completeness, Extension contract, Registry/Runtime separation, security/tenancy, anti-dependencies, Transform separation, DOM-P04 non-promotion until approval, zero production scope, all gates, and explicit Architect approval.
+Required Verification: ACR completeness; candidate V4 consistency; responsibility/security/lifecycle invariants; anti-dependencies; V3 immutability; DOM-P04 non-promotion; validator; Typecheck; Architecture Contract Tests; lint; scope; independent Architect Review.
+Definition of Done: approved ACR-003; candidate V4 complete; PR merged; Work Item VERIFIED.
 
-Architecture Constraints: V3 remains FROZEN until an explicit ACR approval and new architecture freeze; DOM-P04 remains FUTURE/OPEN/RESEARCH; no production implementation; no Prisma changes; no sandbox technology selection; no marketplace/SDK/concrete extensions; no Transform Stack boundary changes.
+## WORK-015 — IAAS-DOM-ARCH-4 Freeze and DOM-P04 Truth Promotion
 
-Out of Scope: Extension production code, sandbox implementation/selection, marketplace, SDK, licensing, economic attribution, cryptographic certification mechanism, schema redesign, and DOM-P05..P08 promotion.
-
+Status: `READY`
+Architecture Version: `IAAS-GOV-ARCH-1`
+Domain Architecture: `IAAS-DOM-ARCH-4` (FROZEN)
+Architecture Change Request: `ACR-003` (APPROVED)
+Dependencies: `WORK-014`
+Requirements: `ACR-003`; `GOV-001`, `GOV-003`, `GOV-006`, `GOV-008`; V4 DOM-018..DOM-022.
+Objective: persist the approved ACR-003 decision, freeze IAAS-DOM-ARCH-4 as current canonical architecture, promote DOM-P04 into DOM-018..DOM-022, preserve V3 as immutable historical architecture, and release no production implementation.
+Repository Scope: `spec/` architecture/change-control documents, Work Item/dependency records, regression tests, CI configuration, and verification evidence only.
+Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-4` are FROZEN; V3 remains immutable historical architecture; no production implementation; no Prisma changes; no ExtensionRegistry/Runtime implementation; no sandbox selection; DOM-P05..P08 remain future/open/research.
+Out of Scope: Extension production code, ExtensionRegistry/ExtensionRuntime implementation, Prisma/schema changes, sandbox technology implementation/selection, Marketplace, SDK, licensing, economic attribution, concrete extensions, DOM-P05..P08 promotion, or any architecture change beyond approved ACR-003.
 Acceptance Criteria:
-- `W014-AC01` ACR-003 has explicit scope, non-goals, questions, and promotion rule.
-- `W014-AC02` Extension identity/versioning, capability, compatibility, lifecycle, revocation, and failure semantics are explicit.
-- `W014-AC03` Registry is discovery/catalog/lifecycle authority and never executes.
-- `W014-AC04` Runtime is execution/isolation authority and never owns catalog state.
-- `W014-AC05` tenancy, capabilities, resource limits, and security/isolation are explicit without premature sandbox selection.
-- `W014-AC06` anti-dependencies to vertical/economic/data-plane/runtime/kernel layers are explicit and testable.
-- `W014-AC07` Extension and Transform responsibilities remain distinct.
-- `W014-AC08` DOM-P04 remains future until ACR-003 is approved and V4 is frozen.
-- `W014-AC09` no production/Prisma/V3 mutation is introduced by the proposal.
-- `W014-AC10` specification/architecture/lint/typecheck/scope gates pass.
-- `W014-AC11` Architect explicitly approves or returns ACR-003; no implementation Work Item is released automatically.
-
-Required Verification: ACR completeness; candidate V4 consistency; responsibility separation; security/tenant/lifecycle invariants; anti-dependencies; V3 immutability; DOM-P04 non-promotion; validator; Typecheck; Architecture Contract Tests; lint; scope; Architect Review.
-
-Definition of Done: ACR-003 and candidate V4 are complete and reviewable; no production implementation; gates green; Architect issues the explicit ACR/architecture verdict; no subsequent implementation starts automatically.
+- `W015-AC01` ACR-003 is recorded as APPROVED with Architect decision metadata.
+- `W015-AC02` IAAS-DOM-ARCH-4 is marked FROZEN and is the current canonical domain architecture.
+- `W015-AC03` IAAS-DOM-ARCH-3 remains immutable historical architecture and is not rewritten.
+- `W015-AC04` DOM-018..DOM-022 are frozen acceptance-bearing requirements under approved ACR-003.
+- `W015-AC05` DOM-P04 is explicitly SUPERSEDED by DOM-018..DOM-022 in the current V4 requirement set; V1 historical requirements remain untouched.
+- `W015-AC06` V4 dependency graph is frozen/canonical and remains acyclic with explicit Extension→Transform direction and anti-dependencies.
+- `W015-AC07` persistent Work Item state records WORK-014 as VERIFIED and WORK-015 as READY, with WORK-014 -> WORK-015 dependency.
+- `W015-AC08` regression tests prevent reversion to candidate/future state and verify V3 immutability.
+- `W015-AC09` no `src/` or Prisma changes and no production Extension implementation is introduced.
+- `W015-AC10` specification validator, regression tests, Typecheck, Architecture Contract Tests, lint, CI, and exact scope inspection pass.
+- `W015-AC11` no later implementation Work Item is released until WORK-015 is independently verified and merged.
+Required Verification: ACR/V4 state inspection; V3 immutability regression; V4 freeze/promotion tests; specification validator; Typecheck; Architecture Contract Tests; lint; CI; exact scope/diff inspection; independent Architect Review.
+Definition of Done: ACR-003 approval and V4 freeze are persistently recorded; DOM-P04 truth is promoted; WORK-014 is VERIFIED; WORK-015 is merged and VERIFIED by independent Architect Review; no production implementation has started.
