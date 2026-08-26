@@ -97,12 +97,13 @@ describe('spec consistency validator — positive case', () => {
     expect(first.exitCode).toBe(0)
     expect(first.stdout).toContain('SPEC VALIDATION PASSED')
     expect(first.stdout).toContain('architecture=IAAS-GOV-ARCH-1')
-    expect(first.stdout).toContain('required-files=10')
+    expect(first.stdout).toContain('domain-architecture=IAAS-DOM-ARCH-1')
+    expect(first.stdout).toContain('required-files=13')
     expect(first.stdout).toContain('work-items=2')
     expect(first.stdout).toContain('work-item-schema-fields=11')
     expect(first.stdout).toContain('work001-acceptance-criteria=13')
     expect(first.stdout).toContain('dependency-edges=1')
-    expect(first.stdout).toContain('checks=16')
+    expect(first.stdout).toContain('checks=20')
     expect(first.stderr).toBe('')
 
     // Determinism: a second run must produce byte-identical output.
@@ -238,16 +239,25 @@ describe('spec consistency validator — negative cases (WORK-001 Required Tests
     expectFailure(result, 'SC-10', 'dependency edge present in dependency-graph.md but not declared in work-items.md')
   })
 
-  test('fails when WORK-002 is marked eligible before WORK-001 is VERIFIED (SC-11)', () => {
+  test('fails when a Work Item is active before its dependency is VERIFIED (SC-11)', () => {
+    // WORK-001 is VERIFIED on main, so WORK-002 (READY) is currently eligible.
+    // To prove SC-11 still rejects eligibility violations, revert WORK-001 to a
+    // non-VERIFIED status while WORK-002 remains READY — this must fail.
     const specDir = makeTempSpecCopy()
     rewrite(specDir, 'work-items.md', (content) =>
-      content.replace(
-        'Status: `BLOCKED` until WORK-001 is VERIFIED.',
-        'Status: `READY` until WORK-001 is VERIFIED.',
-      ),
+      content.replace('Status: `VERIFIED`', 'Status: `IMPLEMENTING`'),
     )
     const result = runValidator(specDir)
     expectFailure(result, 'SC-11', 'not dependency-eligible')
+  })
+
+  test('fails when the graph does not state WORK-001 is VERIFIED (SC-11)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'dependency-graph.md', (content) =>
+      content.replace('WORK-001 is VERIFIED.', 'WORK-001 is IMPLEMENTING.'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-11', 'does not state that WORK-001 is VERIFIED')
   })
 
   test('fails when a required truth classification is removed (SC-12)', () => {
@@ -361,5 +371,141 @@ describe('spec consistency validator — negative cases (WORK-001 Required Tests
     )
     const result = runValidator(specDir)
     expectFailure(result, 'SC-16', 'missing required section: ## Definition of Done')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// WORK-002 — domain architecture layer negative cases (SC-04 / SC-17 / SC-18 / SC-19)
+// ---------------------------------------------------------------------------
+
+describe('spec consistency validator — WORK-002 domain architecture cases', () => {
+  // Evolved SC-04: the domain architecture must be registered as IAAS-DOM-ARCH-1
+  // and FROZEN (the WORK-001 "PENDING WORK-002" placeholder is fulfilled).
+  test('fails when the domain architecture is reverted to PENDING (SC-04)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'architecture.md', (content) =>
+      content.replace('| `IAAS-DOM-ARCH-1` | FROZEN |', '| `IAAS-DOM-ARCH-1` | PENDING WORK-002 |'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-04', 'must mark the Domain Architecture FROZEN')
+  })
+
+  test('fails when the domain architecture version is malformed (SC-04)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'architecture.md', (content) =>
+      content.replace('`IAAS-DOM-ARCH-1`', '`domain-version-final`'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-04', 'malformed Domain Architecture version')
+  })
+
+  test('fails when domain architecture versions disagree between docs (SC-04)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'architecture-lock.md', (content) =>
+      content.replace('`IAAS-DOM-ARCH-1`', '`IAAS-DOM-ARCH-2`'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-04', 'domain architecture version inconsistent')
+  })
+
+  // SC-17 — spec/domain-architecture.md canonical domain architecture.
+  test('fails when domain-architecture.md is not FROZEN (SC-17)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'domain-architecture.md', (content) =>
+      content.replace('Status: **FROZEN**', 'Status: **DRAFT**'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-17', 'does not mark IAAS-DOM-ARCH-1 FROZEN')
+  })
+
+  test('fails when domain-architecture.md loses a required status distinction (SC-17)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'domain-architecture.md', (content) =>
+      content.replace(/OPEN \/ RESEARCH/g, 'UNRESOLVED'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-17', 'missing required status distinction: OPEN / RESEARCH')
+  })
+
+  test('fails when domain-architecture.md does not reference the governing architecture (SC-17)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'domain-architecture.md', (content) =>
+      content.replace(/IAAS-GOV-ARCH-1/g, 'IAAS-GOV-ARCH-9'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-17', 'does not reference the governing architecture IAAS-GOV-ARCH-1')
+  })
+
+  // SC-18 — spec/domain-requirements.md stable DOM-xxx IDs.
+  test('fails when domain-requirements.md has no stable DOM-xxx IDs (SC-18)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'domain-requirements.md', (content) =>
+      content.replace(/DOM-\d{3}/g, 'REQ'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-18', 'declares no stable DOM-xxx requirement IDs')
+  })
+
+  test('fails when domain-requirements.md loses the PROPOSED distinction (SC-18)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'domain-requirements.md', (content) =>
+      content.replace(/PROPOSED/g, 'TENTATIVE'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-18', 'does not distinguish PROPOSED requirements from implemented ones (GOV-006)')
+  })
+
+  // SC-19 — spec/domain-dependency-graph.md acyclic + frozen direction.
+  test('fails when domain-dependency-graph.md loses the acyclic statement (SC-19)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'domain-dependency-graph.md', (content) =>
+      content.replace(/acyclic/g, 'cyclic'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-19', 'does not state the graph is acyclic')
+  })
+
+  test('fails when domain-dependency-graph.md loses the frozen data-plane direction (SC-19)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'domain-dependency-graph.md', (content) =>
+      content.replace(/Node -> Bundle/g, 'Bundle -> Node'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-19', 'does not record the frozen data-plane direction (Node -> Bundle)')
+  })
+
+  test('fails when domain-dependency-graph.md loses the anti-drift prohibitions (SC-19)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'domain-dependency-graph.md', (content) =>
+      content.replace(/MUST NOT depend on/g, 'SHOULD NOT depend on').replace(/✗->/g, 'X->'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-19', 'does not declare frozen anti-drift prohibitions (MUST NOT depend on)')
+  })
+
+  // SC-20 — AR-004 regression: Data Plane / Economic Pipeline independence.
+  test('fails when the Economic->DataPlane anti-drift edge is removed (SC-20, AR-004)', () => {
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'domain-dependency-graph.md', (content) =>
+      content.replace('EconomicPipelineState ✗-> DataPlaneService', 'EconomicPipelineState X-> DataPlaneService'),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-20', 'does not declare the Economic Pipeline -> Data Plane anti-drift prohibition (AR-004)')
+  })
+
+  test('fails when the substrate summary implies Data Plane depends on Economic (SC-20, AR-004)', () => {
+    // Reintroduce the exact AR-004 defect: a linear "Economic > DataPlane"
+    // summary that (with A->B = depends on) implies the Data Plane depends on
+    // the Economic Pipeline. The validator must reject this even if the
+    // detailed anti-drift edges are correct.
+    const specDir = makeTempSpecCopy()
+    rewrite(specDir, 'domain-dependency-graph.md', (content) =>
+      content.replace(
+        'The Data Plane and the Economic Pipeline\nare **parallel substrates**',
+        'The frozen direction is:\n\nIdentity/Resource > Network > ControlPlane > Runtime > Economic > DataPlane\n\nThe Data Plane and the Economic Pipeline are parallel',
+      ),
+    )
+    const result = runValidator(specDir)
+    expectFailure(result, 'SC-20', 'presents a linear substrate ordering with Data Plane downstream of Economic (AR-004)')
   })
 })

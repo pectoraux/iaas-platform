@@ -2,7 +2,7 @@
 
 - Governance Architecture Version: `IAAS-GOV-ARCH-1`
 - Status: **FROZEN**
-- Domain Architecture Version: pending WORK-002.
+- Domain Architecture Version: `IAAS-DOM-ARCH-1` (FROZEN — published by WORK-002; changes require an ACR and a new version `IAAS-DOM-ARCH-2`).
 
 ## Frozen Rules
 
