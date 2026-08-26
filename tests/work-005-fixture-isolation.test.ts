@@ -91,16 +91,27 @@ describe('WORK-005 — no production changes (W005-AC03, W005-AC05, BASE-006)', 
 // W005-AC07 — unrelated pre-existing failures classified, not modified
 // ---------------------------------------------------------------------------
 
-describe('WORK-005 — pre-existing failures classified (W005-AC07)', () => {
-  test('Phase 8B Decimal/string assertion mismatch is a pre-existing failure (out of scope)', () => {
-    // The Phase 8B test has a pre-existing type-coercion assertion:
+describe('WORK-005 — Phase 8B/8C audit + pre-existing failures (W005-AC07, AR-006)', () => {
+  test('Phase 8B Decimal/string assertion corrected (AR-006): compares as strings', () => {
+    // AR-006: the Work Order explicitly includes Phase 8B/8C in the audit
+    // scope. The Phase 8B failure was a test-only assertion defect:
     //   expect(contribution!.quantity).toBe(assignment!.actualQuantity)
-    // where contribution.quantity is a Prisma Decimal (string) and
-    // actualQuantity is a string. This is NOT a fixture issue and is
-    // explicitly out of WORK-005 scope ("fix unrelated TypeScript or
-    // architecture-contract failures"). The test is left unchanged.
+    // where contribution.quantity is a Prisma Decimal (object) and
+    // actualQuantity is a String. Strict .toBe() fails across these types.
+    // The correction compares via .toString() — a test-only fix, no
+    // production code changed.
     const src = readTest('phase-8b-compute-economic-pipeline.test.ts')
-    expect(src).toContain('expect(contribution!.quantity).toBe(assignment!.actualQuantity)')
+    expect(src).toContain('contribution!.quantity.toString()')
+    expect(src).toContain('.toBe(assignment!.actualQuantity!)')
+    expect(src).not.toContain('expect(contribution!.quantity).toBe(assignment!.actualQuantity)')
+  })
+
+  test('Phase 8C (failure path) does not share the Decimal/string assertion issue', () => {
+    // Phase 8C is a separate describe block testing the failure path. It
+    // does not assert contribution.quantity === actualQuantity. Confirmed
+    // passing in CI.
+    const src = readTest('phase-8b-compute-economic-pipeline.test.ts')
+    expect(src).toContain('Phase 8C: failure path')
   })
 
   test('architecture-contract.test.ts source-pattern failures are pre-existing (out of scope)', () => {

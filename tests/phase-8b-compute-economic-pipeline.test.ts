@@ -146,7 +146,14 @@ describe('Phase 8B: compute end-to-end economic pipeline', () => {
     expect(result.contributionId).toBeTruthy()
     const contribution = await db.contribution.findUnique({ where: { id: result.contributionId } })
     expect(contribution).toBeTruthy()
-    expect(contribution!.quantity).toBe(assignment!.actualQuantity) // derived from verified result
+    // WORK-005 (AR-006): Contribution.quantity is a Prisma Decimal (returned
+    // as a Prisma.Decimal object); assignment.actualQuantity is a String.
+    // Strict .toBe() equality fails across these types even when the values
+    // are mathematically equal. Compare as strings — Prisma.Decimal.toString()
+    // yields the canonical decimal representation, and actualQuantity is
+    // already a string. This is a test-only assertion correction; no
+    // production code changed.
+    expect(contribution!.quantity.toString()).toBe(assignment!.actualQuantity!) // derived from verified result
     expect(contribution!.unit).toBe('GPU-hours')
 
     // 6. Reward (generic reward service)

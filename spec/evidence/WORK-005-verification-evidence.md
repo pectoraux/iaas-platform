@@ -5,6 +5,7 @@
 - Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
 - Implementer: Z.ai
 - Prepared: 2026-08-26 (UTC)
+- Updated: 2026-08-26 (UTC) — AR-006 correction: Phase 8B/8C audit + Decimal/string assertion fix
 - Status: **submitted for independent verification and Architect Review**
 
 > Per `spec/verification.md`, this document records objective evidence. It is
@@ -36,7 +37,7 @@ dependency (W005-AC01, W005-AC02, W005-AC04).
 | Test file | Prerequisite status | Action |
 |---|---|---|
 | `tests/phase-5-2-execution-economics-separation.test.ts` | Missing operator/asset (root cause of 11 failures) | **Fixed**: creates operator/asset/assignment in `beforeAll`; removed ambient `findFirst` |
-| `tests/phase-8b-compute-economic-pipeline.test.ts` | Already creates operator/asset/device/assignment (WORK-004 confirmed) | No change needed |
+| `tests/phase-8b-compute-economic-pipeline.test.ts` | Creates operator/asset/device/assignment (WORK-004 confirmed); Phase 8B had a Decimal/string assertion defect (AR-006) | **Fixed (AR-006)**: `contribution.quantity.toString()` comparison |
 | `tests/vpp-4-2-execution-invariants.test.ts` | Already creates operator/asset/device/assignment (WORK-004 confirmed) | No change needed |
 | `tests/runtime-resolution-integration.test.ts` | Does not create assignments (resolves runtimes only); calls `initializeBootstrap` (WORK-004) | No change needed |
 
@@ -46,8 +47,9 @@ dependency (W005-AC01, W005-AC02, W005-AC04).
 |---|---|---|
 | Phase 5.2 (7 tests): "Test setup requires at least one operator + asset" | Fixture prerequisite (BASE-004) | **Yes — fixed** |
 | Phase 5.4 (4 tests): same root cause (same file's `setupExecution`) | Fixture prerequisite (BASE-004) | **Yes — fixed** |
-| Phase 8B (1 test): `expect(contribution!.quantity).toBe(assignment!.actualQuantity)` Decimal/string type mismatch | Pre-existing type-coercion assertion | **No — out of scope** ("fix unrelated TypeScript or architecture-contract failures") |
-| architecture-contract.test.ts (3 tests): source-pattern regex failures | Pre-existing, confirmed on main | **No — out of scope** |
+| Phase 8B (1 test): `expect(contribution!.quantity).toBe(assignment!.actualQuantity)` Decimal/string type mismatch | Test-only assertion defect (AR-006) | **Yes — fixed (AR-006)**: compare via `.toString()` |
+| Phase 8C (failure path): separate describe block, no Decimal assertion | Already passing (CI confirmed) | No change needed |
+| architecture-contract.test.ts (3 tests): source-pattern regex failures | Pre-existing, confirmed on main | **No — out of scope** (source-pattern, not fixture/prerequisite) |
 
 ## 4. Deliverables
 
@@ -140,3 +142,60 @@ No stop-condition triggered:
 - No subsequent Work Item started.
 
 Ready for independent verification and Architect Review.
+
+## 12. AR-006 Correction Round (Architect Review REQUEST_CHANGES)
+
+The Architect's independent review of the first WORK-005 submission returned
+`REQUEST_CHANGES` for AR-006: the Work Order explicitly includes Phase 8B/8C in
+the audit scope, but PR #7 left the known Phase 8B failure in place and
+unilaterally classified it as out of scope. AR-006 is corrected below.
+
+### 12.1 AR-006 — Phase 8B/8C audit + Decimal/string assertion fix
+
+**Defect.** `tests/phase-8b-compute-economic-pipeline.test.ts` line 149:
+`expect(contribution!.quantity).toBe(assignment!.actualQuantity)`. The
+`Contribution.quantity` field is `Decimal @db.Decimal(20, 8)` (Prisma returns
+it as a `Prisma.Decimal` object); `assignment.actualQuantity` is `String?`.
+Strict `.toBe()` equality fails across these types even when the values are
+mathematically equal (CI: `Expected: "9.5", Received: 9.5`).
+
+**Audit findings (Phase 8B/8C):**
+- Phase 8B fixtures are correct (operator/asset/device/assignment created in
+  `beforeAll` since WORK-004). The failure is NOT a fixture-prerequisite issue.
+- The failure is a test-only assertion defect: comparing a Prisma Decimal
+  object to a String with strict equality.
+- Phase 8C (failure path, same file, separate describe block) does not share
+  this assertion and was already passing in CI.
+
+**Correction (test-only; no production code changed).** Line 149 now compares
+via `.toString()`:
+`expect(contribution!.quantity.toString()).toBe(assignment!.actualQuantity!)`.
+`Prisma.Decimal.toString()` yields the canonical decimal representation;
+`actualQuantity` is already a string. This is a test-assertion fix within
+WORK-005 scope ("test-only correction if required").
+
+### 12.2 AR-006 regression test update
+
+`tests/work-005-fixture-isolation.test.ts` updated:
+- The test that asserted Phase 8B was "out of scope" is replaced with a test
+  proving the AR-006 correction is in place (`.toString()` comparison present;
+  old strict-`.toBe` gone).
+- Added a test confirming Phase 8C does not share the issue.
+
+### 12.3 AR-006 verification evidence
+
+```text
+$ bun run spec:validate
+SPEC VALIDATION PASSED
+architecture=IAAS-GOV-ARCH-1 domain-architecture=IAAS-DOM-ARCH-2 required-files=13 work-items=5 work-item-schema-fields=11 work001-acceptance-criteria=13 dependency-edges=4 checks=20
+exit=0
+
+$ bun test tests/work-005-fixture-isolation.test.ts tests/spec-consistency-validator.test.ts tests/pr-invariant-check.test.ts tests/work-002-baseline.test.ts tests/work-003-verified-evidence-context.test.ts tests/work-004-runtime-bootstrap.test.ts --timeout 120000
+ 122 pass / 0 fail / 409 expect() calls / 6 files
+```
+
+### 12.4 AR-006 diff scope
+
+The correction touches only `tests/phase-8b-compute-economic-pipeline.test.ts`
+(1 assertion line) and `tests/work-005-fixture-isolation.test.ts` (test
+updated to verify the correction). No production code changed.
