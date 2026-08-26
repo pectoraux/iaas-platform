@@ -56,7 +56,7 @@ export async function createSettlement(
       id: existing.id,
       reward_id: existing.rewardId,
       operator_id: existing.operatorId,
-      amount: existing.amount,
+      amount: parseFloat(existing.amount.toString()), // WORK-006 (BASE-007): Prisma Decimal → number
       currency: existing.currency,
       status: existing.status,
       provider: existing.provider,
@@ -119,7 +119,7 @@ export async function createSettlement(
     id: settlement.id,
     reward_id: settlement.rewardId,
     operator_id: settlement.operatorId,
-    amount: settlement.amount,
+    amount: parseFloat(settlement.amount.toString()), // WORK-006 (BASE-007): Prisma Decimal → number
     currency: settlement.currency,
     status: settlement.status,
     provider: settlement.provider,
@@ -145,7 +145,7 @@ export async function completeSettlement(
       id: settlement.id,
       reward_id: settlement.rewardId,
       operator_id: settlement.operatorId,
-      amount: settlement.amount,
+      amount: parseFloat(settlement.amount.toString()), // WORK-006 (BASE-007): Prisma Decimal → number
       currency: settlement.currency,
       status: settlement.status,
       provider: settlement.provider,
@@ -159,7 +159,7 @@ export async function completeSettlement(
   const payout = await paymentsService.create_payout({
     idempotency_key: settlement.idempotencyKey!,
     recipient_ref: settlement.operatorId,
-    amount: settlement.amount,
+    amount: settlement.amount.toString(), // WORK-006 (BASE-007): Prisma Decimal → string (PayoutRequest.amount is string for precision)
     currency: settlement.currency,
     reference: `reward:${settlement.rewardId}`,
   })
@@ -176,7 +176,7 @@ export async function completeSettlement(
     id: final!.id,
     reward_id: final!.rewardId,
     operator_id: final!.operatorId,
-    amount: final!.amount,
+    amount: parseFloat(final!.amount.toString()), // WORK-006 (BASE-007): Prisma Decimal → number
     currency: final!.currency,
     status: final!.status,
     provider: final!.provider,

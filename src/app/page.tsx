@@ -1577,7 +1577,10 @@ function EntriesTable({ rows }: { rows: Entity[] }) {
               <Cell className="text-muted-foreground">{asString(r.currency)}</Cell>
               <Cell className="text-muted-foreground">
                 {asString(r.referenceType) || "—"}{" "}
-                {r.referenceId && <CopyableId id={asString(r.referenceId)} label="reference id" />}
+                {/* WORK-006 (BASE-007): r.referenceId is `unknown` from the
+                    generic API response; `unknown && JSX` yields `unknown`
+                    which is not a valid ReactNode. Coerce to boolean. */}
+                {!!r.referenceId && <CopyableId id={asString(r.referenceId)} label="reference id" />}
               </Cell>
               <Cell><CopyableId id={asString(r.accountId)} label="account id" /></Cell>
               <Cell><RelativeTime date={asString(r.createdAt)} /></Cell>

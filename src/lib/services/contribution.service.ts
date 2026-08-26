@@ -68,7 +68,8 @@ export async function createContribution(
   if (existing) {
     return {
       id: existing.id,
-      quantity: existing.quantity,
+      // WORK-006 (BASE-007): Prisma Decimal → string (ContributionResult.quantity is string).
+      quantity: existing.quantity.toString(),
       unit: existing.unit,
       status: existing.status,
       attestation_ids: JSON.parse(existing.attestationIdsJson),

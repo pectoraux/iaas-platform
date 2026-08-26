@@ -17,7 +17,11 @@ import { Prisma } from '@prisma/client'
 import { NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
 import { emit, DomainEventTypes } from '@/lib/domain/events'
-import { VERIFIER_VERSION, type VersionConfiguration } from './verification.service'
+// WORK-006 (BASE-007): VersionConfiguration is defined in network.service and
+// imported (but not re-exported) by verification.service. Import directly from
+// the defining module to avoid the TS2459 "not exported" error.
+import { VERIFIER_VERSION } from './verification.service'
+import type { VersionConfiguration } from './network.service'
 
 export interface CreateAttestationInput {
   eventId: string

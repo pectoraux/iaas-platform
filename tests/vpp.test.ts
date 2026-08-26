@@ -185,6 +185,9 @@ describe('VPP-1: Full dispatch flow using generic pipeline', () => {
       capabilityType: 'energy_discharge',
       reservedKw: '10',
       reservedKwh: '20',
+      // WORK-006 (BASE-007): startTime/endTime required since task 4 (time-window-aware).
+      startTime: new Date().toISOString(),
+      endTime: new Date(Date.now() + 3600000).toISOString(),
     })
 
     // 3. Create dispatch.
@@ -210,7 +213,7 @@ describe('VPP-1: Full dispatch flow using generic pipeline', () => {
     expect(result.contribution_id).toBeTruthy()
     expect(result.reward_id).toBeTruthy()
     expect(result.settlement_id).toBeTruthy()
-    expect(parseFloat(result.performance_kwh)).toBeGreaterThan(0)
+    expect(parseFloat(result.performance_kwh!)).toBeGreaterThan(0) // WORK-006 (BASE-007): non-null
 
     // 6. Verify the dispatch assignment is completed.
     const assignment = await db.vppDispatchAssignment.findUnique({
@@ -222,16 +225,16 @@ describe('VPP-1: Full dispatch flow using generic pipeline', () => {
 
     // 7. Verify no parallel energy-specific abstractions were created.
     // The event should be a generic Event, not an EnergyEvent.
-    const event = await db.event.findUnique({ where: { id: result.event_id } })
+    const event = await db.event.findUnique({ where: { id: result.event_id! } }) // WORK-006 (BASE-007): non-null
     expect(event).toBeTruthy()
     expect(event?.capabilityType).toBe('energy_discharge')
 
     // The contribution should be a generic Contribution.
-    const contribution = await db.contribution.findUnique({ where: { id: result.contribution_id } })
+    const contribution = await db.contribution.findUnique({ where: { id: result.contribution_id! } }) // WORK-006 (BASE-007): non-null
     expect(contribution).toBeTruthy()
 
     // The settlement should be a generic Settlement.
-    const settlement = await db.settlement.findUnique({ where: { id: result.settlement_id } })
+    const settlement = await db.settlement.findUnique({ where: { id: result.settlement_id! } }) // WORK-006 (BASE-007): non-null
     expect(settlement).toBeTruthy()
     expect(settlement?.status).toBe('completed')
   })

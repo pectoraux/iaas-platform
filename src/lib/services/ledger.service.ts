@@ -16,7 +16,7 @@
 // Convention: amount is signed. Positive = credit. Negative = debit.
 // =============================================================================
 
-import { db } from '@/lib/db'
+import { db, type ExtendedTransactionClient } from '@/lib/db'
 import { Prisma } from '@prisma/client'
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'

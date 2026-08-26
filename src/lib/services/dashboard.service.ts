@@ -37,8 +37,8 @@ export interface DashboardStats {
   settlements: number
   settlements_completed: number
   settlements_failed: number
-  total_reward_amount: number
-  total_settled_amount: number
+  total_reward_amount: string // WORK-006 (BASE-007): Decimal → string for JSON safety (Task 3)
+  total_settled_amount: string // WORK-006 (BASE-007): Decimal → string for JSON safety (Task 3)
 }
 
 export async function getDashboardStats(): Promise<DashboardStats> {
@@ -91,10 +91,10 @@ export interface E2EFlowResult {
   device: { id: string; provisioning_secret: string }
   event: { id: string; external_event_id: string; status: string }
   verification: { overall_status: string; confidence: number; checks: Array<{ name: string; status: string; detail?: string }> }
-  attestation: { id: string; quantity: number; unit: string }
-  contribution: { id: string; quantity: number; unit: string }
-  reward: { id: string; amount: number; currency: string; breakdown: { gross: number; fee: number; net: number } }
-  ledger: { posting_id: string; balance_after: number; balanced: boolean }
+  attestation: { id: string; quantity: string; unit: string } // WORK-006 (BASE-007): Decimal → string
+  contribution: { id: string; quantity: string; unit: string } // WORK-006 (BASE-007): Decimal → string
+  reward: { id: string; amount: string; currency: string; breakdown: { gross: string; fee: string; net: string } } // WORK-006 (BASE-007): Decimal → string
+  ledger: { posting_id: string; balance_after: string; balanced: boolean } // WORK-006 (BASE-007): Decimal → string
   settlement: { id: string; status: string; provider_payout_id: string | null }
   chain: {
     event_id: string
@@ -235,12 +235,19 @@ export async function runE2EFlow(opts?: {
       quantity: processedEvent.attestations[0].quantity.toString(),
       unit: processedEvent.attestations[0].unit,
     },
-    contribution: { id: contribution.id, quantity: contribution.quantity, unit: contribution.unit },
+    contribution: { id: contribution.id, quantity: contribution.quantity.toString(), unit: contribution.unit },
     reward: {
       id: reward.id,
       amount: reward.amount, // already a string from reward service
       currency: reward.currency,
-      breakdown: reward.calculation,
+      // WORK-006 (BASE-007): map reward.calculation to the breakdown shape
+      // (gross/fee/net as strings). The calculation uses gross/platform_fee/
+      // net_amount; the breakdown expects gross/fee/net.
+      breakdown: {
+        gross: reward.calculation.gross,
+        fee: reward.calculation.platform_fee,
+        net: reward.calculation.net_amount,
+      },
     },
     ledger: {
       posting_id: ledger.posting_id,
