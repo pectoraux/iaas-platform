@@ -102,6 +102,8 @@ model Tenant {
   deliveryConfirmations DeliveryConfirmation[]
   // Phase 14F: TransformRecord — tenant-scoped transform provenance records.
   transformRecords       TransformRecord[]
+  // WORK-010: TransformRegistryEntry — tenant-scoped transform catalog entries.
+  transformRegistryEntries TransformRegistryEntry[]
 
   @@index([slug])
 }
@@ -2628,5 +2630,66 @@ model TransformRecord {
   @@index([nodeIdentity])
   @@index([transformType])
   @@index([resultStatus])
+  @@index([createdAt])
+}
+
+// -----------------------------------------------------------------------------
+// WORK-010 (IAAS-DOM-ARCH-3 / DOM-015): TransformRegistry
+//
+// The service-layer catalog/discovery primitive for Transforms. Provides
+// tenant-scoped registration, lookup by (transformType, transformVersion),
+// version compatibility rules, certification metadata, and revocation metadata.
+//
+// Architectural boundaries (frozen by IAAS-DOM-ARCH-3):
+//   - Service-layer, NOT kernel.
+//   - Does NOT execute transforms (that is TransformRuntime — future).
+//   - Does NOT import vertical services, EconomicPipeline, Route/Transport,
+//     RuntimeRegistry, or kernel code.
+//   - PostgreSQL is the durable source of registry metadata.
+//   - Tenant isolation is mandatory.
+//   - Deterministic idempotency: (tenantId, transformType, transformVersion)
+//     is the stable identity tuple.
+// -----------------------------------------------------------------------------
+model TransformRegistryEntry {
+  id                        String   @id @default(cuid())
+  tenantId                  String
+  transformType             String   // generic transform identity (e.g. "compression", "encryption_proxy")
+  transformVersion          String   // semver string (e.g. "1.0.0")
+  description               String   @default("") // human-readable description
+  // Version compatibility: comma-separated list of compatible version ranges
+  // (e.g. ">=1.0.0 <2.0.0"). The registry evaluates compatibility without
+  // executing transforms.
+  compatibleVersionsJson    String   @default("[]") // JSON array of compatibility rules
+  // Certification metadata (DOM-015 §3): certifier identity + status.
+  // Does NOT freeze a cryptographic mechanism — just records who certified
+  // and the certification status.
+  certifierIdentity         String?  // identity of the certifier (optional)
+  certificationStatus       String   @default("uncertified") // uncertified | pending | certified | rejected
+  certifiedAt               DateTime?
+  // Revocation metadata (DOM-015 §4): status + reason + revokedAt.
+  revocationStatus          String   @default("active") // active | revoked
+  revocationReason          String?  // reason for revocation (if revoked)
+  revokedAt                 DateTime?
+  // Input/output constraints (metadata, not enforcement — enforcement is
+  // TransformRuntime's responsibility, which is future).
+  inputContentTypesJson     String   @default("[]") // JSON array of accepted content types
+  outputContentTypesJson    String   @default("[]") // JSON array of produced content types
+  reversibility             Boolean  @default(false)
+  lossiness                 Boolean  @default(false)
+  // Idempotency: deterministic identity tuple.
+  idempotencyKey            String   // caller-supplied, for deterministic registration
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  tenant                    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Deterministic registration identity: one entry per (tenant, type, version).
+  // Concurrent registrations with the same tuple converge (idempotent).
+  @@unique([tenantId, transformType, transformVersion])
+  @@index([tenantId])
+  @@index([transformType])
+  @@index([transformVersion])
+  @@index([certificationStatus])
+  @@index([revocationStatus])
   @@index([createdAt])
 }
