@@ -28,8 +28,7 @@ Acceptance requirements:
 4. The contract does NOT own storage, registry, or runtime concerns.
 5. The contract is vertical-neutral.
 
-Classification: FROZEN-CONTRACT by ACR-002; implementation pending a future
-Work Item after WORK-009 is VERIFIED.
+Classification: FROZEN-CONTRACT by ACR-002; implemented via `TransformContract` in `src/lib/services/transform-runtime.service.ts` (WORK-011 VERIFIED). Concrete Transform implementations remain future.
 
 ## DOM-015 — TransformRegistry Discovery and Catalog
 
@@ -50,8 +49,7 @@ Acceptance requirements:
    Route/Transport, NO RuntimeRegistry.
 9. PostgreSQL is the durable source of registry metadata.
 
-Classification: FROZEN-CONTRACT by ACR-002; implementation pending a future
-Work Item after WORK-009 is VERIFIED.
+Classification: FROZEN-CONTRACT by ACR-002; implemented in `src/lib/services/transform-registry.service.ts` (WORK-010 VERIFIED).
 
 ## DOM-016 — TransformRuntime Execution Engine
 
@@ -75,8 +73,7 @@ Acceptance requirements:
 10. The runtime imports NO vertical service, NO EconomicPipeline, NO
     Route/Transport, NO RuntimeRegistry.
 
-Classification: FROZEN-CONTRACT by ACR-002; implementation pending a future
-Work Item after WORK-009 is VERIFIED.
+Classification: FROZEN-CONTRACT by ACR-002; implemented in `src/lib/services/transform-runtime.service.ts` (WORK-011 VERIFIED).
 
 ## DOM-017 — TransformRecord Provenance Integrity (inherited, unchanged)
 

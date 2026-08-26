@@ -361,7 +361,7 @@ Definition of Done: truth drift is inventoried; VerifiedEvidenceContext is corre
 
 ## WORK-009 — Transform Stack Architecture Freeze
 
-Status: `READY`
+Status: `VERIFIED`
 
 Architecture Version: `IAAS-GOV-ARCH-1`
 
@@ -402,3 +402,132 @@ Required Verification:
 - independent Architect Review.
 
 Definition of Done: IAAS-DOM-ARCH-3 is frozen and registered; Transform Stack contract is complete; V2 remains immutable; no production implementation; regression protection added; all CI gates green; PR submitted; Architect Review approves; PR merged; WORK-009 becomes VERIFIED only after independent Architect Review.
+
+## WORK-010 — TransformRegistry Implementation
+
+Status: `VERIFIED`
+
+Architecture Version: `IAAS-GOV-ARCH-1`
+
+Domain Architecture: `IAAS-DOM-ARCH-3` (FROZEN)
+
+Dependencies: `WORK-009`
+
+Requirements: `BASE-017`, `DOM-015`; inherited V1/V2/V3 boundaries.
+
+Objective: implement the frozen `TransformRegistry` contract as the first Transform Stack implementation slice.
+
+Repository Scope: service-layer TransformRegistry implementation, registry persistence, targeted domain/unit/PostgreSQL tests, static anti-dependency tests, CI/specification updates, evidence.
+
+Architecture Constraints: `IAAS-DOM-ARCH-3` FROZEN; service-layer only; tenant-scoped; discovery/catalog and version compatibility only; no execution; no marketplace; no kernel ownership; no RuntimeRegistry; no vertical/EconomicPipeline/Route/Transport imports; PostgreSQL durable source of truth; TransformRuntime remains unimplemented.
+
+Out of Scope: TransformRuntime implementation; concrete Transform implementations; marketplace/licensing; sandbox technology; SDK; signatures/certification cryptography; TransformRecord semantics changes; Data Plane changes; EconomicPipeline; RuntimeRegistry; kernel changes; new architecture version.
+
+Acceptance Criteria:
+
+- `W010-AC01` service-layer TransformRegistry with tenant-scoped lookup by (transformType, transformVersion).
+- `W010-AC02` version compatibility rules without executing transforms.
+- `W010-AC03` certification metadata (certifier identity/status) and revocation metadata (status/reason/revokedAt).
+- `W010-AC04` PostgreSQL durable source; concurrent/idempotent registration deterministic.
+- `W010-AC05` tenant isolation mechanically proven.
+- `W010-AC06` static checks prove no vertical/EconomicPipeline/Route/Transport/RuntimeRegistry/kernel imports.
+- `W010-AC07` TransformRuntime absent; registry does not execute or mutate TransformRecord.
+- `W010-AC08` all targeted tests, validator, typecheck, lint, PostgreSQL, diff/scope pass.
+
+Required Verification:
+
+- unit tests for registration, lookup, compatibility, certification/revocation, idempotency;
+- PostgreSQL integration tests for tenant isolation and concurrent registration;
+- static import/anti-dependency tests;
+- explicit test that registry does not execute transforms;
+- explicit test that TransformRuntime remains absent;
+- full CI evidence and exact PR diff inspection;
+- independent Architect Review.
+
+Definition of Done: registry implementation satisfies DOM-015 without architecture drift; TransformRuntime remains unimplemented; PostgreSQL evidence green; CI gates pass; PR merged; Work Item VERIFIED by the Architect.
+
+## WORK-011 — TransformRuntime Implementation
+
+Status: `VERIFIED`
+
+Architecture Version: `IAAS-GOV-ARCH-1`
+
+Domain Architecture: `IAAS-DOM-ARCH-3` (FROZEN)
+
+Dependencies: `WORK-010`
+
+Requirements: `DOM-016`; inherited V1/V2/V3 boundaries.
+
+Objective: implement the frozen `TransformRuntime` contract as the second Transform Stack implementation slice.
+
+Repository Scope: service-layer TransformRuntime implementation, targeted unit/PostgreSQL tests, static anti-dependency tests, CI/specification updates, evidence.
+
+Architecture Constraints: `IAAS-DOM-ARCH-3` FROZEN; TransformRegistry is sole catalog authority; TransformRuntime executes, does not discover; TransformRecord is durable provenance authority; service-layer; tenant-scoped; no vertical/EconomicPipeline/Route/Transport/RuntimeRegistry/kernel imports; no concrete VPP/Compute transforms; no marketplace/SDK/sandbox/signatures.
+
+Out of Scope: concrete Transform implementations; marketplace; SDK; sandbox; signatures; TransformRecord semantics changes; TransformRegistry modification; new architecture version.
+
+Acceptance Criteria:
+
+- `W011-AC01` service-layer TransformRuntime exists; resolves via TransformRegistry.
+- `W011-AC02` resolves Transforms exclusively through TransformRegistry.
+- `W011-AC03` execute, reverse, estimateCost, verify dispatch through TransformContract.
+- `W011-AC04` emits immutable TransformRecord after execution with 7-element provenance.
+- `W011-AC05` tenant isolation mechanically proven.
+- `W011-AC06` static checks prove no vertical/EconomicPipeline/Route/Transport/RuntimeRegistry/kernel imports.
+- `W011-AC07` explicit failure semantics; failures emit failed provenance + re-throw.
+- `W011-AC08` idempotent execution convergence.
+- `W011-AC09` TransformRegistry remains catalog authority.
+- `W011-AC10` no concrete transform implementations embedded; no marketplace/kernel/economic/transport coupling.
+
+Required Verification:
+
+- unit tests for runtime dispatch and failure semantics;
+- PostgreSQL integration tests for registry resolution, execution, idempotency, provenance emission, tenant isolation, failure behavior;
+- regression tests proving TransformRegistry remains catalog authority;
+- regression tests proving TransformRecord created once and not mutated;
+- static anti-dependency architecture tests;
+- proof no concrete transform implementation is embedded;
+- specification validator; typecheck; Architecture Contract Tests; PostgreSQL; lint; diff/scope.
+
+Definition of Done: TransformRuntime satisfies DOM-016 without architecture drift; TransformRegistry and TransformRecord boundaries preserved; CI gates pass; PR merged; Work Item VERIFIED by the Architect.
+
+## WORK-012 — Transform Stack Truth Synchronization
+
+Status: `READY`
+
+Architecture Version: `IAAS-GOV-ARCH-1`
+
+Domain Architecture: `IAAS-DOM-ARCH-3` (FROZEN)
+
+Dependencies: `WORK-011`
+
+Requirements: truth synchronization after WORK-010/011 VERIFIED; `GOV-001`, `GOV-003`, `GOV-006`.
+
+Objective: reconcile the V3 specification layer with verified repository reality after TransformRegistry (WORK-010) and TransformRuntime (WORK-011) implementation, without modifying frozen architecture or production behavior.
+
+Repository Scope: `spec/` specification documents; governance-layer registration; targeted specification regression tests.
+
+Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-3` remain FROZEN; no production changes; no Prisma changes; no architecture-version change; no TransformRegistry/Runtime behavior changes; no promotion of DOM-P04..P08.
+
+Out of Scope: production code changes, Prisma schema, architecture-version change, TransformRegistry/Runtime behavior, DOM-P04..P08 promotion, new feature implementation, WORK-013+.
+
+Acceptance Criteria:
+
+- `W012-AC01` V3 requirement classifications reflect implemented/verified state (DOM-014/015/016).
+- `W012-AC02` DOM-017 remains implemented/confirmed.
+- `W012-AC03` Historical V1/V2 documents preserved (not rewritten in place).
+- `W012-AC04` architecture.md, architecture-lock.md, V3 requirements, V3 architecture, V3 dependency graph, work-items, evidence agree on current state.
+- `W012-AC05` Regression tests prevent future drift between verified Work Items and stale implementation-pending/FUTURE labels.
+- `W012-AC06` DOM-P04..P08 remain FUTURE/OPEN/RESEARCH (not promoted).
+
+Required Verification:
+
+- specification validator;
+- truth-reconciliation regression tests;
+- all existing Architecture Contract Tests;
+- Typecheck;
+- PostgreSQL Integration Tests;
+- Lint;
+- exact diff/scope inspection.
+
+Definition of Done: V3 status truth is synchronized; historical versions remain intact; no unrelated future primitive promoted; regression protection exists; all CI gates green; PR submitted for independent Architect Review.

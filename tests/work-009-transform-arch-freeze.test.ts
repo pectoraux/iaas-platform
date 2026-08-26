@@ -180,10 +180,11 @@ describe('WORK-009 — dependency + anti-dependency directions (W009-AC05)', () 
 // ---------------------------------------------------------------------------
 
 describe('WORK-009 — no production implementation (W009-AC07)', () => {
-  test('domain-architecture-v3.md states TransformRegistry/TransformRuntime are FROZEN-CONTRACT (not implemented)', () => {
+  test('domain-architecture-v3.md classifies TransformRegistry/TransformRuntime as IMPLEMENTED (updated by WORK-012)', () => {
     const src = readSpec('domain-architecture-v3.md')
-    expect(src).toContain('FROZEN-CONTRACT')
-    expect(src).toContain('implementation is future')
+    // WORK-012 truth sync: TransformRegistry (WORK-010 VERIFIED) and
+    // TransformRuntime (WORK-011 VERIFIED) are now IMPLEMENTED, not FROZEN-CONTRACT.
+    expect(src).toContain('Classification: **IMPLEMENTED**')
   })
 
   test('no src/ files changed by WORK-009 (spec-only)', () => {
