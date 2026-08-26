@@ -180,9 +180,13 @@ describe('Phase 8B: compute end-to-end economic pipeline', () => {
     expect(settlement!.status).toBe('created')
 
     // 8. Ledger entries exist (double-entry: operator credit + platform fee)
-    // The ledger posting is linked to the reward via the idempotency key.
+    // WORK-005 (AR-006): the economic pipeline uses a deterministic ledger
+    // idempotency key derived from the assignmentId (ledger-${assignmentId}),
+    // not `compute-reward-${rewardId}`. The previous lookup used the wrong
+    // key pattern and always returned 0 results. Use the assignmentId-derived
+    // key (the same one the pipeline stores on the checkpoint).
     const ledgerPostings = await db.ledgerPosting.findMany({
-      where: { tenantId, idempotencyKey: `compute-reward-${reward!.id}` },
+      where: { tenantId, idempotencyKey: `ledger-${result.executionAssignmentId}` },
     })
     expect(ledgerPostings.length).toBeGreaterThan(0)
   })
