@@ -76,6 +76,30 @@ The fixture correction MUST remain test-only and MUST NOT weaken production runt
 
 Acceptance: `W005-AC03`, `W005-AC05`, `W005-AC06`, and `W005-AC07` pass with exact diff and CI evidence.
 
+## BASE-007 — Typecheck Cleanliness
+
+The repository MUST have no TypeScript compiler errors attributable to the current implementation baseline. Compiler failures MUST be classified before correction, and fixes MUST preserve frozen architectural contracts.
+
+Acceptance: `W006-AC01` and `W006-AC02` pass with clean-main baseline capture and final `tsc --noEmit` evidence.
+
+## BASE-008 — Architecture Contract Integrity
+
+The Architecture Contract Test suite MUST pass without weakening or bypassing its frozen architectural assertions. Stale assertions may be corrected only when repository evidence proves the assertion no longer reflects the frozen architecture.
+
+Acceptance: `W006-AC03` and `W006-AC04` pass with complete architecture-contract evidence.
+
+## BASE-009 — Regression-Safe Corrections
+
+Every production/type-contract correction made under WORK-006 MUST have targeted regression coverage and MUST NOT introduce new vertical, runtime, economic, or Data Plane coupling.
+
+Acceptance: `W006-AC05` and `W006-AC06` pass through targeted tests, architecture checks, and exact diff inspection.
+
+## BASE-010 — Residual Baseline Transparency
+
+Any remaining Typecheck or Architecture Contract failure outside WORK-006 scope MUST be explicitly classified, evidenced, and assigned to a later bounded Work Item rather than silently ignored.
+
+Acceptance: `W006-AC08` and `W006-AC09` pass through the WORK-006 residual-baseline evidence.
+
 ## WORK-001 Freeze
 
 No production IAAS feature is authorized by these requirements. Domain requirements are derived by WORK-002 after baseline audit.
