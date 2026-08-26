@@ -87,3 +87,46 @@ Acceptance Criteria:
 Required Verification: repository baseline inspection against truth classifications; automated specification consistency validation; independent Architect Review after WORK-001 is VERIFIED.
 
 Definition of Done: repository baseline committed; canonical domain architecture approved by the Architect; domain requirements and dependency graph committed; Work Item VERIFIED.
+
+## WORK-003 — VerifiedEvidenceContext Implementation
+
+Status: `READY`
+
+Architecture Version: `IAAS-GOV-ARCH-1`
+
+Dependencies: `WORK-002`
+
+Requirements: `DOM-013`; ACR-001; inherited V2 rules in `IAAS-DOM-ARCH-2`.
+
+Objective: implement the frozen `VerifiedEvidenceContext` contract defined by `IAAS-DOM-ARCH-2`, replacing the implicit vertical-specific pre-validated-evidence convention with an explicit generic boundary.
+
+Repository Scope: existing evidence/verification services, generic economic pipeline integration, VPP adapter integration, targeted tests, and governance-specification tests required to prove the V2 contract.
+
+Architecture Constraints: `IAAS-DOM-ARCH-2` is FROZEN; `IAAS-GOV-ARCH-1` is FROZEN; do not create a kernel primitive; preserve durable Event/VerificationResult/Attestation as source of truth; preserve Data Plane ↔ Economic Pipeline independence; verticals may produce the context but generic code may not import vertical services.
+
+Out of Scope: ledger redesign, new economic primitives, changes to the Data Plane, TransformRegistry/Runtime, Extension/Marketplace/SDK work, broad VPP refactor, schema redesign unrelated to the context contract, architecture-version changes.
+
+Acceptance Criteria:
+
+- `W003-AC01` immutable `VerifiedEvidenceContext` contract exists at the evidence/economic boundary.
+- `W003-AC02` context references durable Event/Attestation identities and verification policy/version without duplicating durable payloads.
+- `W003-AC03` generic Economic Pipeline accepts the context without importing any vertical service.
+- `W003-AC04` VPP produces the context while retaining its domain-specific baseline/dispatch semantics.
+- `W003-AC05` reconciliation validates context references and preserves existing stale/invalid-reference recovery behavior.
+- `W003-AC06` context is not owned by the kernel and is not a ledger/accounting primitive.
+- `W003-AC07` Data Plane ↔ Economic Pipeline independence remains intact and is mechanically regression-tested.
+- `W003-AC08` PostgreSQL remains the durable source of truth; no SQLite or in-memory-only replacement is introduced.
+- `W003-AC09` all implementation and regression tests pass, with objective evidence recorded.
+
+Required Verification:
+
+- static architecture/import checks;
+- unit tests for context construction/immutability;
+- PostgreSQL integration tests for durable-reference validation;
+- VPP-to-context integration test;
+- stale/invalid-reference recovery tests;
+- Data Plane ↔ Economic Pipeline anti-dependency regression checks;
+- CI evidence and PR diff inspection;
+- independent Architect Review.
+
+Definition of Done: implementation committed; W003 acceptance criteria objectively verified; CI evidence recorded; no architecture drift; PR merged; Work Item VERIFIED.
