@@ -83,7 +83,7 @@ async function ingestAndVerify(assignmentId: string) {
   const eventId = `evidence-${assignmentId}`
   const signingKey = deriveSigningKey(provisioningSecret)
   const timestamp = new Date().toISOString()
-  const payload = { power_kw: 50 }
+  const payload = { power_kw: 5.0, available_energy_kwh: 13.5, state_of_charge_pct: 80 }
   const message = buildCanonicalMessage({
     device_id: deviceId,
     event_id: eventId,
