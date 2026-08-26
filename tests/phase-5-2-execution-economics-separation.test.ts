@@ -35,11 +35,16 @@ import { createTenant } from '../src/lib/services/tenant.service'
 import { instantiateTemplate } from '../src/lib/services/network.service'
 import { resolveRuntime } from '../src/lib/kernel/runtime'
 import { InfrastructureRuntime } from '../src/lib/kernel/runtime/infrastructure-runtime'
+import { initializeBootstrap } from '../src/lib/bootstrap'
 
 let tenantId: string
 let networkId: string
 
 beforeAll(async () => {
+  // WORK-004 (BASE-001): initialize the bootstrap so resolveRuntime() finds
+  // the registered InfrastructureRuntime. The test is its own composition root.
+  initializeBootstrap()
+
   const tenant = await createTenant({
     name: 'Phase 5.2 Exec/Econ Separation',
     slug: `p52-ee-${Date.now()}`,

@@ -25,11 +25,19 @@ import { instantiateTemplate, createNetworkVersion, publishNetworkVersion, getNe
 import { resolveRuntime } from '../src/lib/kernel/runtime'
 import { InfrastructureRuntime } from '../src/lib/kernel/runtime/infrastructure-runtime'
 import { ProtocolRuntime } from '../src/lib/kernel/runtime/protocol-runtime'
+import { initializeBootstrap } from '../src/lib/bootstrap'
 
 let tenantId: string
 let networkId: string
 
 beforeAll(async () => {
+  // WORK-004 (BASE-001): the test is its own composition root — it must
+  // initialize the bootstrap so the RuntimeRegistry has the concrete runtimes
+  // registered before resolveRuntime() is called. This mirrors the documented
+  // bootstrap boundary (src/lib/bootstrap/index.ts: tests call
+  // initializeBootstrap() directly as their own composition root).
+  initializeBootstrap()
+
   const tenant = await createTenant({
     name: 'Phase 5.1 Runtime Integration',
     slug: `p51-rt-${Date.now()}`,

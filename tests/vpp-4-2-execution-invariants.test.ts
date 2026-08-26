@@ -32,6 +32,7 @@ import {
   createDispatch,
 } from '../src/lib/services/vpp.service'
 import { finalizeExecutionIfTerminal } from '../src/lib/kernel/execution/execution.service'
+import { initializeBootstrap } from '../src/lib/bootstrap'
 
 // ---------------------------------------------------------------------------
 // Shared test fixtures
@@ -52,6 +53,10 @@ let deviceSecretA: string
 let deviceSecretB: string
 
 beforeAll(async () => {
+  // WORK-004 (BASE-001): initialize the bootstrap so resolveRuntime() finds
+  // the registered InfrastructureRuntime for VPP dispatch execution.
+  initializeBootstrap()
+
   const tenant = await createTenant({
     name: 'VPP-4.2 Execution Invariants',
     slug: `vpp42-exec-${Date.now()}`,
