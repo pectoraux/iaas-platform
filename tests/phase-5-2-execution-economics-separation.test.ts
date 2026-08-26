@@ -36,9 +36,12 @@ import { instantiateTemplate } from '../src/lib/services/network.service'
 import { resolveRuntime } from '../src/lib/kernel/runtime'
 import { InfrastructureRuntime } from '../src/lib/kernel/runtime/infrastructure-runtime'
 import { initializeBootstrap } from '../src/lib/bootstrap'
+import { createOperator, createAsset, assignAssetToNetwork } from '../src/lib/services/registry.service'
 
 let tenantId: string
 let networkId: string
+let operatorId: string
+let assetId: string
 
 beforeAll(async () => {
   // WORK-004 (BASE-001): initialize the bootstrap so resolveRuntime() finds
@@ -54,6 +57,22 @@ beforeAll(async () => {
 
   const { network } = await instantiateTemplate(tenantId, 'energy-vpp')
   networkId = network.id
+
+  // WORK-005 (BASE-004): deterministically establish the tenant-scoped
+  // operator/asset/capability prerequisites this test consumes. Previously
+  // setupExecution() searched the tenant for an ambient operator+asset and
+  // threw when absent (the residual post-WORK-004 failure class). The test
+  // now creates its own fixtures inside its tenant scope — no cross-file or
+  // ambient-state dependency (W005-AC01, W005-AC02, W005-AC04).
+  const operator = await createOperator(tenantId, { displayName: 'Phase 5.2 Test Operator' })
+  operatorId = operator.id
+  const asset = await createAsset(tenantId, {
+    operatorId,
+    assetType: 'battery',
+    name: 'Phase 5.2 Test Battery',
+  })
+  assetId = asset.id
+  await assignAssetToNetwork(tenantId, assetId, networkId, 'energy_discharge', '100', 'kW')
 })
 
 // ---------------------------------------------------------------------------
@@ -83,19 +102,16 @@ async function setupExecution(numAssignments: number) {
     sourceId: `test-${testCounter}-${Date.now()}`,
   })
 
-  // Create N assignments. We need real asset/operator IDs for the FKs.
-  // Reuse the first operator + asset from the network.
-  const operator = await db.operator.findFirst({ where: { tenantId } })
-  const asset = await db.asset.findFirst({ where: { tenantId } })
-  if (!operator || !asset) throw new Error('Test setup requires at least one operator + asset')
-
+  // Create N assignments. WORK-005 (BASE-004): use the deterministic
+  // tenant-scoped operator/asset fixtures created in beforeAll — no ambient
+  // findFirst lookup, no cross-file dependency (W005-AC01, W005-AC04).
   const assignments: { id: string }[] = []
   for (let i = 0; i < numAssignments; i++) {
     const assignment = await runtime.createExecutionAssignment(db, {
       tenantId,
       executionId: execution.id,
-      assetId: asset.id,
-      operatorId: operator.id,
+      assetId,
+      operatorId,
       capabilityType: 'energy_discharge',
       assignedQuantity: '5',
       assignedUnit: 'kWh',
