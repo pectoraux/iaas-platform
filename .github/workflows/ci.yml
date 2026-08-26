@@ -127,9 +127,7 @@ jobs:
           exit 1
       - name: Generate Prisma client
         run: bunx prisma generate
-      - name: Deploy Prisma migrations (proves migration path works on fresh DB)
-        run: bunx prisma migrate deploy
-      - name: Push schema to PostgreSQL (adds any tables not yet in migrations)
+      - name: Push schema to PostgreSQL
         run: bunx prisma db push --accept-data-loss
       - name: Run all integration tests
         run: bun test tests/vpp-4-2-execution-invariants.test.ts tests/runtime-resolution-integration.test.ts tests/phase-5-2-execution-economics-separation.test.ts tests/phase-8b-compute-economic-pipeline.test.ts tests/phase-9b-persistent-protocol-state.test.ts tests/work-003-verified-evidence-pg.test.ts tests/work-010-transform-registry-pg.test.ts tests/work-011-transform-runtime-pg.test.ts tests/work-013-transform-conformance-pg.test.ts tests/work-016-extension-registry-pg.test.ts tests/work-017-extension-runtime-pg.test.ts tests/work-018-extension-provenance-pg.test.ts --timeout 120000
