@@ -5,27 +5,21 @@
 | Artifact | Version | Status |
 |---|---|---|
 | Governance Architecture | `IAAS-GOV-ARCH-1` | FROZEN |
-| Domain Architecture | `IAAS-DOM-ARCH-3` | FROZEN |
-| Domain Architecture | `IAAS-DOM-ARCH-4` | CANDIDATE |
-| Domain Architecture | `IAAS-DOM-ARCH-2` | SUPERSEDED |
-| Domain Architecture | `IAAS-DOM-ARCH-1` | SUPERSEDED |
+| Domain Architecture | `IAAS-DOM-ARCH-4` | FROZEN |
+| Domain Architecture | `IAAS-DOM-ARCH-3` | SUPERSEDED / IMMUTABLE |
+| Domain Architecture | `IAAS-DOM-ARCH-2` | SUPERSEDED / IMMUTABLE |
+| Domain Architecture | `IAAS-DOM-ARCH-1` | SUPERSEDED / IMMUTABLE |
 
-`IAAS-DOM-ARCH-1`, `IAAS-DOM-ARCH-2`, and `IAAS-DOM-ARCH-3` remain immutable
-historical records.
+`IAAS-DOM-ARCH-4` is now the current canonical domain architecture following approved `ACR-003`. `IAAS-DOM-ARCH-3` remains an immutable historical architecture record.
 
-The current canonical Domain Architecture is `IAAS-DOM-ARCH-3`, published in
-`spec/domain-architecture-v3.md` and frozen through `ACR-002` (Transform Stack
-Architecture Freeze). V3 preserves V2 except for the explicit Transform Stack
-boundary.
+## Current Canonical Architecture
 
-A candidate `IAAS-DOM-ARCH-4` is proposed in `spec/domain-architecture-v4.md`
-through `ACR-003` (Extension Stack Architecture). V4 is NOT frozen until the
-Architect explicitly approves ACR-003. V4 preserves V3 except for the Extension
-Stack boundary (Extension → ExtensionRegistry → ExtensionRuntime).
+The current canonical Domain Architecture is `IAAS-DOM-ARCH-4`, published in `spec/domain-architecture-v4.md` and frozen by `ACR-003` through WORK-015.
 
-V2 preserved V1 except for the `VerifiedEvidenceContext` boundary (ACR-001).
-V1 was produced by WORK-002 (Repository Baseline and Domain Architecture V1).
+V4 inherits all V3 rules and adds the frozen Extension Stack boundary: `Extension → ExtensionRegistry → ExtensionRuntime → ExtensionProvenance`.
 
-The existing `docs/architecture/` corpus remains repository evidence; no version
-silently replaces the constitution. Domain architecture changes beyond the
-approved version require a new Architecture Change Request.
+`DOM-P04` is superseded by `DOM-018..DOM-022` under approved ACR-003. `DOM-P05..P08` remain FUTURE/OPEN/RESEARCH.
+
+Historical architecture versions remain immutable and are never rewritten in place.
+
+The existing `docs/architecture/` corpus remains repository evidence; it does not silently replace the canonical architecture. Further architectural change requires a new Architecture Change Request and architecture version.
