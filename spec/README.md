@@ -5,16 +5,20 @@ This directory is the persistent planning and governance layer for IAAS implemen
 ## Documents
 
 - `architecture.md` — architecture-version index and domain-architecture authority map.
-- `architecture-lock.md` — frozen governance rules and workflow invariants.
-- `requirements.md` — stable requirements and acceptance criteria.
+- `architecture-lock.md` — frozen architecture rules and workflow invariants.
+- `requirements.md` — governance requirements and acceptance criteria.
 - `work-items.md` — bounded implementation units and lifecycle.
-- `dependency-graph.md` — eligibility and dependency graph.
+- `dependency-graph.md` — Work Item eligibility/dependency graph.
 - `work-order-template.md` — canonical implementation-agent handoff format.
 - `architecture-change-request.md` — controlled architecture evolution protocol.
+- `architecture-change-requests/ACR-001.md` — approved promotion of VerifiedEvidenceContext.
 - `verification.md` — evidence and verification protocol.
-- `domain-architecture.md` — canonical Domain Architecture V1 (`IAAS-DOM-ARCH-1`, FROZEN).
-- `domain-requirements.md` — domain requirements derived from `IAAS-DOM-ARCH-1`.
-- `domain-dependency-graph.md` — domain primitive dependency DAG derived from `IAAS-DOM-ARCH-1`.
+- `domain-architecture.md` — immutable Domain Architecture V1 (`IAAS-DOM-ARCH-1`, SUPERSEDED).
+- `domain-architecture-v2.md` — current canonical Domain Architecture V2 (`IAAS-DOM-ARCH-2`, FROZEN).
+- `domain-requirements.md` — V1 domain requirements.
+- `domain-requirements-v2.md` — V2 domain requirements (`DOM-013`).
+- `domain-dependency-graph.md` — V1 domain primitive dependency DAG.
+- `domain-dependency-graph-v2.md` — V2 dependency delta for VerifiedEvidenceContext.
 
 ## Authority Model
 
