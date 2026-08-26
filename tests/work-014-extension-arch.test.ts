@@ -296,11 +296,24 @@ describe('WORK-014 — DOM-P04 non-promotion (W014-AC08)', () => {
     expect(domP04Line).not.toContain('SUPERSEDED')
   })
 
-  test('V4 candidate requirements mark DOM-P04 as SUPERSEDED pending ACR-003 approval', () => {
+  test('V4 candidate requirements state DOM-P04 remains FUTURE (not SUPERSEDED) until V4 freeze (AR-014-05)', () => {
     const src = readSpec('domain-requirements-v4.md')
     expect(src).toContain('DOM-P04')
-    expect(src).toContain('SUPERSEDED by DOM-018..DOM-022')
-    expect(src).toContain('pending ACR-003 approval')
+    expect(src).toContain('remains FUTURE/OPEN/RESEARCH')
+    expect(src).toContain('does NOT transition')
+    expect(src).toContain('out of FUTURE until ACR-003 is approved')
+    // Must NOT say SUPERSEDED for DOM-P04
+    expect(src).not.toContain('SUPERSEDED by DOM-018')
+  })
+
+  test('V4 candidate architecture states DOM-P04 remains FUTURE until V4 freeze (AR-014-05)', () => {
+    const src = readSpec('domain-architecture-v4.md')
+    expect(src).toContain('DOM-P04')
+    expect(src).toContain('remains')
+    expect(src).toContain('FUTURE/OPEN/RESEARCH')
+    expect(src).toContain('does NOT transition out of FUTURE')
+    // Must NOT say SUPERSEDED for DOM-P04
+    expect(src).not.toMatch(/DOM-P04.*SUPERSEDED/)
   })
 
   test('architecture.md registers V3 as FROZEN (not V4)', () => {

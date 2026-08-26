@@ -339,9 +339,11 @@ All V3 rules remain unchanged:
   independence, PostgreSQL mandate, Phase 14A–14F primitives, reconciliation
   anti-conflation, kernel boundary restraint.
 - All anti-drift rules (constitution §16).
-- `DOM-P04` (Extension + ExtensionRegistry + ExtensionRuntime): SUPERSEDED by
-  this V4 candidate (promoted from FUTURE to PROPOSED CONTRACT) — pending
-  ACR-003 approval. See `spec/domain-requirements-v4.md` for DOM-018..DOM-022.
+- `DOM-P04` (Extension + ExtensionRegistry + ExtensionRuntime): remains
+  FUTURE/OPEN/RESEARCH in the current canonical architecture (V3). The V4
+  candidate PROPOSES to supersede DOM-P04 with DOM-018..DOM-022, but DOM-P04
+  does NOT transition out of FUTURE until ACR-003 is approved and V4 is frozen.
+  See `spec/domain-requirements-v4.md`.
 - `DOM-P05..P08` remain FUTURE/OPEN/RESEARCH (not promoted by this version).
 
 ## 4. Technology Decisions Deferred (OPEN / RESEARCH)

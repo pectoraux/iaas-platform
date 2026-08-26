@@ -146,6 +146,7 @@ Work Items.
 - DOM-P01 (V1): SUPERSEDED by DOM-013 (V2).
 - DOM-P02 (V1): SUPERSEDED by DOM-015 (V3).
 - DOM-P03 (V1): SUPERSEDED by DOM-016 (V3).
-- DOM-P04 (V1): SUPERSEDED by DOM-018..DOM-022 (V4 candidate) — pending ACR-003
-  approval. NOT promoted until the Architect freezes V4.
+- DOM-P04 (V1): remains FUTURE/OPEN/RESEARCH. The V4 candidate PROPOSES to
+  supersede DOM-P04 with DOM-018..DOM-022, but DOM-P04 does NOT transition
+  out of FUTURE until ACR-003 is approved and V4 is frozen.
 - DOM-P05..DOM-P08 (V1): remain FUTURE/OPEN/RESEARCH (not promoted by V4).
