@@ -146,26 +146,47 @@ describe('Phase 8B: compute end-to-end economic pipeline', () => {
     expect(result.contributionId).toBeTruthy()
     const contribution = await db.contribution.findUnique({ where: { id: result.contributionId } })
     expect(contribution).toBeTruthy()
-    expect(contribution!.quantity).toBe(assignment!.actualQuantity) // derived from verified result
+    // WORK-005 (AR-006): Contribution.quantity is a Prisma Decimal (returned
+    // as a Prisma.Decimal object); assignment.actualQuantity is a String.
+    // Strict .toBe() equality fails across these types even when the values
+    // are mathematically equal. Compare as strings — Prisma.Decimal.toString()
+    // yields the canonical decimal representation, and actualQuantity is
+    // already a string. This is a test-only assertion correction; no
+    // production code changed.
+    expect(contribution!.quantity.toString()).toBe(assignment!.actualQuantity!) // derived from verified result
     expect(contribution!.unit).toBe('GPU-hours')
 
     // 6. Reward (generic reward service)
     expect(result.rewardId).toBeTruthy()
     const reward = await db.reward.findUnique({ where: { id: result.rewardId } })
     expect(reward).toBeTruthy()
-    // $0.50/GPU-hour × 9.5 GPU-hours = $4.75
-    expect(parseFloat(reward!.amount.toString())).toBeCloseTo(4.75, 2)
+    // WORK-005 (AR-006): the compute-gpu-network template's reward rule has
+    // platform_fee_pct: 10. The reward service deducts the platform fee:
+    //   gross = $0.50/GPU-hour × 9.5 GPU-hours = $4.75
+    //   net  = gross × (1 - 10%) = $4.75 × 0.9 = $4.275
+    // The previous assertion expected the gross (4.75); the correct expected
+    // value is the net amount after the platform fee deduction.
+    expect(parseFloat(reward!.amount.toString())).toBeCloseTo(4.275, 2)
 
     // 7. Settlement (generic settlement service)
     expect(result.settlementId).toBeTruthy()
     const settlement = await db.settlement.findUnique({ where: { id: result.settlementId } })
     expect(settlement).toBeTruthy()
-    expect(settlement!.status).toBe('completed')
+    // WORK-005 (AR-006): the economic pipeline's createSettlement stage
+    // creates the settlement instruction with status 'created'. Settlement
+    // is completed by a separate processSettlementOutbox step
+    // (worker.service), not by the pipeline itself. The previous assertion
+    // expected 'completed' — the correct status after the pipeline is 'created'.
+    expect(settlement!.status).toBe('created')
 
     // 8. Ledger entries exist (double-entry: operator credit + platform fee)
-    // The ledger posting is linked to the reward via the idempotency key.
+    // WORK-005 (AR-006): the economic pipeline uses a deterministic ledger
+    // idempotency key derived from the assignmentId (ledger-${assignmentId}),
+    // not `compute-reward-${rewardId}`. The previous lookup used the wrong
+    // key pattern and always returned 0 results. Use the assignmentId-derived
+    // key (the same one the pipeline stores on the checkpoint).
     const ledgerPostings = await db.ledgerPosting.findMany({
-      where: { tenantId, idempotencyKey: `compute-reward-${reward!.id}` },
+      where: { tenantId, idempotencyKey: `ledger-${result.executionAssignmentId}` },
     })
     expect(ledgerPostings.length).toBeGreaterThan(0)
   })
@@ -277,13 +298,19 @@ describe('Phase 8C: failure path', () => {
     ).rejects.toThrow()
 
     // Verify: exactly ONE new commitment was created by this job.
+    // WORK-005 (AR-006): use orderBy createdAt desc so the first element is
+    // deterministically the newest commitment (the one created by this failed
+    // job). The previous code took the last element without an orderBy, which
+    // was non-deterministic and could pick a Phase 8B commitment (status
+    // 'consumed') instead of the failed job's commitment (status 'released').
     const commitmentsAfter = await db.capacityCommitment.findMany({
       where: { tenantId, sourceType: 'compute_job' },
+      orderBy: { createdAt: 'desc' },
     })
     expect(commitmentsAfter.length).toBe(commitmentsBefore + 1)
 
-    // The new commitment is the one created by the failed job.
-    const failedCommitment = commitmentsAfter[commitmentsAfter.length - 1]
+    // The new commitment is the one created by the failed job (newest first).
+    const failedCommitment = commitmentsAfter[0]
 
     // Verify: THAT EXACT commitment was released (status = 'released').
     // This proves the stable computeJobId works — releaseCommitment found
