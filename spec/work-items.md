@@ -223,7 +223,7 @@ Definition of Done: affected tests establish prerequisites deterministically; re
 
 ## WORK-006 — Baseline Typecheck and Architecture Contract Recovery
 
-Status: `READY`
+Status: `VERIFIED`
 
 Architecture Version: `IAAS-GOV-ARCH-1`
 
@@ -267,3 +267,51 @@ Required Verification:
 - independent Architect Review.
 
 Definition of Done: Typecheck and Architecture Contract failures within scope are eliminated; residuals are evidenced; PostgreSQL remains green; no architecture drift; PR merged; Work Item VERIFIED.
+
+## WORK-007 — Typecheck Residual Closure and TypeScript Project Boundaries
+
+Status: `READY`
+
+Architecture Version: `IAAS-GOV-ARCH-1`
+
+Domain Architecture: `IAAS-DOM-ARCH-2` (FROZEN)
+
+Dependencies: `WORK-006`
+
+Requirements: `BASE-011` through `BASE-014`; inherited frozen runtime, vertical-neutrality, and repository-governance boundaries.
+
+Objective: close the five residual Typecheck failures left after WORK-006 without weakening the compiler gate: fix the genuine production `baselineEngine` defect and establish explicit, testable TypeScript project boundaries for `examples/` and `skills/` rather than silently excluding broken code.
+
+Repository Scope: `src/lib/services/vpp.service.ts` and directly related production types; root and auxiliary `tsconfig*.json` / TypeScript project configuration required to establish explicit boundaries; targeted auxiliary configuration/tests; targeted regression tests; CI/test configuration required to validate the boundaries; WORK-007 evidence; governance test updates required solely because WORK-007 is issued.
+
+Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-2` remain FROZEN; do not change RuntimeRegistry, InfrastructureRuntime, ProtocolRuntime, HybridRuntime, Economic Pipeline, Data Plane, ledger, or Prisma schema; generic kernel/runtime code remains vertical-neutral; PostgreSQL remains canonical; do not weaken TypeScript strictness or introduce compiler-wide suppression.
+
+Out of Scope: new domain primitives/network features; runtime/economic/data-plane architecture redesign; unrelated dependency expansion; `any`, `@ts-ignore`, `@ts-expect-error`, `skipLibCheck`, or broad unexplained exclusions; frozen architecture changes; WORK-008+.
+
+Acceptance Criteria:
+
+- `W007-AC01` residual Typecheck failures are reproduced and classified with concrete evidence.
+- `W007-AC02` baselineEngine production Typecheck failure is eliminated without suppression while preserving dynamic-import behavior.
+- `W007-AC03` TypeScript project boundaries are explicit and each auxiliary tree is either validated by its own project configuration or explicitly classified as non-application material.
+- `W007-AC04` no broken auxiliary TypeScript code is silently hidden by an unexplained broad exclusion.
+- `W007-AC05` final IAAS application `tsc --noEmit` is clean.
+- `W007-AC06` Architecture Contract Tests, PostgreSQL integration tests, specification validation, and lint remain green.
+- `W007-AC07` frozen runtime architecture, vertical neutrality, and Data Plane ↔ Economic Pipeline independence remain intact.
+- `W007-AC08` regression tests prove the baselineEngine typing boundary and TypeScript project-boundary decision.
+- `W007-AC09` residual auxiliary-project failures, if any, are explicitly classified and assigned rather than concealed.
+- `W007-AC10` no frozen architecture version is modified and no ACR is required unless a genuine architectural contradiction is demonstrated.
+
+Required Verification:
+
+- clean-main residual Typecheck capture;
+- final IAAS application `tsc --noEmit`;
+- any auxiliary TypeScript project checks established by WORK-007;
+- baselineEngine targeted regression test;
+- Architecture Contract Test suite;
+- PostgreSQL integration suite;
+- specification validator;
+- lint;
+- exact diff/scope verification;
+- independent Architect Review.
+
+Definition of Done: residual Typecheck failures are objectively classified; baselineEngine is fixed with regression evidence; TypeScript project boundaries are explicit and validated; IAAS application Typecheck is clean; all existing CI gates remain green; evidence is recorded; PR merged; Work Item VERIFIED.
