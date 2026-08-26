@@ -440,7 +440,7 @@ Required Verification:
 - PostgreSQL integration tests for tenant isolation and concurrent registration;
 - static import/anti-dependency tests;
 - explicit test that registry does not execute transforms;
-- explicit test that TransformRuntime remains absent;
+- explicit test that TransformRuntime remains unimplemented;
 - full CI evidence and exact PR diff inspection;
 - independent Architect Review.
 
@@ -493,7 +493,7 @@ Definition of Done: TransformRuntime satisfies DOM-016 without architecture drif
 
 ## WORK-012 — Transform Stack Truth Synchronization
 
-Status: `READY`
+Status: `VERIFIED`
 
 Architecture Version: `IAAS-GOV-ARCH-1`
 
@@ -531,3 +531,51 @@ Required Verification:
 - exact diff/scope inspection.
 
 Definition of Done: V3 status truth is synchronized; historical versions remain intact; no unrelated future primitive promoted; regression protection exists; all CI gates green; PR submitted for independent Architect Review.
+
+## WORK-013 — Transform Stack End-to-End Conformance and Integration Hardening
+
+Status: `READY`
+
+Architecture Version: `IAAS-GOV-ARCH-1`
+
+Domain Architecture: `IAAS-DOM-ARCH-3` (FROZEN)
+
+Dependencies: `WORK-012`
+
+Requirements: `DOM-014`, `DOM-015`, `DOM-016`, `DOM-017`; inherited V3 anti-dependency and PostgreSQL requirements.
+
+Objective: prove the implemented Transform Stack behaves correctly as one coherent subsystem across TransformRegistry, TransformRuntime, TransformRecord, tenant isolation, idempotency, failure semantics, and architectural boundaries, without introducing concrete vertical transforms or new architecture.
+
+Repository Scope: service-layer TransformRegistry/TransformRuntime integration tests, TransformRecord integration tests, specification/architecture regression tests needed to prove the V3 contracts, CI/test configuration required to run the bounded conformance suite, and WORK-013 evidence.
+
+Architecture Constraints: `IAAS-GOV-ARCH-1` and `IAAS-DOM-ARCH-3` remain FROZEN; registry remains the sole catalog authority; runtime remains the sole executor; TransformRecord remains immutable provenance; PostgreSQL remains the durable source of truth; tenant isolation is mandatory; no vertical services, EconomicPipeline, Route/Transport, RuntimeRegistry, or kernel coupling; no concrete transform implementation is introduced.
+
+Out of Scope: new Transform primitives, architecture-version changes, concrete compression/encryption/VPP/Compute transforms, marketplace/licensing, SDK, sandbox technology, cryptographic certification architecture, TransformRegistry/Runtime redesign, Prisma schema redesign, Economic Pipeline integration, Data Plane changes, extensions, WORK-014+.
+
+Acceptance Criteria:
+
+- `W013-AC01` an end-to-end integration path proves registry registration → runtime resolution → execution → immutable TransformRecord provenance.
+- `W013-AC02` tenant isolation is proven across registry lookup, runtime resolution, execution, and provenance.
+- `W013-AC03` deterministic idempotency is proven across repeated identical execution attempts.
+- `W013-AC04` failure paths produce explicit failed provenance and do not create contradictory durable state.
+- `W013-AC05` TransformRegistry remains catalog/discovery authority and never executes transforms.
+- `W013-AC06` TransformRuntime remains the sole executor and resolves through TransformRegistry.
+- `W013-AC07` TransformRecord remains immutable, service-layer provenance and is not mutated after creation.
+- `W013-AC08` V3 anti-dependencies remain mechanically enforced: no vertical/EconomicPipeline/Route/Transport/RuntimeRegistry/kernel imports.
+- `W013-AC09` PostgreSQL is the durable source of registry/provenance state and tests prove clean-database determinism.
+- `W013-AC10` no concrete transform implementation, new architecture version, schema redesign, or unrelated production behavior is introduced.
+- `W013-AC11` the complete bounded conformance suite and all existing governance/engineering CI gates pass with objective evidence.
+
+Required Verification:
+
+- PostgreSQL end-to-end registry → runtime → provenance integration suite;
+- tenant-isolation integration tests;
+- idempotency/replay convergence tests;
+- failure/provenance consistency tests;
+- TransformRegistry authority regression tests;
+- TransformRecord immutability tests;
+- static anti-dependency architecture tests;
+- specification validator; Typecheck; Architecture Contract Tests; PostgreSQL; lint; exact diff/scope inspection;
+- independent Architect Review.
+
+Definition of Done: W013 acceptance criteria are objectively verified; all existing gates remain green; no architecture drift or concrete transform implementation is introduced; evidence is recorded; PR merged; Work Item VERIFIED by the Architect.
