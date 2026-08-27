@@ -29,6 +29,7 @@
 import { db } from '@/lib/db'
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
+import { revokeActiveExecutionsForExtension } from '@/lib/services/active-execution-registry.service'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -288,6 +289,27 @@ export async function updateExtensionCertification(
 // Revocation Metadata
 // ---------------------------------------------------------------------------
 
+/**
+ * Revoke an Extension (V4 §2.7 / V5 §2.5 terminal state).
+ *
+ * AR-021-17: revocation is DURABLE in PostgreSQL, then — synchronously, with
+ * no await in between — the ActiveExecutionRegistry termination hook fires:
+ *
+ *   ExtensionRegistry.revokeExtension(...)        (this function)
+ *       ↓ durable db.update → lifecycleState='revoked'
+ *   ActiveExecutionRegistry.revokeActiveExecutionsForExtension(...)
+ *       ↓ (marks the revoked-execution ledger + revokes every active
+ *          SandboxExecutionHandle of this extension)
+ *   SandboxExecutionHandle.revoke()
+ *       ↓
+ *   termination (SIGTERM/SIGKILL owned by the sandbox host)
+ *
+ * This is the authoritative control path required by V5 §2.5 ("revoked:
+ * terminal state; future execution denied and active context terminated"):
+ * an extension revoked in the catalog can never leave an already-running
+ * sandbox execution alive. The registry DELEGATES termination to the
+ * ActiveExecutionRegistry — it does not execute extensions.
+ */
 export async function revokeExtension(
   tenantId: string,
   extensionType: string,
@@ -319,12 +341,23 @@ export async function revokeExtension(
     },
   })
 
+  // AR-021-17 (V5 §2.5): the revocation is now DURABLE. Fire the termination
+  // hook SYNCHRONOUSLY (no await between the durable update and the hook) so
+  // that no active sandbox execution of this extension survives the durable
+  // revocation. Race-safe: registrations that raced with this update were
+  // either already in the ActiveExecutionRegistry (revoked now) or arrive
+  // after the revoked-ledger mark (refused at registration).
+  const termination = revokeActiveExecutionsForExtension(tenantId, extensionType, extensionVersion)
+
   await appendAudit({
     tenantId, actorId,
     eventType: 'extension_registry.entry_revoked' as never,
     resourceType: 'extension_registry_entry',
     resourceId: entry.id,
-    metadata: { extensionType, extensionVersion, reason: update.reason },
+    metadata: {
+      extensionType, extensionVersion, reason: update.reason,
+      activeExecutionsTerminated: termination.executionIds.length,
+    },
   })
 
   return toResult(updated)
@@ -372,12 +405,26 @@ export async function transitionLifecycle(
     data: { lifecycleState: targetState },
   })
 
+  // AR-021-17 (V5 §2.5): transitionLifecycle is the second durable path to
+  // the `revoked` lifecycle state. Fire the SAME termination hook
+  // synchronously after the durable update so the "revoked → active context
+  // terminated" contract holds regardless of which API path reached it.
+  let activeExecutionsTerminated = 0
+  if (targetState === LIFECYCLE_STATE.REVOKED) {
+    const termination = revokeActiveExecutionsForExtension(tenantId, extensionType, extensionVersion)
+    activeExecutionsTerminated = termination.executionIds.length
+  }
+
   await appendAudit({
     tenantId, actorId,
     eventType: 'extension_registry.lifecycle_transition' as never,
     resourceType: 'extension_registry_entry',
     resourceId: entry.id,
-    metadata: { extensionType, extensionVersion, from: currentState, to: targetState },
+    metadata: {
+      extensionType, extensionVersion,
+      from: currentState, to: targetState,
+      ...(activeExecutionsTerminated > 0 ? { activeExecutionsTerminated } : {}),
+    },
   })
 
   return toResult(updated)

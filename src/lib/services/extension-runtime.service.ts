@@ -41,6 +41,11 @@ import { NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { sha256 } from '@/lib/domain/crypto'
 import { getExtension } from '@/lib/services/extension-registry.service'
 import type { ExtensionRegistryEntryResult } from '@/lib/services/extension-registry.service'
+import {
+  beginSandboxExecution,
+  attachSandboxHandle,
+  endSandboxExecution,
+} from '@/lib/services/active-execution-registry.service'
 
 // ---------------------------------------------------------------------------
 // Extension Abstract Contract (DOM-018)
@@ -141,6 +146,11 @@ export interface ExtensionProvenancePayload {
     error: string
     errorType: string
     denialReason?: string
+    /** AR-021-19: explicit sandbox termination cause ('revoked' | 'timeout' |
+     * 'fuel_exhausted' | 'memory_exceeded' | 'cpu_time_exceeded') when the
+     * failure is a SandboxTerminatedError. Records the INITIATING cause as
+     * tracked by the sandbox host — never inferred from a signal. */
+    terminationReason?: string
   }
   /** SHA-256 fingerprint of the material fields (V4 §2.4). */
   fingerprint: string
@@ -292,6 +302,22 @@ export interface ExtensionExecutionInput {
    * default sink is used.
    */
   provenanceSink?: ExtensionProvenanceSink
+  /**
+   * WORK-021 (V5 §2): optional WASM module bytes for untrusted sandboxed
+   * execution. When provided, the runtime routes execution through the
+   * SandboxHost instead of the in-memory ExtensionContract dispatch table.
+   *
+   * V5 §2.7: if a sandboxHost is required but not available (or the module
+   * is provided but no sandbox is installed), execution is denied with
+   * denialReason='sandbox_unavailable'. No silent unsandboxed fallback.
+   */
+  wasmModule?: Buffer
+  /**
+   * WORK-021 (V5 §2): optional SandboxHost override. If not provided but
+   * wasmModule is set, the runtime uses the default SandboxHost
+   * (getSandboxHost()). If the default is unavailable, deny-by-default.
+   */
+  sandboxHost?: import('@/lib/services/sandbox-host.service').SandboxHost
 }
 
 export interface ExtensionExecutionResult {
@@ -435,8 +461,11 @@ export async function executeExtension(
     )
   }
 
-  // 6. Implementation must be available.
-  if (!impl) {
+  // 6. Implementation must be available (for trusted in-memory extensions).
+  //    If wasmModule is provided (V5 §2 — untrusted sandboxed execution),
+  //    the sandbox is the implementation — no in-memory impl is needed.
+  const useSandbox = input.wasmModule !== undefined
+  if (!useSandbox && !impl) {
     const denialReason: ExtensionDenialReason = {
       kind: 'implementation_missing',
       reason: `no executable implementation registered for ${input.extensionType}@${input.extensionVersion}`,
@@ -448,40 +477,159 @@ export async function executeExtension(
     )
   }
 
-  // 7. Execute the extension.
+  // 6a. WORK-021 (V5 §2.7): if sandboxed execution is requested, verify the
+  //     sandbox is available. Deny-by-default if not — no silent unsandboxed
+  //     fallback.
+  //     The resolved SandboxHost is hoisted so that steps 6b and 7 run without
+  //     any await between registration and handle attachment (AR-021-17
+  //     race-safety: begin → executeWithHandle → attach is one synchronous
+  //     block).
+  let sandbox: import('@/lib/services/sandbox-host.service').SandboxHost | null = null
+  if (useSandbox) {
+    const { getSandboxHost, SandboxUnavailableError } = await import('@/lib/services/sandbox-host.service')
+    sandbox = input.sandboxHost ?? getSandboxHost()
+    if (!sandbox.isAvailable()) {
+      const denialReason: ExtensionDenialReason = {
+        kind: 'sandbox_unavailable',
+        reason: 'sandbox is unavailable: deny-by-default (V5 §2.7). No unsandboxed fallback is permitted.',
+      }
+      await emitFailedProvenance(tenantId, input, registryEntry, inputHash, ceiling, denialReason)
+      throw new SandboxUnavailableError(denialReason.reason)
+    }
+  }
+
+  // 6b. AR-021-17 (V5 §2.5): register the execution in the AUTHORITATIVE
+  //     ActiveExecutionRegistry BEFORE the sandbox is spawned. This is the
+  //     control point that connects ExtensionRegistry.revokeExtension(...)
+  //     → ActiveExecutionRegistry.revokeActiveExecutionsForExtension(...)
+  //     → SandboxExecutionHandle.revoke() → termination.
+  //
+  //     Race-safe: registration atomically (a) refuses when the extension is
+  //     in the revoked-execution ledger (a durable revoke raced with this
+  //     execution), and (b) inserts the entry so the termination hook can
+  //     reach it. The begin → executeWithHandle → attach sequence below is
+  //     synchronous, so a revoke can only land before it (ledger refusal) or
+  //     after it (hook revokes the registered handle) — never in a window
+  //     where a spawned sandbox is untracked.
+  let activeExecutionId: string | null = null
+  if (useSandbox) {
+    const begin = beginSandboxExecution({
+      tenantId,
+      extensionType: input.extensionType,
+      extensionVersion: input.extensionVersion,
+      idempotencyKey: input.idempotencyKey,
+    })
+    if (!begin.ok) {
+      // The extension became durably revoked between the catalog read (step 1)
+      // and this registration. V5 §2.5: future execution denied. Emit failed
+      // provenance and deny — no sandbox is spawned.
+      const refusalDenial: ExtensionDenialReason = {
+        kind: 'revoked',
+        reason: begin.reason,
+      }
+      await emitFailedProvenance(tenantId, input, registryEntry, inputHash, ceiling, refusalDenial)
+      throw new ValidationError(
+        `Extension ${input.extensionType}@${input.extensionVersion} execution denied: ${refusalDenial.reason}`,
+      )
+    }
+    activeExecutionId = begin.executionId
+  }
+
+  // 7. Execute the extension (sandboxed or in-memory).
   let outputPayload: Buffer
   let resultStatus: 'success' | 'failed' = 'success'
+  // V5 §2.3 (AR-021-05 fix): when sandbox is used, capture authoritative
+  // measurements and exercised capabilities for provenance. These REPLACE
+  // the V4 ceiling-echo semantics with real measured values.
+  let measuredResourceUsage: ExtensionResourceLimits | undefined
+  let measuredCapabilitiesExercised: string[] | undefined
+  // AR-021-17: this local reference is used ONLY to await the result. The
+  // AUTHORITATIVE holder of the handle is the ActiveExecutionRegistry
+  // (registration at step 6b, attachment below, completion in the finally) —
+  // that is the control path ExtensionRegistry revocation reaches.
+  let executionHandle: import('@/lib/services/sandbox-host.service').SandboxExecutionHandle | null = null
 
   try {
-    outputPayload = await impl.execute(
-      {
-        tenantId,
-        capabilities: ceiling.capabilities,
-        resourceLimits: ceiling.resourceLimits,
-        parameters: input.parameters,
-      },
-      input.inputPayload,
-    )
+    if (useSandbox) {
+      // V5 §2: execute through the SandboxHost.
+      const sandboxCeiling = {
+        capabilities: { capabilities: ceiling.capabilities },
+        resources: {
+          executionBudget: ceiling.resourceLimits.cpuMs, // fuel budget
+          memoryBytes: ceiling.resourceLimits.memoryBytes,
+          wallTimeMs: ceiling.resourceLimits.timeMs,
+        },
+      }
+      // AR-021-17: spawn the sandbox and attach the handle to its registered
+      // entry SYNCHRONOUSLY (no await between executeWithHandle and
+      // attachSandboxHandle). If a revoke landed between registration (6b)
+      // and here, attachSandboxHandle revokes the handle immediately.
+      executionHandle = sandbox!.executeWithHandle(
+        input.wasmModule!,
+        input.inputPayload,
+        sandboxCeiling,
+      )
+      attachSandboxHandle(activeExecutionId!, executionHandle)
+      const sandboxResult = await executionHandle.result
+      outputPayload = sandboxResult.output
+      // AR-021-05 fix: wire sandbox measurements into provenance.
+      // V5 §2.3: these are AUTHORITATIVE measured values, NOT ceiling echoes.
+      // AR-021-16: usage fields are absent when unmeasurable (not filled with ceiling)
+      measuredResourceUsage = {
+        // wallTimeMs is the only REAL measured time value
+        timeMs: sandboxResult.measurements.wallTimeMs, // REAL measured wall-clock
+        // cpuMs, memoryBytes, fuelUnits are ABSENT — not measurable via CLI
+      }
+      // AR-021-15: capabilitiesExercised is EMPTY (not copied from grant set)
+      measuredCapabilitiesExercised = sandboxResult.capabilitiesExercised
+    } else {
+      // V4 path: execute through the in-memory ExtensionContract.
+      outputPayload = await impl!.execute(
+        {
+          tenantId,
+          capabilities: ceiling.capabilities,
+          resourceLimits: ceiling.resourceLimits,
+          parameters: input.parameters,
+        },
+        input.inputPayload,
+      )
+    }
   } catch (err) {
     // Failure semantics: emit a failed ExtensionProvenance payload, then
     // re-throw the original error. The caller does NOT get a silent success.
     resultStatus = 'failed'
+    // AR-021-19: when the sandbox terminated the execution, record the
+    // EXPLICIT initiating cause (revoked/timeout/fuel_exhausted/
+    // memory_exceeded) — never a signal-inferred guess.
+    const { SandboxTerminatedError } = await import('@/lib/services/sandbox-host.service')
+    const terminationReason =
+      err instanceof SandboxTerminatedError ? err.terminationReason : undefined
     const failureMetadata = {
       error: err instanceof Error ? err.message : String(err),
       errorType: err instanceof Error ? err.constructor.name : 'Unknown',
+      ...(terminationReason !== undefined ? { terminationReason } : {}),
     }
     const outputHash = sha256(Buffer.alloc(0).toString('hex')) // empty output on failure
 
-    await emitProvenance(tenantId, input, registryEntry, inputHash, outputHash, 'failed', ceiling, failureMetadata)
+    await emitProvenance(tenantId, input, registryEntry, inputHash, outputHash, 'failed', ceiling, failureMetadata, measuredResourceUsage, measuredCapabilitiesExercised)
 
     // Re-throw the original error (caller sees the failure).
     throw err
+  } finally {
+    // AR-021-17: the execution is no longer active — remove it from the
+    // AUTHORITATIVE ActiveExecutionRegistry. Runs on success, failure, and
+    // termination (including revocation) alike: once the result settles there
+    // is nothing left to terminate.
+    if (activeExecutionId !== null) {
+      endSandboxExecution(activeExecutionId)
+    }
   }
 
   // 8. Compute output hash.
   const outputHash = sha256(outputPayload.toString('hex'))
 
   // 9. Emit immutable ExtensionProvenance (success provenance).
+  // AR-021-05 fix: pass measured values (from sandbox) to provenance.
   const provenanceResult = await emitProvenance(
     tenantId,
     input,
@@ -491,6 +639,8 @@ export async function executeExtension(
     'success',
     ceiling,
     undefined,
+    measuredResourceUsage,
+    measuredCapabilitiesExercised,
   )
 
   return {
@@ -703,6 +853,7 @@ interface ExtensionDenialReason {
     | 'capability_not_approved'
     | 'resource_limit_exceeded'
     | 'implementation_missing'
+    | 'sandbox_unavailable'
   reason: string
 }
 
@@ -817,7 +968,12 @@ async function emitProvenance(
   outputHash: string,
   resultStatus: 'success' | 'failed',
   ceiling: ExtensionCapabilityCeiling,
-  failureMetadata?: { error: string; errorType: string; denialReason?: string },
+  failureMetadata?: { error: string; errorType: string; denialReason?: string; terminationReason?: string },
+  // AR-021-05 fix: when the sandbox is used, these are AUTHORITATIVE MEASURED
+  // values (V5 §2.3). When undefined (V4 in-memory path), the ceiling values
+  // are used (V4 ceiling-echo semantics).
+  measuredResourceUsage?: ExtensionResourceLimits,
+  measuredCapabilitiesExercised?: string[],
 ): Promise<{ recordId: string; status: 'created' | 'replay' }> {
   const payload = computeProvenancePayload({
     tenantId,
@@ -827,8 +983,9 @@ async function emitProvenance(
     inputHash,
     outputHash,
     resultStatus,
-    resourceUsage: ceiling.resourceLimits,
-    capabilitiesExercised: ceiling.capabilities,
+    // AR-021-05: use measured values when available (sandbox); otherwise ceiling (V4)
+    resourceUsage: measuredResourceUsage ?? ceiling.resourceLimits,
+    capabilitiesExercised: measuredCapabilitiesExercised ?? ceiling.capabilities,
     tenantApprovedCeiling: ceiling.tenantApprovedCeiling,
     failureMetadata,
   })
@@ -859,7 +1016,7 @@ function computeProvenancePayload(input: {
   resourceUsage: ExtensionResourceLimits
   capabilitiesExercised: string[]
   tenantApprovedCeiling: { capabilities: string[]; resourceLimits: ExtensionResourceLimits }
-  failureMetadata?: { error: string; errorType: string; denialReason?: string }
+  failureMetadata?: { error: string; errorType: string; denialReason?: string; terminationReason?: string }
 }): ExtensionProvenancePayload {
   const fingerprint = computeExtensionProvenanceFingerprint({
     tenantId: input.tenantId,

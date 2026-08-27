@@ -25,7 +25,7 @@ WORK-019 -> WORK-020
 WORK-020 -> WORK-021
 ```
 
-WORK-001 through WORK-020 are VERIFIED in dependency order. `IAAS-DOM-ARCH-4` remains immutable historical architecture and `IAAS-DOM-ARCH-5` is the current frozen domain architecture. WORK-020 is VERIFIED after approved ACR-004 and V5 freeze. WORK-021 depends on WORK-020; that dependency is satisfied, so WORK-021 is READY and is the only eligible implementation Work Item.
+WORK-001 is VERIFIED. WORK-001 through WORK-020 are VERIFIED in dependency order. `IAAS-DOM-ARCH-4` remains immutable historical architecture and `IAAS-DOM-ARCH-5` is the current frozen domain architecture. WORK-020 is VERIFIED after approved ACR-004 and V5 freeze. WORK-021 depends on WORK-020; that dependency is satisfied, so WORK-021 is READY and is the only eligible implementation Work Item.
 
 A Work Item is eligible only when its architecture version is valid, all dependencies exist and are VERIFIED, acceptance/verification data is complete, no unresolved architecture change blocks it, and it has at most one active implementation PR.
 
