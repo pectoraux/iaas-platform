@@ -12,7 +12,7 @@ ARCHITECT_REVIEW -> ARCHITECTURE_CHANGE_REQUIRED -> ARCHITECTURE_CHANGE_REQUEST
 ARCHITECT_REVIEW -> IMPLEMENTATION_BLOCKED -> IMPLEMENTING
 ```
 
-WORK-001 is VERIFIED. WORK-001 through WORK-017 are VERIFIED in dependency order. `IAAS-DOM-ARCH-4` is the current frozen domain architecture. WORK-018 is READY and is the only eligible implementation Work Item.
+WORK-001 is VERIFIED. WORK-001 through WORK-018 are VERIFIED in dependency order. `IAAS-DOM-ARCH-4` is the current frozen domain architecture. WORK-019 is READY and is the only eligible Work Item.
 
 ## WORK-001 — WorkflowOS Specification and Governance Foundation
 Status: `VERIFIED`
@@ -255,7 +255,7 @@ Required Verification: unit; PostgreSQL; lifecycle; capability/resource; failure
 Definition of Done: DOM-020 implemented without architecture drift; objective evidence recorded; one active PR; verification passes; Architect approves; PR merges; WORK-017 VERIFIED.
 
 ## WORK-018 — ExtensionProvenance Durable Persistence
-Status: `READY`
+Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
 Dependencies: `WORK-017`
 Requirements: `DOM-022`; inherited V4 Extension Stack provenance requirements.
@@ -266,3 +266,16 @@ Out of Scope: sandbox selection/implementation; concrete extensions; Marketplace
 Acceptance Criteria: `W018-AC01` immutable 11-field provenance record; `W018-AC02` tenant isolation; `W018-AC03` SHA-256 fingerprint over frozen material fields; `W018-AC04` one durable record per tenant/idempotency key with concurrent convergence; `W018-AC05` success/failure persistence preserving failed-rethrow semantics; `W018-AC06` provenance service owns persistence separately from Runtime; `W018-AC07` PostgreSQL durable source and no update/delete path; `W018-AC08` no prohibited dependencies; `W018-AC09` all required gates and independent Architect Review.
 Required Verification: unit; PostgreSQL; concurrent idempotency; tenant isolation; immutability; fingerprint determinism; failure provenance; anti-dependency; validator; Typecheck; Architecture Contract Tests; PostgreSQL suite; lint; exact scope; Architect Review.
 Definition of Done: DOM-022 implemented without architecture drift; evidence recorded; one active PR; verification passes; Architect approves; PR merges; WORK-018 VERIFIED.
+
+## WORK-019 — Sandbox Architecture and ACR-004
+Status: `READY`
+Architecture Version: `IAAS-DOM-ARCH-4`
+Dependencies: `WORK-018`
+Requirements: frozen V4 §2.8 Security and Isolation; deferred sandbox area
+Objective: produce an ACR for sandbox technology and isolation semantics for the Extension Stack without implementing any sandbox technology.
+Repository Scope: architecture/change-control documents, candidate requirements/dependency artifacts if needed, regression tests, evidence.
+Architecture Constraints: V4 remains FROZEN; sandbox remains OPEN/RESEARCH until explicit architecture decision; no production sandbox implementation; no concrete extensions; no redesign of implemented Registry/Runtime/Provenance beyond documented ACR deltas.
+Out of Scope: WASM/WASI implementation, containers, native plugin processes, seccomp/namespaces/microVM/gVisor/Firecracker implementation, concrete extensions, Marketplace, SDK, licensing, economics, DOM-P06..P08 promotion, WORK-020.
+Acceptance Criteria: `W019-AC01` ACR-004 identifies problem, affected contracts, alternatives, and recommendation; `W019-AC02` trust boundary explicit; `W019-AC03` capability/resource authority explicit; `W019-AC04` lifecycle/revocation/termination semantics explicit; `W019-AC05` provenance and authoritative resource measurement explicit; `W019-AC06` tenant isolation and compromise containment explicit; `W019-AC07` portability/deployment/operational trade-offs evaluated; `W019-AC08` fallback/unavailability semantics explicit; `W019-AC09` V4 impact and need for successor architecture version explicit; `W019-AC10` regression tests prove V4 immutability and no sandbox implementation; `W019-AC11` required gates and Architect Review pass.
+Required Verification: architecture inspection; alternative comparison; security boundary tests; V4 immutability; no-implementation/static scope tests; specification validator; Typecheck; Architecture Contract Tests; lint; exact diff-scope review; independent Architect Review.
+Definition of Done: ACR-004 complete; evidence recorded; required gates pass; Architect verdict recorded; no sandbox implementation begins without a separately approved architecture version.
