@@ -26,7 +26,7 @@ jobs:
       - name: Run specification consistency validator
         run: bun run spec:validate
       - name: Run specification and architecture regression tests
-        run: bun test tests/spec-consistency-validator.test.ts tests/pr-invariant-check.test.ts tests/work-002-baseline.test.ts tests/work-003-verified-evidence-context.test.ts tests/work-005-fixture-isolation.test.ts tests/work-008-truth-reconciliation.test.ts tests/work-009-transform-arch-freeze.test.ts tests/work-010-transform-registry.test.ts tests/work-011-transform-runtime.test.ts tests/work-012-truth-sync.test.ts tests/work-013-transform-conformance.test.ts tests/work-014-extension-arch.test.ts tests/work-015-v4-freeze.test.ts tests/work-016-extension-registry.test.ts tests/work-017-extension-runtime.test.ts --timeout 120000
+        run: bun test tests/spec-consistency-validator.test.ts tests/pr-invariant-check.test.ts tests/work-002-baseline.test.ts tests/work-003-verified-evidence-context.test.ts tests/work-005-fixture-isolation.test.ts tests/work-008-truth-reconciliation.test.ts tests/work-009-transform-arch-freeze.test.ts tests/work-010-transform-registry.test.ts tests/work-011-transform-runtime.test.ts tests/work-012-truth-sync.test.ts tests/work-013-transform-conformance.test.ts tests/work-014-extension-arch.test.ts tests/work-015-v4-freeze.test.ts tests/work-016-extension-registry.test.ts tests/work-017-extension-runtime.test.ts tests/work-018-extension-provenance.test.ts --timeout 120000
       - name: Verify one-active-PR invariant
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -41,7 +41,7 @@ jobs:
             exit 1
           fi
           CHANGED="$(git diff --name-only "$BASE"...HEAD | sort -u)"
-          VIOLATIONS="$(printf '%s\n' "$CHANGED" | grep -Ev '^(spec/|docs/architecture/|scripts/spec-validator\.ts$|scripts/pr-invariant-check\.ts$|tests/|src/app/api/|src/app/page\.tsx$|src/lib/kernel/runtime/protocol/validator-consensus\.ts$|src/lib/services/|src/lib/domain/verified-evidence-context\.ts$|src/lib/control-plane/economic-pipeline\.ts$|prisma/schema\.prisma$|examples/tsconfig\.json$|skills/tsconfig\.json$|tsconfig\.json$|\.github/workflows/ci\.yml$|package\.json$)' || true)"
+          VIOLATIONS="$(printf '%s\n' "$CHANGED" | grep -Ev '^(spec/|docs/architecture/|scripts/spec-validator\.ts$|scripts/pr-invariant-check\.ts$|tests/|src/app/api/|src/app/page\.tsx$|src/lib/kernel/runtime/protocol/validator-consensus\.ts$|src/lib/services/|src/lib/domain/verified-evidence-context\.ts$|src/lib/control-plane/economic-pipeline\.ts$|src/lib/bootstrap/|prisma/schema\.prisma$|prisma/migrations/|examples/tsconfig\.json$|skills/tsconfig\.json$|tsconfig\.json$|\.github/workflows/ci\.yml$|package\.json$)' || true)"
           if [ -n "$VIOLATIONS" ]; then
             echo "SCOPE VIOLATION:"
             printf '%s\n' "$VIOLATIONS"
@@ -130,6 +130,6 @@ jobs:
       - name: Push schema to PostgreSQL
         run: bunx prisma db push --accept-data-loss
       - name: Run all integration tests
-        run: bun test tests/vpp-4-2-execution-invariants.test.ts tests/runtime-resolution-integration.test.ts tests/phase-5-2-execution-economics-separation.test.ts tests/phase-8b-compute-economic-pipeline.test.ts tests/phase-9b-persistent-protocol-state.test.ts tests/work-003-verified-evidence-pg.test.ts tests/work-010-transform-registry-pg.test.ts tests/work-011-transform-runtime-pg.test.ts tests/work-013-transform-conformance-pg.test.ts tests/work-016-extension-registry-pg.test.ts tests/work-017-extension-runtime-pg.test.ts --timeout 120000
+        run: bun test tests/vpp-4-2-execution-invariants.test.ts tests/runtime-resolution-integration.test.ts tests/phase-5-2-execution-economics-separation.test.ts tests/phase-8b-compute-economic-pipeline.test.ts tests/phase-9b-persistent-protocol-state.test.ts tests/work-003-verified-evidence-pg.test.ts tests/work-010-transform-registry-pg.test.ts tests/work-011-transform-runtime-pg.test.ts tests/work-013-transform-conformance-pg.test.ts tests/work-016-extension-registry-pg.test.ts tests/work-017-extension-runtime-pg.test.ts tests/work-018-extension-provenance-pg.test.ts --timeout 120000
       - name: Run runtime resolution tests
         run: bun test tests/runtime-resolution.test.ts --timeout 30000
