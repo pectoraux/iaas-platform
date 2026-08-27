@@ -12,7 +12,7 @@ ARCHITECT_REVIEW -> ARCHITECTURE_CHANGE_REQUIRED -> ARCHITECTURE_CHANGE_REQUEST
 ARCHITECT_REVIEW -> IMPLEMENTATION_BLOCKED -> IMPLEMENTING
 ```
 
-WORK-001 is VERIFIED. WORK-001 through WORK-020 are VERIFIED in dependency order. `IAAS-DOM-ARCH-5` is the current frozen domain architecture. WORK-021 is READY and is the only eligible Work Item.
+WORK-001 is VERIFIED. WORK-001 through WORK-021 are VERIFIED in dependency order. `IAAS-DOM-ARCH-5` is the current frozen domain architecture. WORK-022 is READY and is the only eligible Work Item.
 
 ## WORK-001 — WorkflowOS Specification and Governance Foundation
 Status: `VERIFIED`
@@ -294,7 +294,7 @@ Required Verification: ACR decision inspection; V5 completeness; V4 immutability
 Definition of Done: ACR-004 APPROVED; V5 FROZEN; DOM-P05 promoted; no production implementation; evidence committed; PR approved and merged; WORK-020 VERIFIED.
 
 ## WORK-021 — WASI Sandbox Host Foundation
-Status: `READY`
+Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
 Dependencies: `WORK-020`
 Requirements: V5 sandbox contract; promoted `DOM-P05`
@@ -305,3 +305,16 @@ Out of Scope: container/native sandbox; ExtensionRuntime redesign beyond integra
 Acceptance Criteria: `W021-AC01` through `W021-AC12`.
 Required Verification: real WASI module/component execution; capability denial; tenant isolation; independent resource controls; CPU-vs-fuel distinction; termination/revocation; sandbox-unavailable denial; failed provenance/rethrow; anti-dependency; Typecheck; lint; architecture tests; PostgreSQL/integration; spec validator; scope; Architect Review.
 Definition of Done: V5 sandbox contract implemented without drift; objective evidence recorded; PR verified and Architect-approved; merged; WORK-021 VERIFIED.
+
+## WORK-022 — Sandbox Lifecycle Completion
+Status: `READY`
+Architecture Version: `IAAS-GOV-ARCH-1`
+Dependencies: `WORK-021`
+Requirements: V5 sandbox contract §2.5 (lifecycle and termination); promoted `DOM-P05`
+Objective: complete the frozen V5 §2.5 sandbox lifecycle semantics on the verified WORK-021 foundation — `deactivated` terminates active sandbox execution contexts through the authoritative control path, and `installed` performs module validation without execution.
+Repository Scope: extension-registry lifecycle transitions and audit; active-execution registry deactivation semantics; sandbox-host validate-only path; extension-runtime integration where required; unit/architecture/real-WASI/PostgreSQL tests; evidence.
+Architecture Constraints: V5 remains FROZEN; ExtensionRegistry remains lifecycle/catalog authority; ExtensionRuntime remains execution/isolation authority; capability ceiling remains `min(declared, approved)`; termination through the architectural abstraction (`SandboxExecutionHandle.revoke()`); termination hook synchronous after the durable update; deactivation is reversible and never uses the terminal revoked ledger; deny-by-default preserved.
+Out of Scope: changing IAAS-DOM-ARCH-5; authoritative measurement completion for fuelUnits/cpuTimeNs/peakLinearMemoryBytes (future bounded slice); provenance schema semantics changes; container/native sandbox; concrete extensions; Marketplace/SDK; licensing/economics; vertical/kernel/data-plane coupling; WORK-023.
+Acceptance Criteria: `W022-AC01` through `W022-AC10`.
+Required Verification: static wiring checks (hook synchronous after durable deactivation update); unit; real WASI integration; PostgreSQL end-to-end golden chains (deactivation, re-activation, install-time validation); tenant isolation; Typecheck; lint; architecture tests; spec validator; CI; scope; Architect Review.
+Definition of Done: V5 §2.5 lifecycle semantics fully wired and objectively verified; evidence recorded; PR verified and Architect-approved; merged; WORK-022 VERIFIED.
