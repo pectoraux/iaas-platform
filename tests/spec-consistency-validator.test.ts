@@ -40,7 +40,7 @@ function expectFailure(specDir: string, check: string) {
 }
 
 describe('spec validator — current repository', () => {
-  test('passes deterministically with the V5 / 21-item specification', () => {
+  test('passes deterministically with the V5 / 22-item specification', () => {
     const a = run(SPEC)
     const b = run(SPEC)
     expect(a.code).toBe(0)
@@ -48,8 +48,8 @@ describe('spec validator — current repository', () => {
     expect(a.stderr).toBe('')
     expect(a.stdout).toContain('SPEC VALIDATION PASSED')
     expect(a.stdout).toContain('domain-architecture=IAAS-DOM-ARCH-4')
-    expect(a.stdout).toContain('work-items=21')
-    expect(a.stdout).toContain('dependency-edges=20')
+    expect(a.stdout).toContain('work-items=22')
+    expect(a.stdout).toContain('dependency-edges=21')
     expect(a.stdout).toBe(b.stdout)
   })
 })
@@ -91,9 +91,9 @@ describe('spec validator — mandatory negative cases', () => {
     expectFailure(s, 'SC-10')
   })
 
-  test('WORK-021 cannot be READY when its dependency is not VERIFIED', () => {
+  test('WORK-022 cannot be READY when its dependency is not VERIFIED', () => {
     const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('## WORK-020 — IAAS-DOM-ARCH-5 Freeze and DOM-P05 Promotion\nStatus: `VERIFIED`', '## WORK-020 — IAAS-DOM-ARCH-5 Freeze and DOM-P05 Promotion\nStatus: `READY`'))
+    rewrite(s, 'work-items.md', x => x.replace('## WORK-021 — WASI Sandbox Host Foundation\nStatus: `VERIFIED`', '## WORK-021 — WASI Sandbox Host Foundation\nStatus: `READY`'))
     expectFailure(s, 'SC-11')
   })
 
@@ -104,19 +104,19 @@ describe('spec validator — mandatory negative cases', () => {
   })
 })
 
-describe('V5 / WORK-020 and WORK-021 governance invariants', () => {
-  test('V5 is frozen, WORK-020 is verified, and WORK-021 is released', () => {
+describe('V5 / WORK-021 and WORK-022 governance invariants', () => {
+  test('V5 is frozen, WORK-021 is verified, and WORK-022 is released', () => {
     const items = readFileSync(join(SPEC, 'work-items.md'), 'utf8')
-    const order = readFileSync(join(SPEC, 'work-orders', 'WORK-021.md'), 'utf8')
-    expect(items).toContain('## WORK-020 — IAAS-DOM-ARCH-5 Freeze and DOM-P05 Promotion')
-    expect(items).toContain('Status: `VERIFIED`')
-    expect(items).toContain('Dependencies: `WORK-019`')
+    const order = readFileSync(join(SPEC, 'work-orders', 'WORK-022.md'), 'utf8')
     expect(items).toContain('## WORK-021 — WASI Sandbox Host Foundation')
-    expect(items).toContain('Status: `READY`')
+    expect(items).toContain('Status: `VERIFIED`')
     expect(items).toContain('Dependencies: `WORK-020`')
+    expect(items).toContain('## WORK-022 — Sandbox Lifecycle Completion')
+    expect(items).toContain('Status: `READY`')
+    expect(items).toContain('Dependencies: `WORK-021`')
     expect(order).toContain('`READY`')
     expect(order).toContain('`IAAS-DOM-ARCH-5`')
-    expect(order).toContain('`WORK-020`')
-    expect(order).toContain('sandbox')
+    expect(order).toContain('`WORK-021`')
+    expect(order).toContain('lifecycle')
   })
 })
