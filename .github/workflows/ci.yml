@@ -41,7 +41,7 @@ jobs:
             exit 1
           fi
           CHANGED="$(git diff --name-only "$BASE"...HEAD | sort -u)"
-          VIOLATIONS="$(printf '%s\n' "$CHANGED" | grep -Ev '^(spec/|docs/architecture/|scripts/spec-validator\.ts$|scripts/pr-invariant-check\.ts$|tests/|src/app/api/|src/app/page\.tsx$|src/lib/kernel/runtime/protocol/validator-consensus\.ts$|src/lib/services/|src/lib/domain/verified-evidence-context\.ts$|src/lib/control-plane/economic-pipeline\.ts$|src/lib/bootstrap/|prisma/schema\.prisma$|prisma/migrations/|examples/tsconfig\.json$|skills/tsconfig\.json$|tsconfig\.json$|\.github/workflows/ci\.yml$|package\.json$)' || true)"
+          VIOLATIONS="$(printf '%s\n' "$CHANGED" | grep -Ev '^(spec/|docs/architecture/|scripts/spec-validator\.ts$|scripts/pr-invariant-check\.ts$|tests/|src/app/api/|src/app/page\.tsx$|src/lib/kernel/runtime/protocol/validator-consensus\.ts$|src/lib/services/|src/lib/domain/verified-evidence-context\.ts$|src/lib/control-plane/economic-pipeline\.ts$|src/lib/bootstrap/|prisma/schema\.prisma$|prisma/migrations/|examples/tsconfig\.json$|skills/tsconfig\.json$|tsconfig\.json$|\.github/workflows/ci\.yml$|package\.json$|bun\.lock$)' || true)"
           if [ -n "$VIOLATIONS" ]; then
             echo "SCOPE VIOLATION:"
             printf '%s\n' "$VIOLATIONS"
