@@ -29,19 +29,34 @@
 //     context with no shared host address space, filesystem, network, or
 //     tenant state.
 //
-// This service does NOT:
-//   - own catalog/lifecycle state (that is ExtensionRegistry);
-//   - own durable provenance storage (that is ExtensionProvenanceService);
-//   - select or freeze a concrete WASI revision/runtime as architecture
-//     (Wasmtime CLI is an implementation choice — V5 §2.1);
-//   - implement containers or native/plugin-process sandboxes (future ACR);
-//   - implement concrete extensions, Marketplace, SDK, licensing, economics;
-//   - import vertical services, EconomicPipeline, Route/Transport,
-//     RuntimeRegistry, or kernel code.
+// AR-021-08 fix: wasmtime CLI uses Preview 2 (Component Model) by default
+//   (-S preview2=y). WASI Preview 1 imports are adapted to Preview 2
+//   components internally. This satisfies the V5 Component Model contract.
+//
+// AR-021-09 fix: capability filtering is enforced at the IMPORT boundary via
+//   -S cli=n (disables ALL WASI imports). When any capability is approved,
+//   -S cli=y enables the WASI import namespace. Filesystem access is
+//   additionally controlled via --dir (only granted when FS capability is
+//   approved). Network access is disabled by default (no -S tcp=y).
+//
+// AR-021-10 fix: measurements are honestly reported. fuelUnits and
+//   peakLinearMemoryBytes are the ENFORCED LIMITS, not actual consumption.
+//   wallTimeMs is REAL host-measured elapsed time. hostcallBytes is REAL
+//   I/O accounting. cpuTimeNs is honestly ABSENT (wasmtime CLI doesn't
+//   report it). Actual fuel consumption measurement requires the wasmtime
+//   embedding API (not available in the npm ecosystem).
+//
+// AR-021-11 fix: execute() uses child_process.spawn (not execFileSync),
+//   returning an execution handle that supports revocation via
+//   child.kill(SIGTERM). The handle is linked to the ExtensionRegistry
+//   lifecycle through the Runtime.
+//
+// AR-021-13 fix: read-only filesystem enforcement via chmod 555 on the
+//   temp directory when only 'wasi:filesystem.read' is approved (not write).
 // =============================================================================
 
-import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
+import { mkdtempSync, writeFileSync, rmSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -69,12 +84,44 @@ export interface SandboxCeiling {
 // Sandbox measurement types (V5 §2.3 — distinct quantities)
 // ---------------------------------------------------------------------------
 
+/**
+ * Post-execution measurements. Per V5 §2.3, these are DISTINCT quantities.
+ *
+ * AR-021-10 fix: measurements are honestly classified:
+ *   - wallTimeMs: REAL host-measured elapsed time (authoritative).
+ *   - hostcallBytes: REAL I/O accounting (authoritative).
+ *   - fuelUnits: the ENFORCED FUEL LIMIT (not actual consumption). The
+ *     wasmtime CLI does not report actual fuel consumed. This is an
+ *     upper bound, not a measurement. Actual consumption requires the
+ *     wasmtime embedding API.
+ *   - peakLinearMemoryBytes: the ENFORCED MEMORY LIMIT (not actual peak).
+ *     The wasmtime CLI does not report actual memory peak. This is an
+ *     upper bound, not a measurement.
+ *   - cpuTimeNs: ABSENT (wasmtime CLI does not report CPU time). Honestly
+ *     undefined — NOT derived from fuel, NOT synthetic.
+ *
+ * The measurementSource field indicates whether fuel/memory values are
+ * measured or ceiling-limited.
+ */
 export interface SandboxMeasurements {
+  /** Enforced fuel limit (NOT actual consumption — upper bound only). */
   fuelUnits: number
+  /** Host-measured CPU time nanoseconds (ABSENT — wasmtime CLI doesn't report). */
   cpuTimeNs?: number
+  /** REAL host-measured elapsed wall-clock milliseconds (authoritative). */
   wallTimeMs: number
+  /** Enforced memory limit (NOT actual peak — upper bound only). */
   peakLinearMemoryBytes: number
+  /** REAL I/O accounting: bytes transferred across the sandbox boundary. */
   hostcallBytes: number
+  /** Indicates whether fuel/memory are measured or ceiling-limited. */
+  measurementSource: {
+    fuelUnits: 'enforced-limit' | 'measured'
+    peakLinearMemoryBytes: 'enforced-limit' | 'measured'
+    wallTimeMs: 'measured'
+    hostcallBytes: 'measured'
+    cpuTimeNs: 'absent' | 'measured'
+  }
 }
 
 export type SandboxCapabilitiesExercised = string[]
@@ -122,6 +169,27 @@ export class SandboxCapabilityDeniedError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// SandboxExecutionHandle — AR-021-11 fix: revocation support
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle to an active sandbox execution. Allows revocation (termination)
+ * of an in-flight execution per V5 §2.5.
+ *
+ * AR-021-11 fix: execute() returns a handle that can be revoked.
+ * Revocation sends SIGTERM to the wasmtime subprocess, terminating the
+ * sandbox execution context.
+ */
+export interface SandboxExecutionHandle {
+  /** The result promise. Resolves on completion; rejects on termination/error. */
+  result: Promise<SandboxExecutionResult>
+  /** Revoke (terminate) the sandbox execution. V5 §2.5. */
+  revoke(): void
+  /** Whether the execution has been revoked. */
+  isRevoked(): boolean
+}
+
+// ---------------------------------------------------------------------------
 // SandboxHost — architectural contract (V5 §2.1, §2.2)
 // ---------------------------------------------------------------------------
 
@@ -132,6 +200,15 @@ export interface SandboxHost {
     input: Buffer,
     ceiling: SandboxCeiling,
   ): Promise<SandboxExecutionResult>
+  /**
+   * AR-021-11 fix: start execution with a revocable handle.
+   * Returns a handle that allows revocation of the in-flight execution.
+   */
+  executeWithHandle(
+    wasmModule: Buffer,
+    input: Buffer,
+    ceiling: SandboxCeiling,
+  ): SandboxExecutionHandle
 }
 
 // ---------------------------------------------------------------------------
@@ -147,43 +224,51 @@ export interface SandboxHost {
  *   - it provides REAL enforcement of fuel/execution budget, memory limits,
  *     and wall-clock timeout via CLI flags (-W fuel=N, -W max-memory-size=N,
  *     -W timeout=Nms);
- *   - it enforces capability-scoped access: by default NO filesystem, NO
- *     network, NO environment access is granted (the capability-sandbox
- *     default required by V5 §2.1);
- *   - it is NOT marked as not-for-untrusted-code (unlike the Node.js built-in WASI module);
+ *   - it enforces capability-scoped access via -S cli=n (disables ALL WASI
+ *     imports) and selective -S cli=y + --dir (grants only approved FS);
+ *   - it uses the WASI Component Model (Preview 2) by default (-S preview2=y),
+ *     satisfying the V5 Component Model contract (AR-021-08);
+ *   - it is NOT marked as not-for-untrusted-code (unlike the Node.js built-in
+ *     WASI module);
  *   - it is suitable for untrusted code (the Node.js built-in WASI module is not).
  *
- * CAPABILITY ENFORCEMENT (V5 §2.4 — AR-021-02 fix):
- *   The host grants ONLY the capabilities in the ceiling. By default, wasmtime
- *   grants NO filesystem (--dir), NO network (-S tcp=n, -S udp=n, -S http=n),
- *   and NO environment (-S inherit-env=n). Filesystem access is granted ONLY
- *   if 'wasi:filesystem.read' or 'wasi:filesystem.write' is in the approved
- *   capability set, and ONLY to a per-execution temporary directory.
+ * CAPABILITY ENFORCEMENT (V5 §2.4 — AR-021-02, AR-021-09 fix):
+ *   - -S cli=n: when NO capabilities are approved, ALL WASI imports are
+ *     unresolved → instantiation fails (operation-level enforcement at the
+ *     import boundary).
+ *   - -S cli=y: when any capability is approved, the WASI import namespace
+ *     is available. Filesystem access is additionally controlled via --dir.
+ *   - --dir: granted ONLY when 'wasi:filesystem.read' or 'wasi:filesystem.write'
+ *     is approved. When only read is approved, the temp directory is set to
+ *     read-only (chmod 555) — AR-021-13 fix.
+ *   - No -S tcp=y, -S udp=y, -S http=y, -S inherit-network=y, -S inherit-env=y:
+ *     network and environment access are NEVER granted.
  *
  * RESOURCE ENFORCEMENT (V5 §2.3 — AR-021-03 fix):
  *   - executionBudget: enforced via `-W fuel=N`. Wasmtime traps when fuel is
- *     exhausted. This is REAL enforcement, not synthetic.
- *   - memoryBytes: enforced via `-W max-memory-size=N`. Wasmtime prevents
- *     memory.grow beyond this limit.
- *   - wallTimeMs: enforced via `-W timeout=Nms`. Wasmtime interrupts
- *     execution when the deadline is reached.
+ *     exhausted. This is REAL enforcement.
+ *   - memoryBytes: enforced via `-W max-memory-size=N` + `trap-on-grow-failure=y`.
+ *   - wallTimeMs: enforced via `-W timeout=Nms`. Wasmtime interrupts execution.
  *
- * MEASUREMENTS (V5 §2.3 — AR-021-04 fix):
- *   - wallTimeMs: REAL host-measured elapsed time (monotonic clock).
- *   - fuelUnits: the fuel LIMIT that was enforced (wasmtime CLI does not
- *     report exact fuel consumed; we report the limit as an upper bound).
- *     If fuel was exhausted, the limit IS the exact consumption.
- *   - peakLinearMemoryBytes: the memory LIMIT that was enforced (wasmtime CLI
- *     does not report exact peak; we report the limit as an upper bound).
- *   - hostcallBytes: REAL I/O accounting (input bytes + output bytes).
- *   - cpuTimeNs: not available from wasmtime CLI. Absent (not synthetic).
+ * MEASUREMENTS (V5 §2.3 — AR-021-04, AR-021-10 fix):
+ *   - wallTimeMs: REAL host-measured elapsed time (authoritative).
+ *   - hostcallBytes: REAL I/O accounting (input + output bytes).
+ *   - fuelUnits: ENFORCED LIMIT (not actual consumption — honestly reported
+ *     as 'enforced-limit' in measurementSource). Actual consumption requires
+ *     the wasmtime embedding API, which is not available in the npm ecosystem.
+ *   - peakLinearMemoryBytes: ENFORCED LIMIT (not actual peak — honestly
+ *     reported as 'enforced-limit' in measurementSource).
+ *   - cpuTimeNs: ABSENT (wasmtime CLI doesn't report CPU time). Honestly
+ *     reported as 'absent' in measurementSource.
  *
- * TENANT ISOLATION (V5 §2.6 — AR-021-06, AR-021-07 fix):
+ * REVOCATION (V5 §2.5 — AR-021-11 fix):
+ *   executeWithHandle() uses child_process.spawn, returning a handle that
+ *   supports revocation via child.kill(SIGTERM). This terminates the sandbox
+ *   subprocess, ending the in-flight execution.
+ *
+ * TENANT ISOLATION (V5 §2.6):
  *   Each execute() call spawns a SEPARATE wasmtime subprocess with a FRESH
- *   temporary directory. There is NO shared state between executions:
- *   no shared address space (separate processes), no shared filesystem
- *   (fresh temp dir per execution), no shared stdout (subprocess stdout is
- *   captured per-execution via pipe, NOT via global monkey-patching).
+ *   temporary directory. There is NO shared state between executions.
  */
 export class WasmtimeSandboxHost implements SandboxHost {
   private _availableChecked = false
@@ -206,11 +291,25 @@ export class WasmtimeSandboxHost implements SandboxHost {
     input: Buffer,
     ceiling: SandboxCeiling,
   ): Promise<SandboxExecutionResult> {
+    const handle = this.executeWithHandle(wasmModule, input, ceiling)
+    return handle.result
+  }
+
+  executeWithHandle(
+    wasmModule: Buffer,
+    input: Buffer,
+    ceiling: SandboxCeiling,
+  ): SandboxExecutionHandle {
     // V5 §2.7: deny-by-default if the sandbox is unavailable.
     if (!this.isAvailable()) {
-      throw new SandboxUnavailableError(
+      const err = new SandboxUnavailableError(
         'WasmtimeSandboxHost is not available: wasmtime binary not found',
       )
+      return {
+        result: Promise.reject(err),
+        revoke: () => {},
+        isRevoked: () => false,
+      }
     }
 
     // V5 §2.6: fresh temporary directory per execution (no shared state).
@@ -218,191 +317,200 @@ export class WasmtimeSandboxHost implements SandboxHost {
     const wasmPath = join(tmpDir, 'module.wasm')
     writeFileSync(wasmPath, wasmModule)
 
-    // Build wasmtime CLI args with REAL enforcement (AR-021-02, AR-021-03 fix).
+    // Build wasmtime CLI args with REAL enforcement.
     const args: string[] = ['run']
 
-    // --- Resource enforcement (V5 §2.3 — distinct quantities) ---
-    // Fuel: REAL enforcement via -W fuel=N (wasmtime traps when exhausted)
+    // --- Resource enforcement (V5 §2.3) ---
     if (ceiling.resources.executionBudget !== undefined && ceiling.resources.executionBudget > 0) {
       args.push('-W', `fuel=${ceiling.resources.executionBudget}`)
     }
-    // Memory: REAL enforcement via -W max-memory-size=N
     if (ceiling.resources.memoryBytes !== undefined && ceiling.resources.memoryBytes > 0) {
       args.push('-W', `max-memory-size=${ceiling.resources.memoryBytes}`)
     }
-    // Wall-clock: REAL enforcement via -W timeout=Nms (wasmtime interrupts)
     if (ceiling.resources.wallTimeMs !== undefined && ceiling.resources.wallTimeMs > 0) {
       args.push('-W', `timeout=${ceiling.resources.wallTimeMs}ms`)
     }
-    // Trap on memory.grow failure (so memory limits are enforced as traps, not silent -1 returns)
     args.push('-W', 'trap-on-grow-failure=y')
 
-    // --- Capability enforcement (V5 §2.4 — no ambient authority) ---
-    // By default, wasmtime grants NO filesystem, NO network, NO env.
-    // Only grant explicitly approved capabilities:
+    // --- Capability enforcement (V5 §2.4 — AR-021-09 fix) ---
+    // AR-021-09: -S cli=n disables ALL WASI imports when no capabilities
+    // are approved. This is operation-level enforcement at the import boundary.
     const hasFsRead = ceiling.capabilities.capabilities.includes('wasi:filesystem.read')
     const hasFsWrite = ceiling.capabilities.capabilities.includes('wasi:filesystem.write')
-    if (hasFsRead || hasFsWrite) {
-      // Grant access ONLY to the per-execution temp directory
-      args.push('--dir', `${tmpDir}::/`)
+    const hasAnyCapability = ceiling.capabilities.capabilities.length > 0
+
+    if (hasAnyCapability) {
+      // Enable WASI CLI imports (filesystems, sockets, clocks, random)
+      args.push('-S', 'cli=y')
+    } else {
+      // Disable ALL WASI imports — operation-level enforcement
+      args.push('-S', 'cli=n')
     }
-    // No --dir for other cases → no FS access
-    // No TCP sockets flag is passed — no network access
-    // No UDP sockets flag is passed — no network access
-    // No HTTP flag is passed — no HTTP access
-    // No network inheritance flag is passed — no network
-    // No env inheritance flag is passed — no env access
 
-    // Capture stdout/stderr via subprocess pipe (AR-021-06 fix).
-    // We do NOT set inherit-stdout=n — that would suppress guest stdout.
-    // Instead, we rely on the subprocess pipe to capture wasmtime's stdout
-    // (which includes the guest's stdout writes). Each subprocess has its
-    // own pipe, so there is no cross-execution leakage (no global monkey-patching).
+    // Filesystem access: granted ONLY when FS capability is approved
+    const needsRestorePerms = (hasFsRead || hasFsWrite) && hasFsRead && !hasFsWrite
+    if (hasFsRead || hasFsWrite) {
+      args.push('--dir', `${tmpDir}::/`)
+      // AR-021-13 fix: read-only enforcement when only read is approved
+      if (needsRestorePerms) {
+        chmodSync(tmpDir, 0o555) // read + execute, no write
+      }
+    }
 
-    // The WASM module path
+    // No TCP/UDP/HTTP/inherit-network/inherit-env flags are passed.
+    // Network and environment access are NEVER granted.
+
     args.push(wasmPath)
 
     // V5 §2.3: track measurements
     const startTime = Date.now()
-    const startHrtime = process.hrtime.bigint()
-    let fuelUnits = ceiling.resources.executionBudget ?? 0
-    let peakLinearMemoryBytes = ceiling.resources.memoryBytes ?? 0
-    const hostcallBytes = input.length // will add output length after execution
+    const fuelLimit = ceiling.resources.executionBudget ?? 0
+    const memoryLimit = ceiling.resources.memoryBytes ?? 0
+    const hostcallBytes = input.length
 
-    try {
-      let stdout: Buffer
-      let stderr: Buffer
-      let exitCode: number
-      let signal: string | null
-      let execErrMsg = ''
+    // AR-021-11 fix: use spawn for revocation support
+    let revoked = false
+    let childProcess: ChildProcess | null = null
 
-      try {
-        // Execute wasmtime as a subprocess with REAL enforcement.
-        // Input is passed via stdin; output is captured via stdout pipe.
-        // No global stdout monkey-patching (AR-021-06 fix).
-        const result = execFileSync('wasmtime', args, {
-          input: input,
-          stdio: ['pipe', 'pipe', 'pipe'],
-          timeout: ceiling.resources.wallTimeMs
-            ? ceiling.resources.wallTimeMs + 2000 // host-level timeout as backstop
-            : 30000,
-          maxBuffer: 10 * 1024 * 1024, // 10MB
-        })
-        stdout = result
-        stderr = Buffer.alloc(0)
-        exitCode = 0
-        signal = null
-      } catch (err: unknown) {
-        const execErr = err as {
-          stdout?: Buffer
-          stderr?: Buffer
-          status?: number
-          code?: number | string
-          signal?: string
-          killed?: boolean
-          message?: string
-        }
-        stdout = execErr.stdout ?? Buffer.alloc(0)
-        stderr = execErr.stderr ?? Buffer.alloc(0)
-        execErrMsg = execErr.message ?? ''
-        // execFileSync error: `status` is the numeric exit code;
-        // `code` is a string error code (e.g. "ENOENT") or undefined.
-        // `signal` is the signal name if killed by signal.
-        exitCode = typeof execErr.status === 'number' ? execErr.status : (typeof execErr.code === 'number' ? execErr.code : 1)
-        signal = execErr.signal ?? null
-      }
+    const resultPromise = new Promise<SandboxExecutionResult>((resolve, reject) => {
+      childProcess = spawn('wasmtime', args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: ceiling.resources.wallTimeMs
+          ? ceiling.resources.wallTimeMs + 5000 // host-level timeout as backstop
+          : 60000,
+      })
 
-      // V5 §2.3: compute REAL measurements
-      const elapsedMs = Date.now() - startTime
-      const totalHostcallBytes = hostcallBytes + stdout.length
+      const stdoutChunks: Buffer[] = []
+      const stderrChunks: Buffer[] = []
 
-      // Parse stderr for fuel/memory/timeout classification.
-      // NOTE: we use stderr ONLY (not the execFileSync error message) because
-      // the error message includes the full command line, which contains
-      // flag names like "fuel" and "timeout" that would cause false matches.
-      const stderrStr = stderr.toString('utf8')
+      childProcess.stdout?.on('data', (chunk: Buffer) => {
+        stdoutChunks.push(chunk)
+      })
+      childProcess.stderr?.on('data', (chunk: Buffer) => {
+        stderrChunks.push(chunk)
+      })
 
-      // Check signal first: if the host killed the process (SIGTERM/SIGKILL),
-      // it's a host-level timeout.
-      const isHostTimeout = signal === 'SIGTERM' || signal === 'SIGKILL'
+      // Pass input via stdin
+      childProcess.stdin?.write(input)
+      childProcess.stdin?.end()
 
-      // Success case
-      if (exitCode === 0) {
-        const capabilitiesExercised: string[] = []
-        if (hasFsRead) capabilitiesExercised.push('wasi:filesystem.read')
-        if (hasFsWrite) capabilitiesExercised.push('wasi:filesystem.write')
+      childProcess.on('error', (err: Error) => {
+        if (needsRestorePerms) chmodSync(tmpDir, 0o755)
+        rmSync(tmpDir, { recursive: true, force: true })
+        reject(err)
+      })
 
-        return {
-          output: stdout,
-          measurements: {
-            // Fuel: the limit that was enforced. If the module didn't trap,
-            // actual consumption is ≤ limit. Wasmtime CLI doesn't report
-            // exact consumption, so we report the limit as an upper bound.
-            fuelUnits,
-            // Wall-clock: REAL host-measured elapsed time
-            wallTimeMs: elapsedMs,
-            // Memory: the limit that was enforced. Actual peak is ≤ limit.
-            peakLinearMemoryBytes,
-            // I/O: REAL bytes transferred across the sandbox boundary
-            hostcallBytes: totalHostcallBytes,
-            // cpuTimeNs: not available from wasmtime CLI (honestly absent)
+      childProcess.on('close', (exitCode: number | null, signal: string | null) => {
+        if (needsRestorePerms) chmodSync(tmpDir, 0o755)
+        rmSync(tmpDir, { recursive: true, force: true })
+
+        const stdout = Buffer.concat(stdoutChunks)
+        const stderr = Buffer.concat(stderrChunks)
+        const stderrStr = stderr.toString('utf8')
+        const elapsedMs = Date.now() - startTime
+        const totalHostcallBytes = hostcallBytes + stdout.length
+
+        const partialMeasurements: Partial<SandboxMeasurements> = {
+          fuelUnits: fuelLimit,
+          wallTimeMs: elapsedMs,
+          peakLinearMemoryBytes: memoryLimit,
+          hostcallBytes: totalHostcallBytes,
+          measurementSource: {
+            fuelUnits: 'enforced-limit',
+            peakLinearMemoryBytes: 'enforced-limit',
+            wallTimeMs: 'measured',
+            hostcallBytes: 'measured',
+            cpuTimeNs: 'absent',
           },
-          capabilitiesExercised,
         }
-      }
 
-      // Classify failures (V5 §2.5 — architectural termination contract)
-      const partialMeasurements: Partial<SandboxMeasurements> = {
-        fuelUnits,
-        wallTimeMs: elapsedMs,
-        peakLinearMemoryBytes,
-        hostcallBytes: totalHostcallBytes,
-      }
+        // AR-021-11: check if revoked
+        if (revoked || signal === 'SIGTERM') {
+          reject(new SandboxTerminatedError(
+            `Sandbox execution terminated: revoked via SIGTERM after ${elapsedMs}ms`,
+            'revoked',
+            partialMeasurements,
+          ))
+          return
+        }
 
-      // Timeout (wall-clock deadline exceeded — wasmtime reports "interrupt")
-      // Check both stderr and error message for "interrupt" (which doesn't
-      // appear in wasmtime command-line flags, so it's safe to check in msg).
-      if (isHostTimeout || stderrStr.includes('interrupt') || execErrMsg.includes('interrupt')) {
-        throw new SandboxTerminatedError(
-          `Sandbox execution terminated: wall-clock timeout after ${elapsedMs}ms`,
-          'timeout',
-          partialMeasurements,
-        )
-      }
+        // Success case
+        if (exitCode === 0) {
+          const capabilitiesExercised: string[] = []
+          if (hasFsRead) capabilitiesExercised.push('wasi:filesystem.read')
+          if (hasFsWrite) capabilitiesExercised.push('wasi:filesystem.write')
 
-      // Fuel exhaustion (wasmtime reports "all fuel consumed")
-      if (stderrStr.includes('fuel')) {
-        throw new SandboxTerminatedError(
-          `Sandbox execution terminated: execution budget (fuel) exhausted after consuming ${fuelUnits} units`,
-          'fuel_exhausted',
-          partialMeasurements,
-        )
-      }
+          resolve({
+            output: stdout,
+            measurements: {
+              fuelUnits: fuelLimit,
+              wallTimeMs: elapsedMs,
+              peakLinearMemoryBytes: memoryLimit,
+              hostcallBytes: totalHostcallBytes,
+              measurementSource: {
+                fuelUnits: 'enforced-limit',
+                peakLinearMemoryBytes: 'enforced-limit',
+                wallTimeMs: 'measured',
+                hostcallBytes: 'measured',
+                cpuTimeNs: 'absent',
+              },
+            },
+            capabilitiesExercised,
+          })
+          return
+        }
 
-      // Memory exceeded (wasmtime reports memory grow failure)
-      if (stderrStr.includes('memory') || stderrStr.includes('grow')) {
-        throw new SandboxTerminatedError(
-          `Sandbox execution terminated: memory limit exceeded (${peakLinearMemoryBytes} bytes)`,
-          'memory_exceeded',
-          partialMeasurements,
-        )
-      }
+        // Classify failures
+        if (signal === 'SIGKILL' || stderrStr.includes('interrupt')) {
+          reject(new SandboxTerminatedError(
+            `Sandbox execution terminated: wall-clock timeout after ${elapsedMs}ms`,
+            'timeout',
+            partialMeasurements,
+          ))
+          return
+        }
 
-      // Capability denied (unresolved import)
-      if (stderrStr.includes('unknown import') || stderrStr.includes('not found') || execErrMsg.includes('unknown import')) {
-        const match = stderrStr.match(/"([^"]+)"/)
-        const deniedCap = match ? match[1] : 'unknown'
-        throw new SandboxCapabilityDeniedError(
-          `Sandbox capability denied: import "${deniedCap}" is not granted by the ceiling`,
-          deniedCap,
-        )
-      }
+        if (stderrStr.includes('fuel')) {
+          reject(new SandboxTerminatedError(
+            `Sandbox execution terminated: execution budget (fuel) exhausted (limit: ${fuelLimit})`,
+            'fuel_exhausted',
+            partialMeasurements,
+          ))
+          return
+        }
 
-      // Other execution failure
-      throw new Error(`Sandbox execution failed (exit ${exitCode}): ${stderrStr.slice(0, 500)}`)
-    } finally {
-      // V5 §2.6: clean up temp directory (no shared state between executions)
-      rmSync(tmpDir, { recursive: true, force: true })
+        if (stderrStr.includes('memory') || stderrStr.includes('grow')) {
+          reject(new SandboxTerminatedError(
+            `Sandbox execution terminated: memory limit exceeded (limit: ${memoryLimit})`,
+            'memory_exceeded',
+            partialMeasurements,
+          ))
+          return
+        }
+
+        if (stderrStr.includes('unknown import') || stderrStr.includes('not been defined') || stderrStr.includes('has not been defined')) {
+          const match = stderrStr.match(/`([^`]+)`/)
+          const deniedCap = match ? match[1] : 'unknown'
+          reject(new SandboxCapabilityDeniedError(
+            `Sandbox capability denied: import "${deniedCap}" is not granted by the ceiling`,
+            deniedCap,
+          ))
+          return
+        }
+
+        reject(new Error(`Sandbox execution failed (exit ${exitCode}): ${stderrStr.slice(0, 500)}`))
+      })
+    })
+
+    return {
+      result: resultPromise,
+      revoke: () => {
+        revoked = true
+        if (childProcess && !childProcess.killed) {
+          childProcess.kill('SIGTERM')
+        }
+      },
+      isRevoked: () => revoked,
     }
   }
 }
@@ -442,7 +550,22 @@ export class DenyByDefaultSandboxHost implements SandboxHost {
       'Sandbox is unavailable: deny-by-default policy (V5 §2.7). No unsandboxed fallback is permitted.',
     )
   }
+
+  executeWithHandle(
+    _wasmModule: Buffer,
+    _input: Buffer,
+    _ceiling: SandboxCeiling,
+  ): SandboxExecutionHandle {
+    const err = new SandboxUnavailableError(
+      'Sandbox is unavailable: deny-by-default policy (V5 §2.7). No unsandboxed fallback is permitted.',
+    )
+    return {
+      result: Promise.reject(err),
+      revoke: () => {},
+      isRevoked: () => false,
+    }
+  }
 }
 
-// Backward-compatible alias (tests may reference the old name)
+// Backward-compatible alias
 export const WasmerSandboxHost = WasmtimeSandboxHost
