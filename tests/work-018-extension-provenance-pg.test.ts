@@ -210,71 +210,129 @@ describe('WORK-018 — ExtensionProvenance PostgreSQL (W018-AC01..AC07)', () => 
     await expect(persistExtensionProvenance(payload2)).rejects.toThrow('idempotency conflict')
   })
 
-  it('tenant isolation: P2002 fingerprint fallback is tenant-scoped (Architect Review Fix #1)', async () => {
-    // Two tenants persist a record with the SAME fingerprint but different
-    // idempotency keys. The fingerprint is globally unique, so the second
-    // persist hits a P2002 on the fingerprint constraint. The P2002 fallback
-    // must be tenant-scoped: tenant B's P2002 fallback must NOT find tenant
-    // A's record (which has the same fingerprint but a different tenantId).
+  it('tenant isolation: P2002 fingerprint fallback is tenant-scoped (AR-018-07)', async () => {
+    // AR-018-07: This test must ACTUALLY exercise the fingerprint-unique-
+    // constraint P2002 fallback branch (the `if (!existing)` block in
+    // persistExtensionProvenance that calls findFirst({ where: { fingerprint,
+    // tenantId } })).
     //
-    // Before the fix, the fallback used findUnique({ where: { fingerprint } })
-    // — a global lookup that would find tenant A's record and throw a
-    // ConflictError disclosing existingRecordId. After the fix, the fallback
-    // uses findFirst({ where: { fingerprint, tenantId } }) — a tenant-scoped
-    // lookup that returns null for tenant B, causing the original P2002 to
-    // be re-thrown (not a ConflictError with cross-tenant details).
+    // CHALLENGE: The frozen V4 §2.4 fingerprint formula includes tenantId:
+    //   SHA-256({tenantId, extensionType, extensionVersion,
+    //            executionIdempotencyKey, inputHash, outputHash, resultStatus})
+    // So two payloads from DIFFERENT tenants can NEVER produce the same
+    // fingerprint through the normal service API. This means the fingerprint
+    // unique constraint P2002 (without the compound-key P2002 firing first)
+    // cannot be triggered by two valid cross-tenant payloads.
     //
-    // NOTE: In practice, two tenants producing the same fingerprint requires
-    // identical (extensionType, extensionVersion, idempotencyKey, inputHash,
-    // outputHash, resultStatus) — which means the same idempotencyKey. But
-    // the @@unique([tenantId, executionIdempotencyKey]) constraint allows
-    // different tenants to use the same idempotencyKey. So the scenario is:
-    // both tenants use the same idempotencyKey + same material fields → same
-    // fingerprint → P2002 on the global fingerprint unique constraint.
-    const sharedIdemKey = `shared-fp-${Date.now()}`
-    const sharedType = `shared-type-${Date.now()}`
+    // SOLUTION: Use direct DB insertion to create the fingerprint collision
+    // that the service's normal API cannot produce. This simulates the edge
+    // case the fallback defends against (data corruption, prior bug, direct
+    // DB manipulation, or a future fingerprint formula change):
+    //
+    // 1. Compute the fingerprint for a tenant B payload (FB).
+    // 2. Directly insert a record into ExtensionProvenance for tenant A with
+    //    fingerprint FB (bypassing the service's fingerprint validation — the
+    //    DB stores the fingerprint string as-is).
+    // 3. Call persistExtensionProvenance with the tenant B payload (whose
+    //    fingerprint is FB). The service validates FB (it matches the
+    //    recomputed value). Then it tries to create. The P2002 fires on the
+    //    fingerprint unique constraint (FB already exists from step 2).
+    // 4. The compound-key re-read (tenantId=B, executionIdempotencyKey=KB)
+    //    does NOT find the step-2 record (which has tenantId=A,
+    //    executionIdempotencyKey=KA). So `existing` is null.
+    // 5. The FALLBACK fires: findFirst({ where: { fingerprint: FB,
+    //    tenantId: B } }). The step-2 record has fingerprint FB but
+    //    tenantId=A, so this returns null.
+    // 6. The service re-throws the original P2002 (NOT a ConflictError with
+    //    cross-tenant existingRecordId).
+    //
+    // This test PROVES the fallback is tenant-scoped: tenant A's record id
+    // is never disclosed to tenant B, even when a cross-tenant fingerprint
+    // collision exists in the DB.
 
-    // Tenant A persists first — succeeds.
-    const payloadA = buildPayload({
-      tenantId: tenantA,
-      extensionType: sharedType,
-      executionIdempotencyKey: sharedIdemKey,
-      inputHash: 'shared-input',
-      outputHash: 'shared-output',
-    })
-    const resultA = await persistExtensionProvenance(payloadA)
-    expect(resultA.status).toBe('created')
-
-    // Tenant B persists with the SAME material fields → same fingerprint.
-    // The @@unique([tenantId, executionIdempotencyKey]) does NOT fire (different
-    // tenantId). The @unique on fingerprint DOES fire (P2002). The fallback
-    // must be tenant-scoped: it must NOT find tenant A's record.
+    // Step 1: Compute the fingerprint for a tenant B payload.
     const payloadB = buildPayload({
       tenantId: tenantB,
-      extensionType: sharedType,
-      executionIdempotencyKey: sharedIdemKey,
-      inputHash: 'shared-input',
-      outputHash: 'shared-output',
+      extensionType: `arb07-${Date.now()}`,
+      executionIdempotencyKey: `arb07-b-${Date.now()}`,
+      inputHash: 'arb07-input',
+      outputHash: 'arb07-output',
+    })
+    const fingerprintB = payloadB.fingerprint
+
+    // Step 2: Directly insert a record for tenant A with fingerprint FB.
+    // This bypasses the service's fingerprint validation — the DB stores
+    // the fingerprint string as-is. We use a different idempotencyKey so
+    // the compound key doesn't collide with tenant B's payload.
+    const tenantARecordId = `arb07-direct-${Date.now()}`
+    await db.extensionProvenance.create({
+      data: {
+        id: tenantARecordId,
+        tenantId: tenantA,
+        extensionType: payloadB.extensionType,
+        extensionVersion: payloadB.extensionVersion,
+        executionIdempotencyKey: `arb07-a-${Date.now()}`,
+        inputHash: payloadB.inputHash,
+        outputHash: payloadB.outputHash,
+        resultStatus: payloadB.resultStatus,
+        resourceUsageJson: '{}',
+        capabilitiesExercisedJson: '[]',
+        tenantApprovedCeilingJson: '{}',
+        failureMetadataJson: '{}',
+        fingerprint: fingerprintB, // tenant A record with tenant B's fingerprint
+      },
     })
 
-    // The P2002 fallback must NOT disclose tenant A's record. It should
-    // re-throw the original P2002 error (not a ConflictError with
-    // existingRecordId from tenant A).
+    // Step 3-6: Call persistExtensionProvenance for tenant B. This must:
+    // - Hit P2002 on the fingerprint unique constraint
+    // - Re-read by compound key (tenantId=B, key=KB) → null
+    // - Fall through to the fingerprint fallback
+    // - findFirst({ where: { fingerprint: FB, tenantId: B } }) → null
+    //   (because the record with FB has tenantId=A)
+    // - Re-throw the original P2002 (NOT a ConflictError with tenant A's recordId)
+    let caughtError: unknown = null
     try {
       await persistExtensionProvenance(payloadB)
-      // If no error, that's also acceptable IF the fingerprint unique
-      // constraint didn't fire (e.g. if the DB allows it). But with the
-      // @unique constraint, it should fire. We handle both paths.
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err)
-      // Must NOT contain tenant A's record id (cross-tenant disclosure).
-      expect(errMsg).not.toContain(resultA.recordId)
-      // If it's a ConflictError, it must NOT reference tenant A's record.
-      if (err instanceof ConflictError) {
-        const details = JSON.stringify((err as { details?: unknown }).details ?? {})
-        expect(details).not.toContain(resultA.recordId)
-      }
+      caughtError = err
     }
+
+    // The persist MUST throw (P2002 on fingerprint unique constraint).
+    expect(caughtError).not.toBeNull()
+    const err = caughtError as Error
+
+    // CRITICAL: the error must NOT disclose tenant A's record id.
+    // This is the cross-tenant disclosure we're defending against.
+    expect(err.message).not.toContain(tenantARecordId)
+
+    // The error must NOT be a ConflictError with existingRecordId from tenant A.
+    // (If the fallback were global findUnique({ where: { fingerprint } }), it
+    // would find tenant A's record and throw ConflictError with
+    // existingRecordId: tenantARecordId — that's the bug we fixed.)
+    if (err instanceof ConflictError) {
+      const details = JSON.stringify((err as { details?: unknown }).details ?? {})
+      expect(details).not.toContain(tenantARecordId)
+    }
+
+    // VERIFY the test actually exercised the fallback: check that the
+    // tenant A record still exists with fingerprint FB (proving the P2002
+    // was on the fingerprint constraint, not a compound-key conflict).
+    const tenantARecord = await db.extensionProvenance.findUnique({
+      where: { id: tenantARecordId },
+    })
+    expect(tenantARecord).toBeTruthy()
+    expect(tenantARecord!.fingerprint).toBe(fingerprintB)
+    expect(tenantARecord!.tenantId).toBe(tenantA) // belongs to tenant A, not B
+
+    // VERIFY tenant B has NO record (the persist failed, so nothing was
+    // created for tenant B).
+    const tenantBRecord = await db.extensionProvenance.findFirst({
+      where: { fingerprint: fingerprintB, tenantId: tenantB },
+    })
+    expect(tenantBRecord).toBeNull()
+
+    // Cleanup: remove the directly-inserted tenant A record.
+    await db.extensionProvenance.delete({ where: { id: tenantARecordId } })
   })
 
   it('tenant isolation: cross-tenant getExtensionProvenance is rejected (W018-AC02)', async () => {
