@@ -292,6 +292,22 @@ export interface ExtensionExecutionInput {
    * default sink is used.
    */
   provenanceSink?: ExtensionProvenanceSink
+  /**
+   * WORK-021 (V5 §2): optional WASM module bytes for untrusted sandboxed
+   * execution. When provided, the runtime routes execution through the
+   * SandboxHost instead of the in-memory ExtensionContract dispatch table.
+   *
+   * V5 §2.7: if a sandboxHost is required but not available (or the module
+   * is provided but no sandbox is installed), execution is denied with
+   * denialReason='sandbox_unavailable'. No silent unsandboxed fallback.
+   */
+  wasmModule?: Buffer
+  /**
+   * WORK-021 (V5 §2): optional SandboxHost override. If not provided but
+   * wasmModule is set, the runtime uses the default SandboxHost
+   * (getSandboxHost()). If the default is unavailable, deny-by-default.
+   */
+  sandboxHost?: import('@/lib/services/sandbox-host.service').SandboxHost
 }
 
 export interface ExtensionExecutionResult {
@@ -435,8 +451,11 @@ export async function executeExtension(
     )
   }
 
-  // 6. Implementation must be available.
-  if (!impl) {
+  // 6. Implementation must be available (for trusted in-memory extensions).
+  //    If wasmModule is provided (V5 §2 — untrusted sandboxed execution),
+  //    the sandbox is the implementation — no in-memory impl is needed.
+  const useSandbox = input.wasmModule !== undefined
+  if (!useSandbox && !impl) {
     const denialReason: ExtensionDenialReason = {
       kind: 'implementation_missing',
       reason: `no executable implementation registered for ${input.extensionType}@${input.extensionVersion}`,
@@ -448,20 +467,62 @@ export async function executeExtension(
     )
   }
 
-  // 7. Execute the extension.
+  // 6a. WORK-021 (V5 §2.7): if sandboxed execution is requested, verify the
+  //     sandbox is available. Deny-by-default if not — no silent unsandboxed
+  //     fallback.
+  if (useSandbox) {
+    const { getSandboxHost, SandboxUnavailableError } = await import('@/lib/services/sandbox-host.service')
+    const sandbox = input.sandboxHost ?? getSandboxHost()
+    if (!sandbox.isAvailable()) {
+      const denialReason: ExtensionDenialReason = {
+        kind: 'sandbox_unavailable',
+        reason: 'sandbox is unavailable: deny-by-default (V5 §2.7). No unsandboxed fallback is permitted.',
+      }
+      await emitFailedProvenance(tenantId, input, registryEntry, inputHash, ceiling, denialReason)
+      throw new SandboxUnavailableError(denialReason.reason)
+    }
+  }
+
+  // 7. Execute the extension (sandboxed or in-memory).
   let outputPayload: Buffer
   let resultStatus: 'success' | 'failed' = 'success'
 
   try {
-    outputPayload = await impl.execute(
-      {
-        tenantId,
-        capabilities: ceiling.capabilities,
-        resourceLimits: ceiling.resourceLimits,
-        parameters: input.parameters,
-      },
-      input.inputPayload,
-    )
+    if (useSandbox) {
+      // V5 §2: execute through the SandboxHost.
+      const { getSandboxHost } = await import('@/lib/services/sandbox-host.service')
+      const sandbox = input.sandboxHost ?? getSandboxHost()
+      const sandboxCeiling = {
+        capabilities: { capabilities: ceiling.capabilities },
+        resources: {
+          executionBudget: ceiling.resourceLimits.cpuMs, // approximate fuel budget
+          memoryBytes: ceiling.resourceLimits.memoryBytes,
+          wallTimeMs: ceiling.resourceLimits.timeMs,
+        },
+      }
+      const sandboxResult = await sandbox.execute(
+        input.wasmModule!,
+        input.inputPayload,
+        sandboxCeiling,
+      )
+      outputPayload = sandboxResult.output
+      // Note: sandboxResult.measurements and capabilitiesExercised are
+      // authoritative (V5 §2.3). They are NOT yet wired into the provenance
+      // payload in this Work Item — that requires the V5 provenance schema
+      // change, which is a separate future Work Item. For now, the ceiling
+      // is still recorded (V4-compatible).
+    } else {
+      // V4 path: execute through the in-memory ExtensionContract.
+      outputPayload = await impl!.execute(
+        {
+          tenantId,
+          capabilities: ceiling.capabilities,
+          resourceLimits: ceiling.resourceLimits,
+          parameters: input.parameters,
+        },
+        input.inputPayload,
+      )
+    }
   } catch (err) {
     // Failure semantics: emit a failed ExtensionProvenance payload, then
     // re-throw the original error. The caller does NOT get a silent success.
@@ -703,6 +764,7 @@ interface ExtensionDenialReason {
     | 'capability_not_approved'
     | 'resource_limit_exceeded'
     | 'implementation_missing'
+    | 'sandbox_unavailable'
   reason: string
 }
 
