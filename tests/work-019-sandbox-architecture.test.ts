@@ -104,7 +104,7 @@ describe('WORK-019 — Trust boundary (W019-AC02)', () => {
 
   test('ACR-004 defines the sandbox trust boundary', () => {
     expect(acr).toContain('Trust Boundary')
-    expect(acr).toContain('WASM instance boundary')
+    expect(acr).toContain('WASM component/instance boundary')
   })
 
   test('ACR-004 distinguishes trusted host from untrusted module', () => {
@@ -145,15 +145,18 @@ describe('WORK-019 — Lifecycle/revocation/termination (W019-AC04)', () => {
     expect(acr).toContain('revoked')
   })
 
-  test('ACR-004 defines in-flight revocation semantics', () => {
+  test('ACR-004 defines in-flight revocation semantics via architectural termination contract', () => {
     expect(acr).toContain('revoked_mid_execution')
-    expect(acr).toContain('drop')
+    expect(acr).toContain('architectural termination contract')
+    expect(acr).toContain('terminate sandbox execution context')
+    // Must NOT freeze a specific runtime API like instance.drop()
+    expect(acr).not.toContain('instance.drop()')
   })
 
-  test('ACR-004 defines resource exhaustion termination', () => {
-    expect(acr).toContain('fuel depleted')
-    expect(acr).toContain('memory limit')
-    expect(acr).toContain('timeout')
+  test('ACR-004 defines resource exhaustion termination with distinct quantities', () => {
+    expect(acr).toContain('execution budget')
+    expect(acr).toContain('memory')
+    expect(acr).toContain('wall-clock')
   })
 })
 
@@ -164,16 +167,22 @@ describe('WORK-019 — Lifecycle/revocation/termination (W019-AC04)', () => {
 describe('WORK-019 — Provenance and authoritative measurement (W019-AC05)', () => {
   const acr = readSpec('architecture-change-requests/ACR-004.md')
 
-  test('ACR-004 upgrades resourceUsage from ceiling to authoritative measurement', () => {
+  test('ACR-004 upgrades resourceUsage from ceiling to authoritative measurement with distinct quantities', () => {
     expect(acr).toContain('authoritative')
-    expect(acr).toContain('fuel consumed')
-    expect(acr).toContain('peak linear memory')
-    expect(acr).toContain('wall-clock')
+    expect(acr).toContain('executionBudget')
+    expect(acr).toContain('fuelUnits')
+    expect(acr).toContain('cpuTimeNs')
+    expect(acr).toContain('wallTimeMs')
+    expect(acr).toContain('peakLinearMemoryBytes')
+    expect(acr).toContain('hostcallBytes')
+    // Fuel must NOT be equated to CPU milliseconds (AR-019-02)
+    expect(acr).toContain('NOT inherently CPU time')
+    expect(acr).toContain('NOT derived from fuel')
   })
 
   test('ACR-004 upgrades capabilitiesExercised to authoritative set', () => {
     expect(acr).toContain('capabilitiesExercised')
-    expect(acr).toContain('WASI capabilities actually invoked')
+    expect(acr).toContain('WASI component imports actually invoked')
   })
 
   test('ACR-004 documents this as a contract change requiring V5', () => {
@@ -416,5 +425,131 @@ describe('WORK-019 — Evaluation dimensions covered', () => {
 
   test('comparison summary table exists', () => {
     expect(acr).toContain('Alternatives Comparison Summary')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AR-019-01 — WASI version is NOT hard-frozen; contract + baseline is frozen
+// ---------------------------------------------------------------------------
+
+describe('WORK-019 — AR-019-01: WASI contract not version (W019-AC01, AC09)', () => {
+  const acr = readSpec('architecture-change-requests/ACR-004.md')
+
+  test('ACR-004 freezes the WASI Component Model contract, NOT a specific version', () => {
+    expect(acr).toContain('WASI Component Model')
+    expect(acr).toContain('capability-sandbox contract')
+    expect(acr).toContain('NOT a specific WASI version')
+  })
+
+  test('ACR-004 does NOT hard-freeze WASI Preview 2 as the technology target', () => {
+    // The recommendation must not treat "Preview 2" as the timeless choice.
+    // (Preview 2 may appear in historical/compatibility context, but must not
+    // be the frozen recommendation.)
+    expect(acr).not.toContain('Recommendation: WASM/WASI Preview 2 as the preferred sandbox technology')
+  })
+
+  test('ACR-004 states a minimum supported WASI/component ABI (compatibility baseline)', () => {
+    expect(acr).toContain('Compatibility baseline')
+    expect(acr).toContain('minimum supported WASI/component ABI')
+    expect(acr).toContain('wasi:io')
+    expect(acr).toContain('wasi:filesystem')
+    expect(acr).toContain('wasi:sockets')
+  })
+
+  test('ACR-004 treats concrete runtime/version as implementation choice', () => {
+    expect(acr).toContain('implementation choice')
+    expect(acr).toContain('Wasmtime')
+    expect(acr).toContain('Wasmer')
+    expect(acr).toContain('WasmEdge')
+  })
+
+  test('ACR-004 preserves upgrade compatibility for future WASI revisions', () => {
+    expect(acr).toContain('upgrade compatibility')
+    expect(acr).toContain('future WASI revision')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AR-019-02 — fuel ≠ cpuMs; distinct measurement quantities
+// ---------------------------------------------------------------------------
+
+describe('WORK-019 — AR-019-02: distinct resource quantities (W019-AC05)', () => {
+  const acr = readSpec('architecture-change-requests/ACR-004.md')
+
+  test('ACR-004 explicitly states fuel is NOT inherently CPU time', () => {
+    expect(acr).toContain('Fuel (a deterministic execution budget) is NOT inherently CPU time')
+    expect(acr).toContain('NOT derived from fuel')
+  })
+
+  test('ACR-004 defines five distinct measurement quantities', () => {
+    const quantities = [
+      'executionBudget',
+      'fuelUnits',
+      'cpuTimeNs',
+      'wallTimeMs',
+      'peakLinearMemoryBytes',
+      'hostcallBytes',
+    ]
+    for (const q of quantities) {
+      expect(acr).toContain(q)
+    }
+  })
+
+  test('ACR-004 defines measurement authority and units for each quantity', () => {
+    expect(acr).toContain('Measurement authority and units')
+    expect(acr).toContain('authoritative source')
+  })
+
+  test('ACR-004 defines failure semantics per quantity', () => {
+    expect(acr).toContain('Failure semantics per quantity')
+    expect(acr).toContain('deterministic trap')
+    expect(acr).toContain('epoch interruption')
+  })
+
+  test('ACR-004 maps V4 resourceUsage fields to V5 with measurementSource discriminator', () => {
+    expect(acr).toContain('Mapping to V4')
+    expect(acr).toContain('measurementSource')
+    expect(acr).toContain("'fuel' | 'cpuTime'")
+  })
+
+  test('ACR-004 states memory and wall-clock are distinct enforcement mechanisms', () => {
+    expect(acr).toContain('Memory limiting and wall-clock enforcement are distinct mechanisms')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Architectural Termination Contract — not a frozen runtime API
+// ---------------------------------------------------------------------------
+
+describe('WORK-019 — Architectural termination contract (lifecycle abstraction)', () => {
+  const acr = readSpec('architecture-change-requests/ACR-004.md')
+
+  test('ACR-004 defines an architectural termination abstraction', () => {
+    expect(acr).toContain('Architectural Termination Contract')
+    expect(acr).toContain('architectural abstraction')
+    expect(acr).toContain('not a dependency on a particular runtime API')
+  })
+
+  test('ACR-004 defines the termination flow (revoke → terminate → provenance → re-throw)', () => {
+    expect(acr).toContain('terminate sandbox execution context')
+    expect(acr).toContain('failed provenance emission')
+    expect(acr).toContain('re-throw / terminal outcome')
+  })
+
+  test('ACR-004 does NOT freeze instance.drop() as the termination mechanism', () => {
+    // The architectural contract must not depend on a specific Wasmtime API.
+    expect(acr).not.toContain('instance.drop()')
+  })
+
+  test('ACR-004 mentions Wasmtime Store-owned lifetime as an example, not the contract', () => {
+    expect(acr).toContain('Store-owned')
+    expect(acr).toContain('implementation choice')
+  })
+
+  test('ACR-004 defines the four MUST properties of termination', () => {
+    expect(acr).toContain('(a) halt the extension\'s execution')
+    expect(acr).toContain('(b) be catchable by the host as an interruption')
+    expect(acr).toContain('(c) allow the host to emit failed provenance')
+    expect(acr).toContain('(d) not leave the sandbox in a partially-executed state')
   })
 })
