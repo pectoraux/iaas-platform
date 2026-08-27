@@ -24,7 +24,7 @@ WORK-018 -> WORK-019
 WORK-019 -> WORK-020
 ```
 
-WORK-001 through WORK-019 are VERIFIED in dependency order. `IAAS-DOM-ARCH-4` is preserved as immutable historical architecture. `ACR-004` is APPROVED and `IAAS-DOM-ARCH-5` is FROZEN by WORK-020. WORK-020 is the only active governance Work Item at release time.
+WORK-001 is VERIFIED. WORK-001 through WORK-019 are VERIFIED in dependency order. `IAAS-DOM-ARCH-4` is the immutable historical architecture and `IAAS-DOM-ARCH-5` is the current frozen domain architecture after approved ACR-004. WORK-020 depends on WORK-019; that dependency is satisfied, so WORK-020 is READY and is the only eligible governance Work Item.
 
 A Work Item is eligible only when its architecture version is valid, all dependencies exist and are VERIFIED, acceptance/verification data is complete, no unresolved architecture change blocks it, and it has at most one active implementation PR.
 
@@ -32,4 +32,4 @@ The graph MUST be acyclic. Domain primitive dependencies are maintained separate
 
 WORK-003 through WORK-008 were governed by IAAS-DOM-ARCH-2; WORK-009 through WORK-014 by IAAS-DOM-ARCH-3; WORK-015 through WORK-019 by IAAS-DOM-ARCH-4; WORK-020 freezes IAAS-DOM-ARCH-5 under IAAS-GOV-ARCH-1.
 
-WORK-016 is the verified ExtensionRegistry slice. WORK-017 is the verified ExtensionRuntime slice. WORK-018 is the verified durable ExtensionProvenance slice. WORK-019 is the verified sandbox architecture decision. WORK-020 is the V5 freeze/promotion slice and releases no sandbox implementation.
+WORK-016 is the verified ExtensionRegistry production slice. WORK-017 is the verified ExtensionRuntime production slice. WORK-018 is the verified durable ExtensionProvenance slice. WORK-019 is the verified sandbox architecture decision. WORK-020 is the V5 freeze/promotion slice and releases no sandbox implementation.
