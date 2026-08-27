@@ -40,7 +40,7 @@ function expectFailure(specDir: string, check: string) {
 }
 
 describe('spec validator — current repository', () => {
-  test('passes deterministically with the V4 / 18-item specification', () => {
+  test('passes deterministically with the V4 / 19-item specification', () => {
     const a = run(SPEC)
     const b = run(SPEC)
     expect(a.code).toBe(0)
@@ -48,8 +48,8 @@ describe('spec validator — current repository', () => {
     expect(a.stderr).toBe('')
     expect(a.stdout).toContain('SPEC VALIDATION PASSED')
     expect(a.stdout).toContain('domain-architecture=IAAS-DOM-ARCH-4')
-    expect(a.stdout).toContain('work-items=18')
-    expect(a.stdout).toContain('dependency-edges=17')
+    expect(a.stdout).toContain('work-items=19')
+    expect(a.stdout).toContain('dependency-edges=18')
     expect(a.stdout).toBe(b.stdout)
   })
 })
@@ -91,9 +91,9 @@ describe('spec validator — mandatory negative cases', () => {
     expectFailure(s, 'SC-10')
   })
 
-  test('WORK-018 cannot be READY when its dependency is not VERIFIED', () => {
+  test('WORK-019 cannot be READY when its dependency is not VERIFIED', () => {
     const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('## WORK-017 — ExtensionRuntime Implementation\nStatus: `VERIFIED`', '## WORK-017 — ExtensionRuntime Implementation\nStatus: `READY`'))
+    rewrite(s, 'work-items.md', x => x.replace('## WORK-018 — ExtensionProvenance Durable Persistence\nStatus: `VERIFIED`', '## WORK-018 — ExtensionProvenance Durable Persistence\nStatus: `READY`'))
     expectFailure(s, 'SC-11')
   })
 
@@ -104,20 +104,20 @@ describe('spec validator — mandatory negative cases', () => {
   })
 })
 
-describe('V4 / WORK-017 and WORK-018 governance invariants', () => {
-  test('DOM-020 is frozen, WORK-017 is verified, and WORK-018 is released', () => {
+describe('V4 / WORK-018 and WORK-019 governance invariants', () => {
+  test('DOM-022 is frozen, WORK-018 is verified, and WORK-019 is released', () => {
     const items = readFileSync(join(SPEC, 'work-items.md'), 'utf8')
-    const order = readFileSync(join(SPEC, 'work-orders', 'WORK-018.md'), 'utf8')
-    expect(items).toContain('## WORK-017 — ExtensionRuntime Implementation')
-    expect(items).toContain('Status: `VERIFIED`')
-    expect(items).toContain('Dependencies: `WORK-016`')
+    const order = readFileSync(join(SPEC, 'work-orders', 'WORK-019.md'), 'utf8')
     expect(items).toContain('## WORK-018 — ExtensionProvenance Durable Persistence')
-    expect(items).toContain('Status: `READY`')
+    expect(items).toContain('Status: `VERIFIED`')
     expect(items).toContain('Dependencies: `WORK-017`')
-    expect(order).toContain('`RELEASED`')
-    expect(order).toContain('`IAAS-DOM-ARCH-4` (FROZEN)')
-    expect(order).toContain('`WORK-017` VERIFIED')
-    expect(order).toContain('PostgreSQL')
-    expect(order).toContain('sandbox technology')
+    expect(items).toContain('## WORK-019 — Sandbox Architecture and ACR-004')
+    expect(items).toContain('Status: `READY`')
+    expect(items).toContain('Dependencies: `WORK-018`')
+    expect(order).toContain('`READY`')
+    expect(order).toContain('`IAAS-DOM-ARCH-4`')
+    expect(order).toContain('`WORK-018`')
+    expect(order).toContain('ACR-004')
+    expect(order).toContain('sandbox')
   })
 })

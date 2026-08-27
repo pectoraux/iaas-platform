@@ -269,7 +269,7 @@ Definition of Done: DOM-022 implemented without architecture drift; evidence rec
 
 ## WORK-019 — Sandbox Architecture and ACR-004
 Status: `READY`
-Architecture Version: `IAAS-DOM-ARCH-4`
+Architecture Version: `IAAS-GOV-ARCH-1`
 Dependencies: `WORK-018`
 Requirements: frozen V4 §2.8 Security and Isolation; deferred sandbox area
 Objective: produce an ACR for sandbox technology and isolation semantics for the Extension Stack without implementing any sandbox technology.
