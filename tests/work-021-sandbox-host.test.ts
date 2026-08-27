@@ -231,12 +231,12 @@ describe('WORK-021 — Real resource enforcement (W021-AC05, AR-021-03)', () => 
 describe('WORK-021 — Real measurements (W021-AC06, AR-021-04)', () => {
   const SANDBOX_SRC = readSrc('src/lib/services/sandbox-host.service.ts')
 
-  test('SandboxMeasurements has five distinct quantities', () => {
+  test('SandboxMeasurements has five distinct quantity fields', () => {
     expect(SANDBOX_SRC).toContain('export interface SandboxMeasurements')
-    expect(SANDBOX_SRC).toContain('fuelUnits: number')
+    expect(SANDBOX_SRC).toContain('fuelUnits?')
     expect(SANDBOX_SRC).toContain('cpuTimeNs?')
     expect(SANDBOX_SRC).toContain('wallTimeMs: number')
-    expect(SANDBOX_SRC).toContain('peakLinearMemoryBytes: number')
+    expect(SANDBOX_SRC).toContain('peakLinearMemoryBytes?')
     expect(SANDBOX_SRC).toContain('hostcallBytes: number')
   })
 
@@ -251,10 +251,10 @@ describe('WORK-021 — Real measurements (W021-AC06, AR-021-04)', () => {
     expect(SANDBOX_SRC).not.toContain('fuelUnits = 0')
   })
 
-  test('measurements honestly mark unavailable quantities via measurementSource', () => {
-    expect(SANDBOX_SRC).toContain('measurementSource')
-    expect(SANDBOX_SRC).toContain('enforced-limit')
-    expect(SANDBOX_SRC).toContain('absent')
+  test('measurements separate usage from enforced limits (AR-021-16)', () => {
+    expect(SANDBOX_SRC).toContain('enforcedLimits')
+    expect(SANDBOX_SRC).toContain('ABSENT')
+    expect(SANDBOX_SRC).toContain('NOT filled with the ceiling')
   })
 })
 

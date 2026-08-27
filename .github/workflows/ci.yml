@@ -82,10 +82,15 @@ jobs:
           bun-version: latest
       - run: bun install --frozen-lockfile
       - run: bunx prisma generate
-      - name: Install Wasmtime (for WORK-021 sandbox e2e tests)
+      - name: Install Wasmtime + wasm-tools (for WORK-021 sandbox e2e tests)
         run: |
           curl -sSf https://wasmtime.dev/install.sh | bash
           echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+          # Install wasm-tools for Component Model binary creation (AR-021-14)
+          curl -sL https://github.com/bytecodealliance/wasm-tools/releases/download/v1.258.0/wasm-tools-1.258.0-x86_64-linux.tar.gz | tar xz -C /tmp/
+          cp /tmp/wasm-tools-1.258.0-x86_64-linux/wasm-tools $HOME/.wasmtime/bin/
+          # Download WASI Preview 1 adapter for component creation
+          curl -sL "https://github.com/bytecodealliance/wasmtime/releases/download/v48.0.1/wasi_snapshot_preview1.command.wasm" -o /tmp/wasi_snapshot_preview1.command.wasm
       - name: Architecture + runtime resolution tests (no DB)
         run: bun test tests/architecture-contract.test.ts tests/runtime-resolution.test.ts tests/work-004-runtime-bootstrap.test.ts tests/work-007-typecheck-closure.test.ts tests/work-021-sandbox-host-e2e.test.ts --timeout 60000
 

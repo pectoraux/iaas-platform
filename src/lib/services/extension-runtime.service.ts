@@ -491,6 +491,9 @@ export async function executeExtension(
   // the V4 ceiling-echo semantics with real measured values.
   let measuredResourceUsage: ExtensionResourceLimits | undefined
   let measuredCapabilitiesExercised: string[] | undefined
+  // AR-021-17 fix: execution handle for revocation. When the sandbox is used,
+  // the Runtime owns the handle so revocation can terminate the active execution.
+  let executionHandle: import('@/lib/services/sandbox-host.service').SandboxExecutionHandle | null = null
 
   try {
     if (useSandbox) {
@@ -505,21 +508,25 @@ export async function executeExtension(
           wallTimeMs: ceiling.resourceLimits.timeMs,
         },
       }
-      const sandboxResult = await sandbox.execute(
+      // AR-021-17 fix: use executeWithHandle so the Runtime owns the
+      // execution handle. This allows revocation to terminate the
+      // active sandbox execution via handle.revoke().
+      executionHandle = sandbox.executeWithHandle(
         input.wasmModule!,
         input.inputPayload,
         sandboxCeiling,
       )
+      const sandboxResult = await executionHandle.result
       outputPayload = sandboxResult.output
       // AR-021-05 fix: wire sandbox measurements into provenance.
       // V5 §2.3: these are AUTHORITATIVE measured values, NOT ceiling echoes.
+      // AR-021-16: usage fields are absent when unmeasurable (not filled with ceiling)
       measuredResourceUsage = {
-        // fuel ≠ CPU time (V5 §2.3). cpuMs is left undefined because
-        // wasmtime CLI doesn't report CPU time. fuelUnits is recorded
-        // separately (would be a V5 additive field).
-        memoryBytes: sandboxResult.measurements.peakLinearMemoryBytes,
+        // wallTimeMs is the only REAL measured time value
         timeMs: sandboxResult.measurements.wallTimeMs, // REAL measured wall-clock
+        // cpuMs, memoryBytes, fuelUnits are ABSENT — not measurable via CLI
       }
+      // AR-021-15: capabilitiesExercised is EMPTY (not copied from grant set)
       measuredCapabilitiesExercised = sandboxResult.capabilitiesExercised
     } else {
       // V4 path: execute through the in-memory ExtensionContract.

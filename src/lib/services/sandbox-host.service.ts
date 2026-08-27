@@ -87,40 +87,41 @@ export interface SandboxCeiling {
 /**
  * Post-execution measurements. Per V5 §2.3, these are DISTINCT quantities.
  *
- * AR-021-10 fix: measurements are honestly classified:
- *   - wallTimeMs: REAL host-measured elapsed time (authoritative).
- *   - hostcallBytes: REAL I/O accounting (authoritative).
- *   - fuelUnits: the ENFORCED FUEL LIMIT (not actual consumption). The
- *     wasmtime CLI does not report actual fuel consumed. This is an
- *     upper bound, not a measurement. Actual consumption requires the
- *     wasmtime embedding API.
- *   - peakLinearMemoryBytes: the ENFORCED MEMORY LIMIT (not actual peak).
- *     The wasmtime CLI does not report actual memory peak. This is an
- *     upper bound, not a measurement.
- *   - cpuTimeNs: ABSENT (wasmtime CLI does not report CPU time). Honestly
- *     undefined — NOT derived from fuel, NOT synthetic.
+ * AR-021-16 fix: limits and usage are SEPARATE concepts. Usage fields are
+ * ABSENT when the runtime cannot measure them — they are NOT filled with
+ * the enforced ceiling.
  *
- * The measurementSource field indicates whether fuel/memory values are
- * measured or ceiling-limited.
+ * Measured values (authoritative):
+ *   - wallTimeMs: REAL host-measured elapsed time.
+ *   - hostcallBytes: REAL I/O accounting (input + output bytes).
+ *
+ * Absent values (honestly undefined — NOT filled with ceiling):
+ *   - fuelUnits: ABSENT when actual consumption cannot be measured. The
+ *     wasmtime CLI does not report actual fuel consumed. Requires the
+ *     wasmtime embedding API (not available in the npm ecosystem).
+ *   - peakLinearMemoryBytes: ABSENT when actual peak cannot be measured.
+ *   - cpuTimeNs: ABSENT (wasmtime CLI does not report CPU time).
+ *
+ * Enforced limits are recorded SEPARATELY in `enforcedLimits`, not in
+ * the usage fields. This ensures V5 provenance carries MEASURED usage,
+ * not enforcement ceilings.
  */
 export interface SandboxMeasurements {
-  /** Enforced fuel limit (NOT actual consumption — upper bound only). */
-  fuelUnits: number
-  /** Host-measured CPU time nanoseconds (ABSENT — wasmtime CLI doesn't report). */
+  /** Actual fuel consumed. ABSENT when unmeasurable (NOT the ceiling). */
+  fuelUnits?: number
+  /** Host-measured CPU time nanoseconds. ABSENT when unmeasurable. */
   cpuTimeNs?: number
   /** REAL host-measured elapsed wall-clock milliseconds (authoritative). */
   wallTimeMs: number
-  /** Enforced memory limit (NOT actual peak — upper bound only). */
-  peakLinearMemoryBytes: number
+  /** Actual peak linear memory. ABSENT when unmeasurable (NOT the ceiling). */
+  peakLinearMemoryBytes?: number
   /** REAL I/O accounting: bytes transferred across the sandbox boundary. */
   hostcallBytes: number
-  /** Indicates whether fuel/memory are measured or ceiling-limited. */
-  measurementSource: {
-    fuelUnits: 'enforced-limit' | 'measured'
-    peakLinearMemoryBytes: 'enforced-limit' | 'measured'
-    wallTimeMs: 'measured'
-    hostcallBytes: 'measured'
-    cpuTimeNs: 'absent' | 'measured'
+  /** Enforced limits (separate from usage — AR-021-16 fix). */
+  enforcedLimits: {
+    executionBudget?: number
+    memoryBytes?: number
+    wallTimeMs?: number
   }
 }
 
@@ -232,7 +233,7 @@ export interface SandboxHost {
  *     WASI module);
  *   - it is suitable for untrusted code (the Node.js built-in WASI module is not).
  *
- * CAPABILITY ENFORCEMENT (V5 §2.4 — AR-021-02, AR-021-09 fix):
+ * CAPABILITY ENFORCEMENT (V5 §2.4 — AR-021-02, AR-021-09, AR-021-15 fix):
  *   - -S cli=n: when NO capabilities are approved, ALL WASI imports are
  *     unresolved → instantiation fails (operation-level enforcement at the
  *     import boundary).
@@ -240,9 +241,14 @@ export interface SandboxHost {
  *     is available. Filesystem access is additionally controlled via --dir.
  *   - --dir: granted ONLY when 'wasi:filesystem.read' or 'wasi:filesystem.write'
  *     is approved. When only read is approved, the temp directory is set to
- *     read-only (chmod 555) — AR-021-13 fix.
- *   - No -S tcp=y, -S udp=y, -S http=y, -S inherit-network=y, -S inherit-env=y:
- *     network and environment access are NEVER granted.
+ *     read-only (chmod 555) — AR-021-13 fix. This is OS-level enforcement
+ *     at the sandbox boundary: the sandbox process cannot write because the
+ *     kernel denies the write syscall on a 555 directory.
+ *   - capabilitiesExercised: EMPTY — we cannot observe actual operations
+ *     from the wasmtime CLI. We do NOT copy from the granted set (AR-021-15).
+ *     The granted capabilities are recorded in the ceiling, not in exercised
+ *     capabilities. Actual operation observation requires the wasmtime
+ *     embedding API.
  *
  * RESOURCE ENFORCEMENT (V5 §2.3 — AR-021-03 fix):
  *   - executionBudget: enforced via `-W fuel=N`. Wasmtime traps when fuel is
@@ -250,16 +256,17 @@ export interface SandboxHost {
  *   - memoryBytes: enforced via `-W max-memory-size=N` + `trap-on-grow-failure=y`.
  *   - wallTimeMs: enforced via `-W timeout=Nms`. Wasmtime interrupts execution.
  *
- * MEASUREMENTS (V5 §2.3 — AR-021-04, AR-021-10 fix):
- *   - wallTimeMs: REAL host-measured elapsed time (authoritative).
- *   - hostcallBytes: REAL I/O accounting (input + output bytes).
- *   - fuelUnits: ENFORCED LIMIT (not actual consumption — honestly reported
- *     as 'enforced-limit' in measurementSource). Actual consumption requires
- *     the wasmtime embedding API, which is not available in the npm ecosystem.
- *   - peakLinearMemoryBytes: ENFORCED LIMIT (not actual peak — honestly
- *     reported as 'enforced-limit' in measurementSource).
- *   - cpuTimeNs: ABSENT (wasmtime CLI doesn't report CPU time). Honestly
- *     reported as 'absent' in measurementSource.
+ * MEASUREMENTS (V5 §2.3 — AR-021-16 fix):
+ *   - wallTimeMs: REAL host-measured elapsed time (authoritative usage).
+ *   - hostcallBytes: REAL I/O accounting (authoritative usage).
+ *   - fuelUnits: ABSENT (actual consumption not measurable via CLI). NOT
+ *     filled with the ceiling. Requires the wasmtime embedding API.
+ *   - peakLinearMemoryBytes: ABSENT (actual peak not measurable via CLI).
+ *     NOT filled with the ceiling.
+ *   - cpuTimeNs: ABSENT (wasmtime CLI doesn't report CPU time).
+ *   - enforcedLimits: SEPARATE field recording the enforcement ceilings
+ *     (NOT in the usage fields). This ensures provenance carries MEASURED
+ *     usage, not enforcement ceilings.
  *
  * REVOCATION (V5 §2.5 — AR-021-11 fix):
  *   executeWithHandle() uses child_process.spawn, returning a handle that
@@ -411,16 +418,13 @@ export class WasmtimeSandboxHost implements SandboxHost {
         const totalHostcallBytes = hostcallBytes + stdout.length
 
         const partialMeasurements: Partial<SandboxMeasurements> = {
-          fuelUnits: fuelLimit,
+          // AR-021-16: usage fields are ABSENT when unmeasurable
           wallTimeMs: elapsedMs,
-          peakLinearMemoryBytes: memoryLimit,
           hostcallBytes: totalHostcallBytes,
-          measurementSource: {
-            fuelUnits: 'enforced-limit',
-            peakLinearMemoryBytes: 'enforced-limit',
-            wallTimeMs: 'measured',
-            hostcallBytes: 'measured',
-            cpuTimeNs: 'absent',
+          enforcedLimits: {
+            executionBudget: fuelLimit || undefined,
+            memoryBytes: memoryLimit || undefined,
+            wallTimeMs: ceiling.resources.wallTimeMs,
           },
         }
 
@@ -436,23 +440,23 @@ export class WasmtimeSandboxHost implements SandboxHost {
 
         // Success case
         if (exitCode === 0) {
+          // AR-021-15: capabilitiesExercised is EMPTY — we cannot observe
+          // actual operations from the wasmtime CLI. We do NOT copy from
+          // the granted set. The granted capabilities are recorded in the
+          // ceiling, not in exercised capabilities.
           const capabilitiesExercised: string[] = []
-          if (hasFsRead) capabilitiesExercised.push('wasi:filesystem.read')
-          if (hasFsWrite) capabilitiesExercised.push('wasi:filesystem.write')
 
           resolve({
             output: stdout,
             measurements: {
-              fuelUnits: fuelLimit,
+              // AR-021-16: usage fields are ABSENT when unmeasurable
+              // (NOT filled with the enforced ceiling)
               wallTimeMs: elapsedMs,
-              peakLinearMemoryBytes: memoryLimit,
               hostcallBytes: totalHostcallBytes,
-              measurementSource: {
-                fuelUnits: 'enforced-limit',
-                peakLinearMemoryBytes: 'enforced-limit',
-                wallTimeMs: 'measured',
-                hostcallBytes: 'measured',
-                cpuTimeNs: 'absent',
+              enforcedLimits: {
+                executionBudget: fuelLimit || undefined,
+                memoryBytes: memoryLimit || undefined,
+                wallTimeMs: ceiling.resources.wallTimeMs,
               },
             },
             capabilitiesExercised,
