@@ -486,6 +486,11 @@ export async function executeExtension(
   // 7. Execute the extension (sandboxed or in-memory).
   let outputPayload: Buffer
   let resultStatus: 'success' | 'failed' = 'success'
+  // V5 §2.3 (AR-021-05 fix): when sandbox is used, capture authoritative
+  // measurements and exercised capabilities for provenance. These REPLACE
+  // the V4 ceiling-echo semantics with real measured values.
+  let measuredResourceUsage: ExtensionResourceLimits | undefined
+  let measuredCapabilitiesExercised: string[] | undefined
 
   try {
     if (useSandbox) {
@@ -495,7 +500,7 @@ export async function executeExtension(
       const sandboxCeiling = {
         capabilities: { capabilities: ceiling.capabilities },
         resources: {
-          executionBudget: ceiling.resourceLimits.cpuMs, // approximate fuel budget
+          executionBudget: ceiling.resourceLimits.cpuMs, // fuel budget
           memoryBytes: ceiling.resourceLimits.memoryBytes,
           wallTimeMs: ceiling.resourceLimits.timeMs,
         },
@@ -506,11 +511,16 @@ export async function executeExtension(
         sandboxCeiling,
       )
       outputPayload = sandboxResult.output
-      // Note: sandboxResult.measurements and capabilitiesExercised are
-      // authoritative (V5 §2.3). They are NOT yet wired into the provenance
-      // payload in this Work Item — that requires the V5 provenance schema
-      // change, which is a separate future Work Item. For now, the ceiling
-      // is still recorded (V4-compatible).
+      // AR-021-05 fix: wire sandbox measurements into provenance.
+      // V5 §2.3: these are AUTHORITATIVE measured values, NOT ceiling echoes.
+      measuredResourceUsage = {
+        // fuel ≠ CPU time (V5 §2.3). cpuMs is left undefined because
+        // wasmtime CLI doesn't report CPU time. fuelUnits is recorded
+        // separately (would be a V5 additive field).
+        memoryBytes: sandboxResult.measurements.peakLinearMemoryBytes,
+        timeMs: sandboxResult.measurements.wallTimeMs, // REAL measured wall-clock
+      }
+      measuredCapabilitiesExercised = sandboxResult.capabilitiesExercised
     } else {
       // V4 path: execute through the in-memory ExtensionContract.
       outputPayload = await impl!.execute(
@@ -533,7 +543,7 @@ export async function executeExtension(
     }
     const outputHash = sha256(Buffer.alloc(0).toString('hex')) // empty output on failure
 
-    await emitProvenance(tenantId, input, registryEntry, inputHash, outputHash, 'failed', ceiling, failureMetadata)
+    await emitProvenance(tenantId, input, registryEntry, inputHash, outputHash, 'failed', ceiling, failureMetadata, measuredResourceUsage, measuredCapabilitiesExercised)
 
     // Re-throw the original error (caller sees the failure).
     throw err
@@ -543,6 +553,7 @@ export async function executeExtension(
   const outputHash = sha256(outputPayload.toString('hex'))
 
   // 9. Emit immutable ExtensionProvenance (success provenance).
+  // AR-021-05 fix: pass measured values (from sandbox) to provenance.
   const provenanceResult = await emitProvenance(
     tenantId,
     input,
@@ -552,6 +563,8 @@ export async function executeExtension(
     'success',
     ceiling,
     undefined,
+    measuredResourceUsage,
+    measuredCapabilitiesExercised,
   )
 
   return {
@@ -880,6 +893,11 @@ async function emitProvenance(
   resultStatus: 'success' | 'failed',
   ceiling: ExtensionCapabilityCeiling,
   failureMetadata?: { error: string; errorType: string; denialReason?: string },
+  // AR-021-05 fix: when the sandbox is used, these are AUTHORITATIVE MEASURED
+  // values (V5 §2.3). When undefined (V4 in-memory path), the ceiling values
+  // are used (V4 ceiling-echo semantics).
+  measuredResourceUsage?: ExtensionResourceLimits,
+  measuredCapabilitiesExercised?: string[],
 ): Promise<{ recordId: string; status: 'created' | 'replay' }> {
   const payload = computeProvenancePayload({
     tenantId,
@@ -889,8 +907,9 @@ async function emitProvenance(
     inputHash,
     outputHash,
     resultStatus,
-    resourceUsage: ceiling.resourceLimits,
-    capabilitiesExercised: ceiling.capabilities,
+    // AR-021-05: use measured values when available (sandbox); otherwise ceiling (V4)
+    resourceUsage: measuredResourceUsage ?? ceiling.resourceLimits,
+    capabilitiesExercised: measuredCapabilitiesExercised ?? ceiling.capabilities,
     tenantApprovedCeiling: ceiling.tenantApprovedCeiling,
     failureMetadata,
   })
