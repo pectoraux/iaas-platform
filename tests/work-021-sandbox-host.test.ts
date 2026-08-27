@@ -171,6 +171,68 @@ describe('WORK-021 — Capability enforcement (W021-AC03)', () => {
   test('SandboxCapabilityDeniedError exists for denied imports', () => {
     expect(SANDBOX_SRC).toContain('export class SandboxCapabilityDeniedError')
   })
+
+  test('AR-021-18: exact interface allowlist — import verification exists', () => {
+    expect(SANDBOX_SRC).toContain('export function verifySandboxImports')
+    expect(SANDBOX_SRC).toContain('COMPONENT_INTERFACE_REQUIREMENTS')
+    expect(SANDBOX_SRC).toContain('P1_FUNCTION_REQUIREMENTS')
+    expect(SANDBOX_SRC).toContain('AR-021-18')
+  })
+
+  test('AR-021-18: component interfaces map to exact capabilities (no broad cli grant)', () => {
+    // The mapping table maps each WASI Preview-2 interface to the exact
+    // platform capability that authorizes it.
+    expect(SANDBOX_SRC).toContain("'wasi:cli/stdout': ['wasi:cli/stdout']")
+    expect(SANDBOX_SRC).toContain("'wasi:random/random': ['wasi:random/random']")
+    expect(SANDBOX_SRC).toContain("'wasi:clocks/monotonic-clock': ['wasi:clocks/monotonic-clock']")
+    // Structural support interfaces are documented and separately gated.
+    expect(SANDBOX_SRC).toContain('STRUCTURAL_SUPPORT_INTERFACES')
+    expect(SANDBOX_SRC).toContain('STREAM_USING_CAPABILITIES')
+  })
+
+  test('AR-021-18: sockets/network are granted by NO capability (deny-by-default table)', () => {
+    // The interface table must NOT contain any wasi:sockets entry.
+    const tableStart = SANDBOX_SRC.indexOf('COMPONENT_INTERFACE_REQUIREMENTS: Record')
+    const tableEnd = SANDBOX_SRC.indexOf('STREAM_USING_CAPABILITIES')
+    const table = SANDBOX_SRC.slice(tableStart, tableEnd)
+    expect(table).not.toContain('wasi:sockets')
+    // The P1 function table must NOT contain any sock_ function.
+    const p1Start = SANDBOX_SRC.indexOf('P1_FUNCTION_REQUIREMENTS: Record')
+    const p1End = SANDBOX_SRC.indexOf('verifySandboxImports')
+    const p1Table = SANDBOX_SRC.slice(p1Start, p1End)
+    expect(p1Table).not.toContain("'sock_")
+  })
+
+  test('AR-021-18: import verification runs before the runtime subprocess is spawned', () => {
+    const verifyIdx = SANDBOX_SRC.indexOf('verifySandboxImports(wasmModule, approvedCapabilities, wasmPath)')
+    const spawnIdx = SANDBOX_SRC.indexOf("spawn('wasmtime', args")
+    expect(verifyIdx).toBeGreaterThan(0)
+    expect(spawnIdx).toBeGreaterThan(verifyIdx)
+  })
+
+  test('AR-021-18: component binaries are verified via wasm-tools interface extraction', () => {
+    expect(SANDBOX_SRC).toContain("execFileSync('wasm-tools', ['component', 'wit', wasmPath]")
+  })
+
+  test('AR-021-19: termination cause is tracked explicitly, never inferred from a signal', () => {
+    expect(SANDBOX_SRC).toContain("type HostTerminationCause = 'revoked' | 'host-timeout'")
+    expect(SANDBOX_SRC).toContain("hostCause = hostCause ?? 'revoked'")
+    expect(SANDBOX_SRC).toContain("hostCause = hostCause ?? 'host-timeout'")
+    // The close handler must classify by the recorded cause BEFORE looking at
+    // the signal.
+    expect(SANDBOX_SRC).not.toContain("signal === 'SIGTERM'")
+  })
+
+  test('AR-021-19: spawn timeout option is NOT used (ambiguous SIGTERM kill)', () => {
+    // Node's spawn timeout kills with SIGTERM indistinguishable from
+    // revocation — the host owns an explicit backstop timer instead.
+    const spawnBlock = SANDBOX_SRC.slice(
+      SANDBOX_SRC.indexOf("spawn('wasmtime', args"),
+      SANDBOX_SRC.indexOf('backstopTimer = setTimeout'),
+    )
+    expect(spawnBlock).not.toContain('timeout:')
+    expect(SANDBOX_SRC).toContain('backstopTimer = setTimeout')
+  })
 })
 
 // ---------------------------------------------------------------------------

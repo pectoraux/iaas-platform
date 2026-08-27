@@ -141,6 +141,11 @@ export interface ExtensionProvenancePayload {
     error: string
     errorType: string
     denialReason?: string
+    /** AR-021-19: explicit sandbox termination cause ('revoked' | 'timeout' |
+     * 'fuel_exhausted' | 'memory_exceeded' | 'cpu_time_exceeded') when the
+     * failure is a SandboxTerminatedError. Records the INITIATING cause as
+     * tracked by the sandbox host — never inferred from a signal. */
+    terminationReason?: string
   }
   /** SHA-256 fingerprint of the material fields (V4 §2.4). */
   fingerprint: string
@@ -544,9 +549,16 @@ export async function executeExtension(
     // Failure semantics: emit a failed ExtensionProvenance payload, then
     // re-throw the original error. The caller does NOT get a silent success.
     resultStatus = 'failed'
+    // AR-021-19: when the sandbox terminated the execution, record the
+    // EXPLICIT initiating cause (revoked/timeout/fuel_exhausted/
+    // memory_exceeded) — never a signal-inferred guess.
+    const { SandboxTerminatedError } = await import('@/lib/services/sandbox-host.service')
+    const terminationReason =
+      err instanceof SandboxTerminatedError ? err.terminationReason : undefined
     const failureMetadata = {
       error: err instanceof Error ? err.message : String(err),
       errorType: err instanceof Error ? err.constructor.name : 'Unknown',
+      ...(terminationReason !== undefined ? { terminationReason } : {}),
     }
     const outputHash = sha256(Buffer.alloc(0).toString('hex')) // empty output on failure
 
@@ -899,7 +911,7 @@ async function emitProvenance(
   outputHash: string,
   resultStatus: 'success' | 'failed',
   ceiling: ExtensionCapabilityCeiling,
-  failureMetadata?: { error: string; errorType: string; denialReason?: string },
+  failureMetadata?: { error: string; errorType: string; denialReason?: string; terminationReason?: string },
   // AR-021-05 fix: when the sandbox is used, these are AUTHORITATIVE MEASURED
   // values (V5 §2.3). When undefined (V4 in-memory path), the ceiling values
   // are used (V4 ceiling-echo semantics).
@@ -947,7 +959,7 @@ function computeProvenancePayload(input: {
   resourceUsage: ExtensionResourceLimits
   capabilitiesExercised: string[]
   tenantApprovedCeiling: { capabilities: string[]; resourceLimits: ExtensionResourceLimits }
-  failureMetadata?: { error: string; errorType: string; denialReason?: string }
+  failureMetadata?: { error: string; errorType: string; denialReason?: string; terminationReason?: string }
 }): ExtensionProvenancePayload {
   const fingerprint = computeExtensionProvenanceFingerprint({
     tenantId: input.tenantId,

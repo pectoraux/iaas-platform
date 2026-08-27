@@ -3,39 +3,52 @@
  * WORK-021 — WASI Sandbox Host end-to-end verification tests
  *
  * Proves W021-AC02..AC11 with a real wasmtime CLI subprocess:
- *   - successful Component Model execution (AR-021-14)
- *   - capability denial — -S cli=n disables ALL WASI imports (AR-021-09)
- *   - read-only filesystem enforcement — chmod 555 (AR-021-13)
- *   - capabilitiesExercised is empty, not copied from grant set (AR-021-15)
- *   - fuel exhaustion enforcement (AR-021-03)
- *   - memory limit enforcement (AR-021-03)
- *   - wall-clock timeout enforcement (AR-021-03)
- *   - usage fields absent when unmeasurable, not filled with ceiling (AR-021-16)
- *   - revocation via execution handle (AR-021-11)
- *   - Runtime wires executeWithHandle for revocation (AR-021-17)
- *   - deny-by-default when sandbox unavailable (W021-AC08)
- *   - tenant isolation — concurrent executions (AR-021-07)
- *   - no global stdout monkey-patch (AR-021-06)
+ *
+ * AR-021-18 — EXACT capability allowlist at the import/interface boundary:
+ *   - true Preview-2 component fixtures whose imports correspond to the
+ *     frozen capability contract (AR-021-20);
+ *   - unauthorized component interfaces are NEVER linked (denied before the
+ *     runtime is even spawned);
+ *   - P1 core-module operations (random_get, clock_time_get, fd_write,
+ *     path_open) are individually capability-checked;
+ *   - socket imports are denied under EVERY approved capability set;
+ *   - non-WASI custom imports are denied.
+ *
+ * AR-021-19 — explicit termination-cause tracking:
+ *   - wasmtime -W timeout trap → 'timeout';
+ *   - host wall-clock backstop kill (SIGTERM) → 'timeout', NOT 'revoked';
+ *   - explicit revocation (SIGTERM) → 'revoked';
+ *   - fuel exhaustion → 'fuel_exhausted'; memory limit → 'memory_exceeded';
+ *   - the ExtensionRuntime records terminationReason in failure provenance.
+ *
+ * AR-021-20 — true WASI Preview-2 component-model fixtures:
+ *   - fixtures under tests/fixtures/work-021/ are genuine Component Model
+ *     binaries (version byte 0x0d) importing real Preview-2 interfaces
+ *     (wasi:random/random, wasi:cli/stdout + wasi:io/streams,
+ *     wasi:clocks/monotonic-clock) — NOT Preview-1 core modules wrapped by
+ *     the compatibility adapter.
  *
  * Run: bun test tests/work-021-sandbox-host-e2e.test.ts --timeout 120000
  */
 import { describe, it, expect, beforeAll } from 'bun:test'
 import { createRequire } from 'node:module'
-import { execFileSync } from 'node:child_process'
+import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import {
   WasmtimeSandboxHost,
   DenyByDefaultSandboxHost,
   SandboxUnavailableError,
   SandboxTerminatedError,
-  getSandboxHost,
-  setSandboxHostForTesting,
+  SandboxCapabilityDeniedError,
   type SandboxCeiling,
+  type SandboxExecutionHandle,
 } from '../src/lib/services/sandbox-host.service'
 
 const require = createRequire(import.meta.url)
 
 // ---------------------------------------------------------------------------
-// WAT → WASM + Component Model compilation helpers
+// WAT → core WASM helper (Preview-1 core-module fixtures)
 // ---------------------------------------------------------------------------
 
 async function compileWatToCoreWasm(watSource: string): Promise<Buffer> {
@@ -46,28 +59,19 @@ async function compileWatToCoreWasm(watSource: string): Promise<Buffer> {
   return Buffer.from(buffer)
 }
 
-/**
- * AR-021-14: Create a real WASI Component Model binary from a core WASM module
- * using wasm-tools component new --adapt.
- *
- * This wraps a Preview 1 core module as a Preview 2 component using the
- * official WASI Preview 1 command adapter from the wasmtime release.
- */
-function compileCoreToComponent(coreWasmPath: string, outputPath: string): void {
-  // Download the WASI Preview 1 adapter if not cached
-  const adapterPath = '/tmp/wasi_snapshot_preview1.command.wasm'
-  // Use wasm-tools component new --adapt to create the component
-  execFileSync('wasm-tools', [
-    'component', 'new', coreWasmPath,
-    '--adapt', `wasi_snapshot_preview1=${adapterPath}`,
-    '-o', outputPath,
-  ], { stdio: 'pipe' })
+/** Load a prebuilt TRUE Preview-2 Component Model fixture. */
+function loadComponentFixture(name: string): Buffer {
+  return readFileSync(join(process.cwd(), 'tests', 'fixtures', 'work-021', name))
 }
 
-// Minimal WASM module: exports memory + _start (no-op)
+// ---------------------------------------------------------------------------
+// Preview-1 core-module WAT fixtures
+// ---------------------------------------------------------------------------
+
+// Minimal WASM module: exports memory + _start (no imports)
 const MINIMAL_WAT = `(module (memory (export "memory") 1) (func (export "_start")))`
 
-// Infinite loop module (for fuel/timeout/revocation tests)
+// Infinite loop module (for fuel/timeout/revocation tests; no imports)
 const INFINITE_LOOP_WAT = `(module
   (memory (export "memory") 1)
   (func (export "_start")
@@ -83,7 +87,7 @@ const MEMORY_GROW_WAT = `(module
   )
 )`
 
-// Stdout write module (writes "hello" to stdout via fd_write)
+// Stdout write module (writes "hello" to stdout via fd_write — P1 path)
 const STDOUT_WRITE_WAT = `(module
   (import "wasi_snapshot_preview1" "fd_write"
     (func $fd_write (param i32 i32 i32 i32) (result i32)))
@@ -96,7 +100,7 @@ const STDOUT_WRITE_WAT = `(module
   )
 )`
 
-// File write module (tries to create a file)
+// File write module (tries to create a file via path_open)
 const FILE_WRITE_WAT = `(module
   (import "wasi_snapshot_preview1" "path_open"
     (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
@@ -111,34 +115,78 @@ const FILE_WRITE_WAT = `(module
   )
 )`
 
+// AR-021-18: P1 random module (random_get requires wasi:random/random)
+const P1_RANDOM_WAT = `(module
+  (import "wasi_snapshot_preview1" "random_get"
+    (func $random_get (param i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "_start")
+    (drop (call $random_get (i32.const 0) (i32.const 8))))
+)`
+
+// AR-021-18: P1 clock module (clock_time_get requires a clocks capability)
+const P1_CLOCK_WAT = `(module
+  (import "wasi_snapshot_preview1" "clock_time_get"
+    (func $clock (param i32 i64 i32) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "_start")
+    (drop (call $clock (i32.const 1) (i64.const 0) (i32.const 0))))
+)`
+
+// AR-021-18: P1 socket module — network is granted by NO capability
+const P1_SOCKET_WAT = `(module
+  (import "wasi_snapshot_preview1" "sock_recv"
+    (func $sock_recv (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "_start")
+    (drop (call $sock_recv
+      (i32.const 0) (i32.const 0) (i32.const 0)
+      (i32.const 0) (i32.const 0) (i32.const 0))))
+)`
+
+// AR-021-18: non-WASI custom host function import — always denied
+const P1_CUSTOM_IMPORT_WAT = `(module
+  (import "env" "host_fn" (func $host_fn (result i32)))
+  (memory (export "memory") 1)
+  (func (export "_start") (drop (call $host_fn)))
+)`
+
 let MINIMAL_WASM: Buffer
 let INFINITE_LOOP_WASM: Buffer
 let MEMORY_GROW_WASM: Buffer
 let STDOUT_WRITE_WASM: Buffer
 let FILE_WRITE_WASM: Buffer
-// AR-021-14: real Component Model binaries
-let MINIMAL_COMPONENT: Buffer
-let STDOUT_COMPONENT: Buffer
+let P1_RANDOM_WASM: Buffer
+let P1_CLOCK_WASM: Buffer
+let P1_SOCKET_WASM: Buffer
+let P1_CUSTOM_IMPORT_WASM: Buffer
+
+// ---------------------------------------------------------------------------
+// AR-021-20: TRUE Preview-2 Component Model fixtures (prebuilt binaries).
+// Built from component WAT / the wasm-tools WIT embed pipeline; they import
+// genuine Preview-2 interfaces (NOT the Preview-1 compatibility adapter).
+//   random-guest.component.wasm          imports wasi:random/random@0.2.12
+//   stdout-guest.component.wasm          imports wasi:cli/stdout@0.2.12 +
+//                                         wasi:io/streams@0.2.12 +
+//                                         wasi:io/error@0.2.12, writes "hi"
+//   monotonic-clock-guest.component.wasm imports wasi:clocks/monotonic-clock@0.2.12
+//   infinite-loop.component.wasm         imports nothing (component binary)
+// ---------------------------------------------------------------------------
+const RANDOM_COMPONENT = () => loadComponentFixture('random-guest.component.wasm')
+const STDOUT_COMPONENT = () => loadComponentFixture('stdout-guest.component.wasm')
+const CLOCK_COMPONENT = () => loadComponentFixture('monotonic-clock-guest.component.wasm')
+const LOOP_COMPONENT = () => loadComponentFixture('infinite-loop.component.wasm')
 
 beforeAll(async () => {
-  const wabtInit = require('wabt').default
-  const wabt = await wabtInit()
-  MINIMAL_WASM = Buffer.from(wabt.parseWat('minimal.wat', MINIMAL_WAT).toBinary({}).buffer)
-  INFINITE_LOOP_WASM = Buffer.from(wabt.parseWat('infinite.wat', INFINITE_LOOP_WAT).toBinary({}).buffer)
-  MEMORY_GROW_WASM = Buffer.from(wabt.parseWat('growmem.wat', MEMORY_GROW_WAT).toBinary({}).buffer)
-  STDOUT_WRITE_WASM = Buffer.from(wabt.parseWat('stdout.wat', STDOUT_WRITE_WAT).toBinary({}).buffer)
-  FILE_WRITE_WASM = Buffer.from(wabt.parseWat('filewrite.wat', FILE_WRITE_WAT).toBinary({}).buffer)
-
-  // AR-021-14: create real Component Model binaries using wasm-tools
-  const fs = require('fs')
-  const coreMinimalPath = '/tmp/core_minimal.wasm'
-  const coreStdoutPath = '/tmp/core_stdout.wasm'
-  fs.writeFileSync(coreMinimalPath, MINIMAL_WASM)
-  fs.writeFileSync(coreStdoutPath, STDOUT_WRITE_WASM)
-  compileCoreToComponent(coreMinimalPath, '/tmp/component_minimal.wasm')
-  compileCoreToComponent(coreStdoutPath, '/tmp/component_stdout.wasm')
-  MINIMAL_COMPONENT = fs.readFileSync('/tmp/component_minimal.wasm')
-  STDOUT_COMPONENT = fs.readFileSync('/tmp/component_stdout.wasm')
+  MINIMAL_WASM = await compileWatToCoreWasm(MINIMAL_WAT)
+  INFINITE_LOOP_WASM = await compileWatToCoreWasm(INFINITE_LOOP_WAT)
+  MEMORY_GROW_WASM = await compileWatToCoreWasm(MEMORY_GROW_WAT)
+  STDOUT_WRITE_WASM = await compileWatToCoreWasm(STDOUT_WRITE_WAT)
+  FILE_WRITE_WASM = await compileWatToCoreWasm(FILE_WRITE_WAT)
+  P1_RANDOM_WASM = await compileWatToCoreWasm(P1_RANDOM_WAT)
+  P1_CLOCK_WASM = await compileWatToCoreWasm(P1_CLOCK_WAT)
+  P1_SOCKET_WASM = await compileWatToCoreWasm(P1_SOCKET_WAT)
+  P1_CUSTOM_IMPORT_WASM = await compileWatToCoreWasm(P1_CUSTOM_IMPORT_WAT)
 })
 
 let sandboxHost: WasmtimeSandboxHost
@@ -147,70 +195,279 @@ beforeAll(() => {
   sandboxHost = new WasmtimeSandboxHost()
 })
 
+const BASE_RESOURCES = { executionBudget: 1000000, memoryBytes: 1048576, wallTimeMs: 5000 }
+
 // ---------------------------------------------------------------------------
 // W021-AC01 — sandbox availability
 // ---------------------------------------------------------------------------
 
 describe('WORK-021 — Sandbox availability (W021-AC01)', () => {
-  it('wasmtime sandbox host reports availability', () => {
+  it('wasmtime sandbox host reports availability (requires wasmtime + wasm-tools)', () => {
     expect(sandboxHost.isAvailable()).toBe(true)
   })
 })
 
 // ---------------------------------------------------------------------------
-// AR-021-14 — real Component Model binary execution
+// AR-021-20 — TRUE Preview-2 component-model fixtures
 // ---------------------------------------------------------------------------
 
-describe('WORK-021 — Component Model binary execution (AR-021-14)', () => {
-  it('executes a real WASI Component Model binary (not just Preview 1 core module)', async () => {
-    // MINIMAL_COMPONENT is a real Component Model binary created via
-    // wasm-tools component new --adapt (wraps a Preview 1 core module
-    // as a Preview 2 component using the official WASI adapter).
-    // Components require -S cli=y (the adapter imports WASI interfaces).
-    const ceiling: SandboxCeiling = {
-      capabilities: { capabilities: ['wasi:cli/run'] },
-      resources: { executionBudget: 1000000, memoryBytes: 1048576, wallTimeMs: 5000 },
+describe('WORK-021 — True Preview-2 component fixtures (AR-021-20)', () => {
+  it('fixtures are genuine Component Model binaries (version byte 0x0d, not core modules)', () => {
+    for (const buf of [RANDOM_COMPONENT(), STDOUT_COMPONENT(), CLOCK_COMPONENT(), LOOP_COMPONENT()]) {
+      expect(buf.length).toBeGreaterThan(8)
+      // magic: \0asm
+      expect(buf[0]).toBe(0x00)
+      expect(buf[1]).toBe(0x61)
+      expect(buf[2]).toBe(0x73)
+      expect(buf[3]).toBe(0x6d)
+      // Component Model version bytes: 0x0d 00 01 00 (core modules use 01 00 00 00)
+      expect(buf[4]).toBe(0x0d)
+      expect(buf[5]).toBe(0x00)
+      expect(buf[6]).toBe(0x01)
+      expect(buf[7]).toBe(0x00)
     }
-    const result = await sandboxHost.execute(MINIMAL_COMPONENT, Buffer.alloc(0), ceiling)
-    expect(result).toBeTruthy()
-    expect(result.measurements.wallTimeMs).toBeGreaterThan(0)
   })
 
-  it('Component Model binary with stdout works', async () => {
+  it('random fixture imports the true Preview-2 wasi:random/random interface', () => {
+    // The component binary embeds its imported interface names as strings.
+    const text = RANDOM_COMPONENT().toString('latin1')
+    expect(text).toContain('wasi:random/random')
+  })
+
+  it('stdout fixture imports the true Preview-2 wasi:cli/stdout interface', () => {
+    const text = STDOUT_COMPONENT().toString('latin1')
+    expect(text).toContain('wasi:cli/stdout')
+    expect(text).toContain('wasi:io/streams')
+  })
+
+  it('clock fixture imports the true Preview-2 wasi:clocks/monotonic-clock interface', () => {
+    const text = CLOCK_COMPONENT().toString('latin1')
+    expect(text).toContain('wasi:clocks/monotonic-clock')
+  })
+
+  it('stdout fixture writes real output through the true Preview-2 stream interface', async () => {
     const ceiling: SandboxCeiling = {
       capabilities: { capabilities: ['wasi:cli/stdout'] },
-      resources: { executionBudget: 1000000, memoryBytes: 1048576, wallTimeMs: 5000 },
+      resources: BASE_RESOURCES,
     }
-    const result = await sandboxHost.execute(STDOUT_COMPONENT, Buffer.alloc(0), ceiling)
-    expect(result.output.toString('utf8')).toContain('hello')
-  })
-
-  it('fuel enforcement works on Component Model binary', async () => {
-    // Create a component with an infinite loop
-    const fs = require('fs')
-    fs.writeFileSync('/tmp/core_infinite.wasm', INFINITE_LOOP_WASM)
-    compileCoreToComponent('/tmp/core_infinite.wasm', '/tmp/component_infinite.wasm')
-    const infiniteComponent = fs.readFileSync('/tmp/component_infinite.wasm')
-
-    const ceiling: SandboxCeiling = {
-      capabilities: { capabilities: ['wasi:cli/run'] },
-      resources: { executionBudget: 1000, memoryBytes: 1048576, wallTimeMs: 10000 },
-    }
-    await expect(
-      sandboxHost.execute(infiniteComponent, Buffer.alloc(0), ceiling),
-    ).rejects.toThrow(SandboxTerminatedError)
+    const result = await sandboxHost.execute(STDOUT_COMPONENT(), Buffer.alloc(0), ceiling)
+    expect(result.output.toString('utf8')).toContain('hi')
   })
 })
 
 // ---------------------------------------------------------------------------
-// W021-AC02 — successful sandboxed execution
+// AR-021-18 — EXACT capability allowlist (component interface level)
+// ---------------------------------------------------------------------------
+
+describe('WORK-021 — Exact component interface allowlist (AR-021-18, AR-021-20)', () => {
+  it('authorized: random component executes when wasi:random/random is approved', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:random/random'] },
+      resources: BASE_RESOURCES,
+    }
+    const result = await sandboxHost.execute(RANDOM_COMPONENT(), Buffer.alloc(0), ceiling)
+    expect(result.measurements.wallTimeMs).toBeGreaterThan(0)
+  })
+
+  it('unauthorized: random component is DENIED when only wasi:cli/stdout is approved', async () => {
+    // The component imports wasi:random/random, which is outside the approved
+    // set. The sandbox denies BEFORE the runtime is spawned — the
+    // unauthorized interface is never linked or executed.
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:cli/stdout'] },
+      resources: BASE_RESOURCES,
+    }
+    try {
+      await sandboxHost.execute(RANDOM_COMPONENT(), Buffer.alloc(0), ceiling)
+      expect(false).toBe(true) // must not execute
+    } catch (err) {
+      const denied = err as SandboxCapabilityDeniedError
+      expect(denied).toBeInstanceOf(SandboxCapabilityDeniedError)
+      expect(denied.deniedCapability).toBe('wasi:random/random')
+    }
+  })
+
+  it('unauthorized: random component is DENIED when no capability is approved', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: [] },
+      resources: BASE_RESOURCES,
+    }
+    await expect(
+      sandboxHost.execute(RANDOM_COMPONENT(), Buffer.alloc(0), ceiling),
+    ).rejects.toThrow(SandboxCapabilityDeniedError)
+  })
+
+  it('authorized: stdout component executes when wasi:cli/stdout is approved', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:cli/stdout'] },
+      resources: BASE_RESOURCES,
+    }
+    const result = await sandboxHost.execute(STDOUT_COMPONENT(), Buffer.alloc(0), ceiling)
+    expect(result.output.toString('utf8')).toContain('hi')
+  })
+
+  it('unauthorized: stdout component is DENIED when only wasi:random/random is approved', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:random/random'] },
+      resources: BASE_RESOURCES,
+    }
+    await expect(
+      sandboxHost.execute(STDOUT_COMPONENT(), Buffer.alloc(0), ceiling),
+    ).rejects.toThrow(SandboxCapabilityDeniedError)
+  })
+
+  it('authorized: clock component executes when wasi:clocks/monotonic-clock is approved', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:clocks/monotonic-clock'] },
+      resources: BASE_RESOURCES,
+    }
+    const result = await sandboxHost.execute(CLOCK_COMPONENT(), Buffer.alloc(0), ceiling)
+    expect(result.measurements.wallTimeMs).toBeGreaterThan(0)
+  })
+
+  it('unauthorized: clock component is DENIED when only wasi:random/random is approved', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:random/random'] },
+      resources: BASE_RESOURCES,
+    }
+    try {
+      await sandboxHost.execute(CLOCK_COMPONENT(), Buffer.alloc(0), ceiling)
+      expect(false).toBe(true)
+    } catch (err) {
+      const denied = err as SandboxCapabilityDeniedError
+      expect(denied).toBeInstanceOf(SandboxCapabilityDeniedError)
+      expect(denied.deniedCapability).toBe('wasi:clocks/monotonic-clock')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AR-021-18 — EXACT capability allowlist (Preview-1 core-module function level)
+// ---------------------------------------------------------------------------
+
+describe('WORK-021 — Exact P1 operation allowlist (AR-021-18)', () => {
+  it('random_get is DENIED when no capability is approved', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: [] },
+      resources: BASE_RESOURCES,
+    }
+    try {
+      await sandboxHost.execute(P1_RANDOM_WASM, Buffer.alloc(0), ceiling)
+      expect(false).toBe(true)
+    } catch (err) {
+      const denied = err as SandboxCapabilityDeniedError
+      expect(denied).toBeInstanceOf(SandboxCapabilityDeniedError)
+      expect(denied.deniedCapability).toBe('wasi_snapshot_preview1.random_get')
+    }
+  })
+
+  it('random_get is DENIED when only wasi:cli/stdout is approved (cli=y does NOT authorize random)', async () => {
+    // Proves the AR-021-18 defect is fixed: enabling the WASI interface
+    // family for stdout no longer exposes random to a P1 guest.
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:cli/stdout'] },
+      resources: BASE_RESOURCES,
+    }
+    await expect(
+      sandboxHost.execute(P1_RANDOM_WASM, Buffer.alloc(0), ceiling),
+    ).rejects.toThrow(SandboxCapabilityDeniedError)
+  })
+
+  it('random_get executes when wasi:random/random is approved', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:random/random'] },
+      resources: BASE_RESOURCES,
+    }
+    const result = await sandboxHost.execute(P1_RANDOM_WASM, Buffer.alloc(0), ceiling)
+    expect(result.measurements.wallTimeMs).toBeGreaterThan(0)
+  })
+
+  it('clock_time_get executes when wasi:clocks/monotonic-clock is approved', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:clocks/monotonic-clock'] },
+      resources: BASE_RESOURCES,
+    }
+    const result = await sandboxHost.execute(P1_CLOCK_WASM, Buffer.alloc(0), ceiling)
+    expect(result.measurements.wallTimeMs).toBeGreaterThan(0)
+  })
+
+  it('clock_time_get is DENIED when only wasi:cli/stdout is approved', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:cli/stdout'] },
+      resources: BASE_RESOURCES,
+    }
+    await expect(
+      sandboxHost.execute(P1_CLOCK_WASM, Buffer.alloc(0), ceiling),
+    ).rejects.toThrow(SandboxCapabilityDeniedError)
+  })
+
+  it('socket operations are DENIED under EVERY approved capability set (network never granted)', async () => {
+    const approvedSets: string[][] = [
+      [],
+      ['wasi:cli/stdout'],
+      ['wasi:filesystem.read', 'wasi:filesystem.write'],
+      ['wasi:random/random', 'wasi:cli/stdout', 'wasi:filesystem.read', 'wasi:filesystem.write', 'wasi:clocks/monotonic-clock'],
+    ]
+    for (const capabilities of approvedSets) {
+      const ceiling: SandboxCeiling = {
+        capabilities: { capabilities },
+        resources: BASE_RESOURCES,
+      }
+      try {
+        await sandboxHost.execute(P1_SOCKET_WASM, Buffer.alloc(0), ceiling)
+        expect(false).toBe(true) // must be denied
+      } catch (err) {
+        const denied = err as SandboxCapabilityDeniedError
+        expect(denied).toBeInstanceOf(SandboxCapabilityDeniedError)
+        expect(denied.deniedCapability).toBe('wasi_snapshot_preview1.sock_recv')
+      }
+    }
+  })
+
+  it('non-WASI custom host imports are DENIED (sandbox provides no custom host functions)', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:random/random'] },
+      resources: BASE_RESOURCES,
+    }
+    try {
+      await sandboxHost.execute(P1_CUSTOM_IMPORT_WASM, Buffer.alloc(0), ceiling)
+      expect(false).toBe(true)
+    } catch (err) {
+      const denied = err as SandboxCapabilityDeniedError
+      expect(denied).toBeInstanceOf(SandboxCapabilityDeniedError)
+      expect(denied.deniedCapability).toBe('env::host_fn')
+    }
+  })
+
+  it('fd_write executes when wasi:cli/stdout is approved (P1 stdout path)', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:cli/stdout'] },
+      resources: BASE_RESOURCES,
+    }
+    const result = await sandboxHost.execute(STDOUT_WRITE_WASM, Buffer.alloc(0), ceiling)
+    expect(result.output.toString('utf8')).toContain('hello')
+  })
+
+  it('fd_write is DENIED when no capability is approved', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: [] },
+      resources: BASE_RESOURCES,
+    }
+    await expect(
+      sandboxHost.execute(STDOUT_WRITE_WASM, Buffer.alloc(0), ceiling),
+    ).rejects.toThrow(SandboxCapabilityDeniedError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W021-AC02 — successful sandboxed execution (core module path)
 // ---------------------------------------------------------------------------
 
 describe('WORK-021 — Successful sandboxed execution (W021-AC02)', () => {
-  it('executes a minimal WASM module in the sandbox', async () => {
+  it('executes a minimal core module in the sandbox with no capabilities (cli=n)', async () => {
     const ceiling: SandboxCeiling = {
       capabilities: { capabilities: [] },
-      resources: { executionBudget: 1000000, memoryBytes: 65536, wallTimeMs: 5000 },
+      resources: BASE_RESOURCES,
     }
     const result = await sandboxHost.execute(MINIMAL_WASM, Buffer.alloc(0), ceiling)
     expect(result).toBeTruthy()
@@ -220,7 +477,7 @@ describe('WORK-021 — Successful sandboxed execution (W021-AC02)', () => {
   it('captures stdout via subprocess pipe (no global monkey-patch — AR-021-06)', async () => {
     const ceiling: SandboxCeiling = {
       capabilities: { capabilities: ['wasi:cli/stdout'] },
-      resources: { executionBudget: 1000000, memoryBytes: 65536, wallTimeMs: 5000 },
+      resources: BASE_RESOURCES,
     }
     const result = await sandboxHost.execute(STDOUT_WRITE_WASM, Buffer.alloc(0), ceiling)
     expect(result.output.toString('utf8')).toContain('hello')
@@ -228,47 +485,32 @@ describe('WORK-021 — Successful sandboxed execution (W021-AC02)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// W021-AC03, AR-021-09, AR-021-15 — capability enforcement
+// W021-AC03 — no ambient authority (defense in depth source checks)
 // ---------------------------------------------------------------------------
 
-describe('WORK-021 — Capability enforcement (W021-AC03, AR-021-09, AR-021-15)', () => {
-  it('-S cli=n: ALL WASI imports are unresolved when no capabilities are approved', async () => {
-    const ceiling: SandboxCeiling = {
-      capabilities: { capabilities: [] },
-      resources: { executionBudget: 1000000, memoryBytes: 65536, wallTimeMs: 5000 },
-    }
-    await expect(
-      sandboxHost.execute(STDOUT_WRITE_WASM, Buffer.alloc(0), ceiling),
-    ).rejects.toThrow()
-  })
-
-  it('-S cli=y: WASI imports are available when capabilities are approved', async () => {
-    const ceiling: SandboxCeiling = {
-      capabilities: { capabilities: ['wasi:cli/stdout'] },
-      resources: { executionBudget: 1000000, memoryBytes: 65536, wallTimeMs: 5000 },
-    }
-    const result = await sandboxHost.execute(STDOUT_WRITE_WASM, Buffer.alloc(0), ceiling)
-    expect(result.output.toString('utf8')).toContain('hello')
-  })
-
-  it('AR-021-15: capabilitiesExercised is EMPTY, not copied from grant set', async () => {
-    const ceiling: SandboxCeiling = {
-      capabilities: { capabilities: ['wasi:filesystem.read', 'wasi:filesystem.write'] },
-      resources: { executionBudget: 1000000, memoryBytes: 65536, wallTimeMs: 5000 },
-    }
-    const result = await sandboxHost.execute(MINIMAL_WASM, Buffer.alloc(0), ceiling)
-    // capabilitiesExercised must be empty — we cannot observe actual operations
-    // from the wasmtime CLI. We do NOT copy from the granted set.
-    expect(result.capabilitiesExercised).toEqual([])
-  })
-
-  it('network access is NEVER granted (no network flags in source)', () => {
-    const sandboxSrc = require('fs').readFileSync(
-      require('path').join(process.cwd(), 'src', 'lib', 'services', 'sandbox-host.service.ts'),
+describe('WORK-021 — No ambient authority (W021-AC03)', () => {
+  it('no network-enabling flags are ever passed', () => {
+    const sandboxSrc = readFileSync(
+      join(process.cwd(), 'src', 'lib', 'services', 'sandbox-host.service.ts'),
       'utf8',
     )
-    const networkArgPattern = /'tcp=y'|'udp=y'|'http=y'|'inherit-network=y'|'inherit-env=y'/
+    const networkArgPattern = /'tcp=y'|'udp=y'|'http=y'|'inherit-network=y'|'inherit-env=y'|'allow-ip-name-lookup=y'/
     expect(networkArgPattern.test(sandboxSrc)).toBe(false)
+  })
+
+  it('import verification runs BEFORE the runtime is spawned (deny-at-boundary)', () => {
+    const sandboxSrc = readFileSync(
+      join(process.cwd(), 'src', 'lib', 'services', 'sandbox-host.service.ts'),
+      'utf8',
+    )
+    expect(sandboxSrc).toContain('verifySandboxImports')
+    expect(sandboxSrc).toContain('COMPONENT_INTERFACE_REQUIREMENTS')
+    expect(sandboxSrc).toContain('P1_FUNCTION_REQUIREMENTS')
+    // The verification call must precede the spawn call in executeWithHandle.
+    const verifyIdx = sandboxSrc.indexOf('verifySandboxImports(wasmModule, approvedCapabilities, wasmPath)')
+    const spawnIdx = sandboxSrc.indexOf("spawn('wasmtime', args")
+    expect(verifyIdx).toBeGreaterThan(0)
+    expect(spawnIdx).toBeGreaterThan(verifyIdx)
   })
 })
 
@@ -280,8 +522,10 @@ describe('WORK-021 — Read-only filesystem enforcement (AR-021-13)', () => {
   it('read-only FS: write attempts fail when only read capability is approved', async () => {
     const ceiling: SandboxCeiling = {
       capabilities: { capabilities: ['wasi:filesystem.read'] },
-      resources: { executionBudget: 1000000, memoryBytes: 65536, wallTimeMs: 5000 },
+      resources: BASE_RESOURCES,
     }
+    // path_open is authorized by wasi:filesystem.read, but the write attempt
+    // fails against the chmod-555 directory at the OS boundary.
     const result = await sandboxHost.execute(FILE_WRITE_WASM, Buffer.alloc(0), ceiling)
     expect(result).toBeTruthy()
   })
@@ -289,7 +533,7 @@ describe('WORK-021 — Read-only filesystem enforcement (AR-021-13)', () => {
   it('read-write FS: write succeeds when both read and write are approved', async () => {
     const ceiling: SandboxCeiling = {
       capabilities: { capabilities: ['wasi:filesystem.read', 'wasi:filesystem.write'] },
-      resources: { executionBudget: 1000000, memoryBytes: 65536, wallTimeMs: 5000 },
+      resources: BASE_RESOURCES,
     }
     const result = await sandboxHost.execute(FILE_WRITE_WASM, Buffer.alloc(0), ceiling)
     expect(result).toBeTruthy()
@@ -301,34 +545,82 @@ describe('WORK-021 — Read-only filesystem enforcement (AR-021-13)', () => {
 // ---------------------------------------------------------------------------
 
 describe('WORK-021 — Real resource enforcement (W021-AC05, AR-021-03)', () => {
-  it('enforces fuel limit — infinite loop traps (fuel exhaustion)', async () => {
+  it('enforces fuel limit — infinite loop traps (fuel_exhausted)', async () => {
     const ceiling: SandboxCeiling = {
       capabilities: { capabilities: [] },
       resources: { executionBudget: 100, wallTimeMs: 10000 },
     }
-    await expect(
-      sandboxHost.execute(INFINITE_LOOP_WASM, Buffer.alloc(0), ceiling),
-    ).rejects.toThrow(SandboxTerminatedError)
+    try {
+      await sandboxHost.execute(INFINITE_LOOP_WASM, Buffer.alloc(0), ceiling)
+      expect(false).toBe(true)
+    } catch (err) {
+      const terminated = err as SandboxTerminatedError
+      expect(terminated).toBeInstanceOf(SandboxTerminatedError)
+      expect(terminated.terminationReason).toBe('fuel_exhausted')
+    }
   })
 
-  it('enforces memory limit — memory.grow beyond limit traps', async () => {
+  it('AR-021-20: fuel enforcement works on the TRUE component path (no-import component)', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: [] },
+      resources: { executionBudget: 1000, wallTimeMs: 10000 },
+    }
+    try {
+      await sandboxHost.execute(LOOP_COMPONENT(), Buffer.alloc(0), ceiling)
+      expect(false).toBe(true)
+    } catch (err) {
+      const terminated = err as SandboxTerminatedError
+      expect(terminated).toBeInstanceOf(SandboxTerminatedError)
+      expect(terminated.terminationReason).toBe('fuel_exhausted')
+    }
+  })
+
+  it('enforces memory limit — memory.grow beyond limit traps (memory_exceeded)', async () => {
     const ceiling: SandboxCeiling = {
       capabilities: { capabilities: [] },
       resources: { executionBudget: 1000000, memoryBytes: 65536, wallTimeMs: 5000 },
     }
-    await expect(
-      sandboxHost.execute(MEMORY_GROW_WASM, Buffer.alloc(0), ceiling),
-    ).rejects.toThrow(SandboxTerminatedError)
+    try {
+      await sandboxHost.execute(MEMORY_GROW_WASM, Buffer.alloc(0), ceiling)
+      expect(false).toBe(true)
+    } catch (err) {
+      const terminated = err as SandboxTerminatedError
+      expect(terminated).toBeInstanceOf(SandboxTerminatedError)
+      expect(terminated.terminationReason).toBe('memory_exceeded')
+    }
   })
 
-  it('enforces wall-clock timeout — infinite loop traps (timeout)', async () => {
+  it('enforces wall-clock timeout — infinite loop traps (timeout, NOT revoked)', async () => {
     const ceiling: SandboxCeiling = {
       capabilities: { capabilities: [] },
       resources: { wallTimeMs: 100 },
     }
-    await expect(
-      sandboxHost.execute(INFINITE_LOOP_WASM, Buffer.alloc(0), ceiling),
-    ).rejects.toThrow(SandboxTerminatedError)
+    const handle = sandboxHost.executeWithHandle(INFINITE_LOOP_WASM, Buffer.alloc(0), ceiling)
+    try {
+      await handle.result
+      expect(false).toBe(true)
+    } catch (err) {
+      const terminated = err as SandboxTerminatedError
+      expect(terminated).toBeInstanceOf(SandboxTerminatedError)
+      // AR-021-19: a runtime-side timeout is 'timeout' and is NOT misreported
+      // as a revocation.
+      expect(terminated.terminationReason).toBe('timeout')
+      expect(handle.isRevoked()).toBe(false)
+    }
+  })
+
+  it('AR-021-20: wall-clock timeout works on the TRUE component path', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: [] },
+      resources: { wallTimeMs: 100 },
+    }
+    try {
+      await sandboxHost.execute(LOOP_COMPONENT(), Buffer.alloc(0), ceiling)
+      expect(false).toBe(true)
+    } catch (err) {
+      const terminated = err as SandboxTerminatedError
+      expect(terminated.terminationReason).toBe('timeout')
+    }
   })
 })
 
@@ -352,8 +644,6 @@ describe('WORK-021 — Measurement honesty (AR-021-16)', () => {
       resources: { executionBudget: 50000, memoryBytes: 65536, wallTimeMs: 5000 },
     }
     const result = await sandboxHost.execute(MINIMAL_WASM, Buffer.alloc(0), ceiling)
-    // fuelUnits must be undefined — actual consumption is NOT measurable
-    // via the wasmtime CLI. It must NOT be the ceiling value.
     expect(result.measurements.fuelUnits).toBeUndefined()
   })
 
@@ -391,22 +681,29 @@ describe('WORK-021 — Measurement honesty (AR-021-16)', () => {
       resources: { executionBudget: 50000, memoryBytes: 131072, wallTimeMs: 5000 },
     }
     const result = await sandboxHost.execute(MINIMAL_WASM, Buffer.alloc(0), ceiling)
-    // enforcedLimits is a separate field from usage
     expect(result.measurements.enforcedLimits).toBeDefined()
     expect(result.measurements.enforcedLimits.executionBudget).toBe(50000)
     expect(result.measurements.enforcedLimits.memoryBytes).toBe(131072)
     expect(result.measurements.enforcedLimits.wallTimeMs).toBe(5000)
-    // usage fields are still absent
     expect(result.measurements.fuelUnits).toBeUndefined()
     expect(result.measurements.peakLinearMemoryBytes).toBeUndefined()
+  })
+
+  it('AR-021-15: capabilitiesExercised is EMPTY, not copied from grant set', async () => {
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: ['wasi:filesystem.read', 'wasi:filesystem.write'] },
+      resources: BASE_RESOURCES,
+    }
+    const result = await sandboxHost.execute(MINIMAL_WASM, Buffer.alloc(0), ceiling)
+    expect(result.capabilitiesExercised).toEqual([])
   })
 })
 
 // ---------------------------------------------------------------------------
-// AR-021-11, AR-021-17 — revocation via execution handle + Runtime integration
+// AR-021-11, AR-021-17, AR-021-19 — revocation + explicit termination causes
 // ---------------------------------------------------------------------------
 
-describe('WORK-021 — Revocation (AR-021-11, AR-021-17)', () => {
+describe('WORK-021 — Revocation and termination causes (AR-021-11, AR-021-17, AR-021-19)', () => {
   it('executeWithHandle returns a handle with revoke()', async () => {
     const ceiling: SandboxCeiling = {
       capabilities: { capabilities: [] },
@@ -422,7 +719,7 @@ describe('WORK-021 — Revocation (AR-021-11, AR-021-17)', () => {
     expect(handle.isRevoked()).toBe(true)
   })
 
-  it('revocation terminates an active execution (SIGTERM)', async () => {
+  it('AR-021-19: explicit revocation reports terminationReason revoked', async () => {
     const ceiling: SandboxCeiling = {
       capabilities: { capabilities: [] },
       resources: { executionBudget: 1000000000, wallTimeMs: 30000 },
@@ -439,11 +736,112 @@ describe('WORK-021 — Revocation (AR-021-11, AR-021-17)', () => {
     }
   })
 
+  it('AR-021-19: host wall-clock backstop kill reports timeout, NOT revoked (fake wasmtime)', async () => {
+    // A fake `wasmtime` binary ignores the -W timeout flags and sleeps, so
+    // only the HOST backstop timer can terminate it. The backstop sends the
+    // SAME SIGTERM signal that revocation uses — this test proves the cause
+    // is taken from the explicit host actor, never inferred from the signal.
+    const fakeDir = join(tmpdir(), `fake-wasmtime-${Date.now()}`)
+    mkdirSync(fakeDir, { recursive: true })
+    const fakeBin = join(fakeDir, 'wasmtime')
+    writeFileSync(
+      fakeBin,
+      '#!/bin/sh\n'
+      + 'if [ "$1" = "--version" ]; then\n'
+      + '  echo "wasmtime fake 1.0.0"\n'
+      + '  exit 0\n'
+      + 'fi\n'
+      + 'exec sleep 30\n',
+    )
+    chmodSync(fakeBin, 0o755)
+
+    const originalPath = process.env.PATH
+    const originalGrace = process.env.IAAS_SANDBOX_BACKSTOP_GRACE_MS
+    process.env.PATH = `${fakeDir}:${originalPath}`
+    process.env.IAAS_SANDBOX_BACKSTOP_GRACE_MS = '50'
+
+    try {
+      const fakeHost = new WasmtimeSandboxHost()
+      const ceiling: SandboxCeiling = {
+        capabilities: { capabilities: [] },
+        resources: { wallTimeMs: 100 }, // backstop fires at 100 + 50 = 150ms
+      }
+      const handle = fakeHost.executeWithHandle(MINIMAL_WASM, Buffer.alloc(0), ceiling)
+      try {
+        await handle.result
+        expect(false).toBe(true)
+      } catch (err) {
+        const terminated = err as SandboxTerminatedError
+        expect(terminated).toBeInstanceOf(SandboxTerminatedError)
+        // The SIGTERM came from the host backstop, so the explicit cause is
+        // 'timeout' — a signal-only implementation would misreport 'revoked'.
+        expect(terminated.terminationReason).toBe('timeout')
+        expect(handle.isRevoked()).toBe(false)
+      }
+    } finally {
+      if (originalGrace === undefined) delete process.env.IAAS_SANDBOX_BACKSTOP_GRACE_MS
+      else process.env.IAAS_SANDBOX_BACKSTOP_GRACE_MS = originalGrace
+      process.env.PATH = originalPath
+      rmSync(fakeDir, { recursive: true, force: true })
+    }
+  })
+
+  it('AR-021-19: revocation of a hung subprocess reports revoked (fake wasmtime, same SIGTERM)', async () => {
+    // Same fake binary and SAME SIGTERM signal as the backstop test above —
+    // only the explicit host actor differs, and so must the cause.
+    const fakeDir = join(tmpdir(), `fake-wasmtime-revoke-${Date.now()}`)
+    mkdirSync(fakeDir, { recursive: true })
+    const fakeBin = join(fakeDir, 'wasmtime')
+    writeFileSync(
+      fakeBin,
+      '#!/bin/sh\n'
+      + 'if [ "$1" = "--version" ]; then\n'
+      + '  echo "wasmtime fake 1.0.0"\n'
+      + '  exit 0\n'
+      + 'fi\n'
+      + 'exec sleep 30\n',
+    )
+    chmodSync(fakeBin, 0o755)
+
+    const originalPath = process.env.PATH
+    process.env.PATH = `${fakeDir}:${originalPath}`
+
+    try {
+      const fakeHost = new WasmtimeSandboxHost()
+      const ceiling: SandboxCeiling = {
+        capabilities: { capabilities: [] },
+        resources: {}, // no wallTimeMs → no backstop interference
+      }
+      const handle = fakeHost.executeWithHandle(MINIMAL_WASM, Buffer.alloc(0), ceiling)
+      setTimeout(() => handle.revoke(), 150)
+      try {
+        await handle.result
+        expect(false).toBe(true)
+      } catch (err) {
+        const terminated = err as SandboxTerminatedError
+        expect(terminated).toBeInstanceOf(SandboxTerminatedError)
+        expect(terminated.terminationReason).toBe('revoked')
+        expect(handle.isRevoked()).toBe(true)
+      }
+    } finally {
+      process.env.PATH = originalPath
+      rmSync(fakeDir, { recursive: true, force: true })
+    }
+  })
+
+  it('AR-021-19: ExtensionRuntime records the explicit terminationReason in failure provenance', () => {
+    const runtimeSrc = readFileSync(
+      join(process.cwd(), 'src', 'lib', 'services', 'extension-runtime.service.ts'),
+      'utf8',
+    )
+    expect(runtimeSrc).toContain('terminationReason')
+    expect(runtimeSrc).toContain('AR-021-19')
+    expect(runtimeSrc).toContain('err.terminationReason')
+  })
+
   it('AR-021-17: ExtensionRuntime uses executeWithHandle for sandboxed execution', () => {
-    const fs = require('fs')
-    const path = require('path')
-    const runtimeSrc = fs.readFileSync(
-      path.join(process.cwd(), 'src', 'lib', 'services', 'extension-runtime.service.ts'),
+    const runtimeSrc = readFileSync(
+      join(process.cwd(), 'src', 'lib', 'services', 'extension-runtime.service.ts'),
       'utf8',
     )
     expect(runtimeSrc).toContain('executeWithHandle')
@@ -477,7 +875,7 @@ describe('WORK-021 — Tenant isolation (W021-AC04, AR-021-07)', () => {
   it('concurrent executions do not leak output across tenants', async () => {
     const ceiling: SandboxCeiling = {
       capabilities: { capabilities: [] },
-      resources: { executionBudget: 1000000, memoryBytes: 65536, wallTimeMs: 5000 },
+      resources: BASE_RESOURCES,
     }
     const inputA = Buffer.from('tenant-a')
     const inputB = Buffer.from('tenant-b-different-length')
@@ -498,7 +896,7 @@ describe('WORK-021 — No global stdout monkey-patch (AR-021-06)', () => {
     const originalWrite = process.stdout.write
     const ceiling: SandboxCeiling = {
       capabilities: { capabilities: ['wasi:cli/stdout'] },
-      resources: { executionBudget: 1000000, memoryBytes: 65536, wallTimeMs: 5000 },
+      resources: BASE_RESOURCES,
     }
     await sandboxHost.execute(STDOUT_WRITE_WASM, Buffer.alloc(0), ceiling)
     expect(process.stdout.write).toBe(originalWrite)
@@ -511,10 +909,8 @@ describe('WORK-021 — No global stdout monkey-patch (AR-021-06)', () => {
 
 describe('WORK-021 — ExtensionRuntime sandbox integration (W021-AC09, AR-021-05)', () => {
   it('ExtensionRuntime wires sandbox measurements into provenance', () => {
-    const fs = require('fs')
-    const path = require('path')
-    const runtimeSrc = fs.readFileSync(
-      path.join(process.cwd(), 'src', 'lib', 'services', 'extension-runtime.service.ts'),
+    const runtimeSrc = readFileSync(
+      join(process.cwd(), 'src', 'lib', 'services', 'extension-runtime.service.ts'),
       'utf8',
     )
     expect(runtimeSrc).toContain('measuredResourceUsage')
@@ -523,10 +919,8 @@ describe('WORK-021 — ExtensionRuntime sandbox integration (W021-AC09, AR-021-0
   })
 
   it('ExtensionRuntime denies with sandbox_unavailable when sandbox is not available', () => {
-    const fs = require('fs')
-    const path = require('path')
-    const runtimeSrc = fs.readFileSync(
-      path.join(process.cwd(), 'src', 'lib', 'services', 'extension-runtime.service.ts'),
+    const runtimeSrc = readFileSync(
+      join(process.cwd(), 'src', 'lib', 'services', 'extension-runtime.service.ts'),
       'utf8',
     )
     expect(runtimeSrc).toContain('sandbox_unavailable')
