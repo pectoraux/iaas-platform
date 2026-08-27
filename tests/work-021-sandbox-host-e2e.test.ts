@@ -848,6 +848,107 @@ describe('WORK-021 — Revocation and termination causes (AR-021-11, AR-021-17, 
     expect(runtimeSrc).toContain('executionHandle')
     expect(runtimeSrc).toContain('AR-021-17')
   })
+
+  it('AR-021-17: the AUTHORITATIVE registry revokes a REAL wasmtime execution through the termination hook', async () => {
+    // Proves the registry-driven control path against the REAL sandbox host
+    // (no DB here — the ExtensionRegistry → hook wiring is proven against real
+    // PostgreSQL by tests/work-021-sandbox-revocation-pg.test.ts):
+    //
+    //   ActiveExecutionRegistry.revokeActiveExecutionsForExtension(...)
+    //       ↓ (the exact hook ExtensionRegistry.revokeExtension invokes)
+    //   SandboxExecutionHandle.revoke()
+    //       ↓
+    //   real SIGTERM → SandboxTerminatedError 'revoked'
+    const { beginSandboxExecution, attachSandboxHandle, endSandboxExecution, revokeActiveExecutionsForExtension, listActiveExecutions } =
+      await import('../src/lib/services/active-execution-registry.service')
+
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: [] },
+      resources: { wallTimeMs: 30000 }, // would run 30s without revocation
+    }
+    // begin → executeWithHandle → attach — the same synchronous block the
+    // ExtensionRuntime performs.
+    const begin = beginSandboxExecution({
+      tenantId: 'w021-e2e-tenant',
+      extensionType: 'w021-e2e-ext',
+      extensionVersion: '1.0.0',
+      idempotencyKey: 'ar-021-17-e2e',
+    })
+    expect(begin.ok).toBe(true)
+    if (!begin.ok) throw new Error('unreachable')
+
+    const handle = sandboxHost.executeWithHandle(LOOP_COMPONENT(), Buffer.alloc(0), ceiling)
+    const attachResult = attachSandboxHandle(begin.executionId, handle)
+    expect(attachResult).toBe('attached')
+    expect(listActiveExecutions({ tenantId: 'w021-e2e-tenant', extensionType: 'w021-e2e-ext' }))
+      .toHaveLength(1)
+    const [record] = listActiveExecutions({ tenantId: 'w021-e2e-tenant', extensionType: 'w021-e2e-ext' })
+    expect(record?.state).toBe('active')
+
+    try {
+      // The termination hook — the exact call ExtensionRegistry.revokeExtension
+      // makes synchronously after the durable revocation update.
+      const termination = revokeActiveExecutionsForExtension('w021-e2e-tenant', 'w021-e2e-ext', '1.0.0')
+      expect(termination.executionIds).toEqual([begin.executionId])
+
+      // The REAL wasmtime subprocess is terminated with the explicit cause.
+      let err: unknown
+      try {
+        await handle.result
+      } catch (e) {
+        err = e
+      }
+      expect(err).toBeInstanceOf(SandboxTerminatedError)
+      expect((err as SandboxTerminatedError).terminationReason).toBe('revoked')
+      expect(handle.isRevoked()).toBe(true)
+    } finally {
+      endSandboxExecution(begin.executionId)
+    }
+    expect(listActiveExecutions({ tenantId: 'w021-e2e-tenant', extensionType: 'w021-e2e-ext' }))
+      .toHaveLength(0)
+  })
+
+  it('AR-021-17: revoke DURING registration terminates the sandbox at attach (race window closed)', async () => {
+    const { beginSandboxExecution, attachSandboxHandle, endSandboxExecution, revokeActiveExecutionsForExtension } =
+      await import('../src/lib/services/active-execution-registry.service')
+
+    const ceiling: SandboxCeiling = {
+      capabilities: { capabilities: [] },
+      resources: { wallTimeMs: 30000 },
+    }
+    // Registration completes but the sandbox has NOT spawned yet…
+    const begin = beginSandboxExecution({
+      tenantId: 'w021-e2e-tenant',
+      extensionType: 'w021-e2e-race-ext',
+      extensionVersion: '1.0.0',
+      idempotencyKey: 'ar-021-17-e2e-race',
+    })
+    expect(begin.ok).toBe(true)
+    if (!begin.ok) throw new Error('unreachable')
+
+    // …the durable revoke lands in the registration window…
+    const termination = revokeActiveExecutionsForExtension('w021-e2e-tenant', 'w021-e2e-race-ext', '1.0.0')
+    expect(termination.executionIds).toEqual([begin.executionId])
+
+    // …the sandbox spawns NOW: the attach revokes it immediately, in the same
+    // synchronous block as the spawn.
+    const handle = sandboxHost.executeWithHandle(LOOP_COMPONENT(), Buffer.alloc(0), ceiling)
+    const attachResult = attachSandboxHandle(begin.executionId, handle)
+    expect(attachResult).toBe('attached-and-revoked')
+
+    try {
+      let err: unknown
+      try {
+        await handle.result
+      } catch (e) {
+        err = e
+      }
+      expect(err).toBeInstanceOf(SandboxTerminatedError)
+      expect((err as SandboxTerminatedError).terminationReason).toBe('revoked')
+    } finally {
+      endSandboxExecution(begin.executionId)
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------

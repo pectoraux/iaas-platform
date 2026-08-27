@@ -41,6 +41,11 @@ import { NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { sha256 } from '@/lib/domain/crypto'
 import { getExtension } from '@/lib/services/extension-registry.service'
 import type { ExtensionRegistryEntryResult } from '@/lib/services/extension-registry.service'
+import {
+  beginSandboxExecution,
+  attachSandboxHandle,
+  endSandboxExecution,
+} from '@/lib/services/active-execution-registry.service'
 
 // ---------------------------------------------------------------------------
 // Extension Abstract Contract (DOM-018)
@@ -475,9 +480,14 @@ export async function executeExtension(
   // 6a. WORK-021 (V5 §2.7): if sandboxed execution is requested, verify the
   //     sandbox is available. Deny-by-default if not — no silent unsandboxed
   //     fallback.
+  //     The resolved SandboxHost is hoisted so that steps 6b and 7 run without
+  //     any await between registration and handle attachment (AR-021-17
+  //     race-safety: begin → executeWithHandle → attach is one synchronous
+  //     block).
+  let sandbox: import('@/lib/services/sandbox-host.service').SandboxHost | null = null
   if (useSandbox) {
     const { getSandboxHost, SandboxUnavailableError } = await import('@/lib/services/sandbox-host.service')
-    const sandbox = input.sandboxHost ?? getSandboxHost()
+    sandbox = input.sandboxHost ?? getSandboxHost()
     if (!sandbox.isAvailable()) {
       const denialReason: ExtensionDenialReason = {
         kind: 'sandbox_unavailable',
@@ -488,6 +498,43 @@ export async function executeExtension(
     }
   }
 
+  // 6b. AR-021-17 (V5 §2.5): register the execution in the AUTHORITATIVE
+  //     ActiveExecutionRegistry BEFORE the sandbox is spawned. This is the
+  //     control point that connects ExtensionRegistry.revokeExtension(...)
+  //     → ActiveExecutionRegistry.revokeActiveExecutionsForExtension(...)
+  //     → SandboxExecutionHandle.revoke() → termination.
+  //
+  //     Race-safe: registration atomically (a) refuses when the extension is
+  //     in the revoked-execution ledger (a durable revoke raced with this
+  //     execution), and (b) inserts the entry so the termination hook can
+  //     reach it. The begin → executeWithHandle → attach sequence below is
+  //     synchronous, so a revoke can only land before it (ledger refusal) or
+  //     after it (hook revokes the registered handle) — never in a window
+  //     where a spawned sandbox is untracked.
+  let activeExecutionId: string | null = null
+  if (useSandbox) {
+    const begin = beginSandboxExecution({
+      tenantId,
+      extensionType: input.extensionType,
+      extensionVersion: input.extensionVersion,
+      idempotencyKey: input.idempotencyKey,
+    })
+    if (!begin.ok) {
+      // The extension became durably revoked between the catalog read (step 1)
+      // and this registration. V5 §2.5: future execution denied. Emit failed
+      // provenance and deny — no sandbox is spawned.
+      const refusalDenial: ExtensionDenialReason = {
+        kind: 'revoked',
+        reason: begin.reason,
+      }
+      await emitFailedProvenance(tenantId, input, registryEntry, inputHash, ceiling, refusalDenial)
+      throw new ValidationError(
+        `Extension ${input.extensionType}@${input.extensionVersion} execution denied: ${refusalDenial.reason}`,
+      )
+    }
+    activeExecutionId = begin.executionId
+  }
+
   // 7. Execute the extension (sandboxed or in-memory).
   let outputPayload: Buffer
   let resultStatus: 'success' | 'failed' = 'success'
@@ -496,15 +543,15 @@ export async function executeExtension(
   // the V4 ceiling-echo semantics with real measured values.
   let measuredResourceUsage: ExtensionResourceLimits | undefined
   let measuredCapabilitiesExercised: string[] | undefined
-  // AR-021-17 fix: execution handle for revocation. When the sandbox is used,
-  // the Runtime owns the handle so revocation can terminate the active execution.
+  // AR-021-17: this local reference is used ONLY to await the result. The
+  // AUTHORITATIVE holder of the handle is the ActiveExecutionRegistry
+  // (registration at step 6b, attachment below, completion in the finally) —
+  // that is the control path ExtensionRegistry revocation reaches.
   let executionHandle: import('@/lib/services/sandbox-host.service').SandboxExecutionHandle | null = null
 
   try {
     if (useSandbox) {
       // V5 §2: execute through the SandboxHost.
-      const { getSandboxHost } = await import('@/lib/services/sandbox-host.service')
-      const sandbox = input.sandboxHost ?? getSandboxHost()
       const sandboxCeiling = {
         capabilities: { capabilities: ceiling.capabilities },
         resources: {
@@ -513,14 +560,16 @@ export async function executeExtension(
           wallTimeMs: ceiling.resourceLimits.timeMs,
         },
       }
-      // AR-021-17 fix: use executeWithHandle so the Runtime owns the
-      // execution handle. This allows revocation to terminate the
-      // active sandbox execution via handle.revoke().
-      executionHandle = sandbox.executeWithHandle(
+      // AR-021-17: spawn the sandbox and attach the handle to its registered
+      // entry SYNCHRONOUSLY (no await between executeWithHandle and
+      // attachSandboxHandle). If a revoke landed between registration (6b)
+      // and here, attachSandboxHandle revokes the handle immediately.
+      executionHandle = sandbox!.executeWithHandle(
         input.wasmModule!,
         input.inputPayload,
         sandboxCeiling,
       )
+      attachSandboxHandle(activeExecutionId!, executionHandle)
       const sandboxResult = await executionHandle.result
       outputPayload = sandboxResult.output
       // AR-021-05 fix: wire sandbox measurements into provenance.
@@ -566,6 +615,14 @@ export async function executeExtension(
 
     // Re-throw the original error (caller sees the failure).
     throw err
+  } finally {
+    // AR-021-17: the execution is no longer active — remove it from the
+    // AUTHORITATIVE ActiveExecutionRegistry. Runs on success, failure, and
+    // termination (including revocation) alike: once the result settles there
+    // is nothing left to terminate.
+    if (activeExecutionId !== null) {
+      endSandboxExecution(activeExecutionId)
+    }
   }
 
   // 8. Compute output hash.

@@ -416,7 +416,9 @@ describe('WORK-021 — End-to-end verification (W021-AC11)', () => {
   test('ExtensionRuntime routes through sandbox when wasmModule is provided', () => {
     const RUNTIME_SRC = readSrc('src/lib/services/extension-runtime.service.ts')
     expect(RUNTIME_SRC).toContain('useSandbox')
-    expect(RUNTIME_SRC).toContain('sandbox.execute')
+    // AR-021-17: sandboxed execution goes through executeWithHandle so the
+    // handle is registered in the ActiveExecutionRegistry (revocable).
+    expect(RUNTIME_SRC).toContain('executeWithHandle')
   })
 })
 
