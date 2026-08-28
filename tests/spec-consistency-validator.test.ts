@@ -18,7 +18,7 @@ function rewrite(specDir: string, file: string, fn: (text: string) => string) { 
 function expectFailure(specDir: string, check: string) { const result = run(specDir); expect(result.code).not.toBe(0); expect(result.stderr).toContain('SPEC VALIDATION FAILED'); expect(result.stderr).toContain(`[${check}]`) }
 
 describe('spec validation gate — current repository', () => {
-  test('passes deterministically for the current V5 baseline while V6 remains candidate', () => { const a = runV6(); const b = runV6(); expect(a.code).toBe(0); expect(b.code).toBe(0); expect(a.stderr).toBe(''); expect(a.stdout).toContain('SPEC VALIDATION GATE: PASS'); expect(a.stdout).toContain('V6 ARCHITECTURE VALIDATOR: PASS'); expect(a.stdout).toBe(b.stdout) })
+  test('passes deterministically for the current V5 baseline while V6 remains candidate', () => { const a = runV6(); const b = runV6(); expect(a.code).toBe(0); expect(b.code).toBe(0); expect(a.stderr).toBe(''); expect(a.stdout).toContain('SPEC VALIDATION PASSED'); expect(a.stdout).toContain('V6 ARCHITECTURE VALIDATOR: PASS'); expect(a.stdout).toBe(b.stdout) })
 })
 
 describe('spec validator — mandatory negative cases', () => {
