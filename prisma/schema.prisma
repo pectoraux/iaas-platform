@@ -108,6 +108,9 @@ model Tenant {
   extensionRegistryEntries ExtensionRegistryEntry[]
   // WORK-018: ExtensionProvenance — tenant-scoped immutable durable provenance records.
   extensionProvenanceRecords ExtensionProvenance[]
+  // WORK-025 (IAAS-DOM-ARCH-6 / NET-001): NetworkInstance — tenant-scoped
+  // realized deployments of immutable published NetworkVersions.
+  networkInstances NetworkInstance[]
 
   @@index([slug])
 }
@@ -183,9 +186,64 @@ model NetworkVersion {
   vppPrograms    VppBuyerProgram[]
   // Phase 12B Slice 3: Executions bound to this immutable version.
   executions     Execution[]
+  // WORK-025 (IAAS-DOM-ARCH-6 §3.3): realized deployments of this immutable
+  // version. Many instances MAY derive from the same published version; the
+  // version itself is NEVER mutated by instance lifecycle.
+  instances      NetworkInstance[]
 
   @@unique([networkId, version])
   @@index([networkId])
+}
+
+// -----------------------------------------------------------------------------
+// WORK-025 (IAAS-DOM-ARCH-6 §3.3 / NET-001) — NetworkInstance
+// -----------------------------------------------------------------------------
+// One realized deployment of exactly one immutable PUBLISHED NetworkVersion.
+//
+// Architectural boundaries (frozen by IAAS-DOM-ARCH-6):
+//   - Identity is DISTINCT from NetworkDefinition/NetworkVersion identity:
+//     the instance has its own durable id; it never aliases or redefines the
+//     definition. Many instances may derive from the same published version.
+//   - `networkVersionId` is REQUIRED and points only at a version whose
+//     `publishedAt` is set (enforced by the Network Lifecycle service): an
+//     instance can never source a mutable draft version.
+//   - Lifecycle state is owned by the Network Lifecycle subsystem
+//     (src/lib/services/network-lifecycle.service.ts) and is independent of
+//     NetworkDefinition status, NetworkRequest, Execution, and resource
+//     lifecycles (V6 §3.4 / NET-001-AC02).
+//   - Lifecycle states (V6 §3.4):
+//       planned → provisioning → validating → active ⇌ paused
+//       → draining → terminated → archived (terminal)
+//     Failure/rollback transitions are explicit (provisioning/validating
+//     failure and pre-provisioning abandonment go straight to `terminated`)
+//     and NEVER mutate the published NetworkVersion.
+//   - Tenant scope is mandatory (NET-001-AC03): every query is tenant-scoped.
+//   - Terminal states preserve the row + audit trail (V6 §3.3: "retains
+//     audit/evidence after termination/archive") — no deletion path.
+//   - No composition/federation semantics in this model (WORK-025 out of
+//     scope): no parent/child instance reference, no export/import binding.
+// -----------------------------------------------------------------------------
+model NetworkInstance {
+  id               String    @id @default(cuid())
+  tenantId         String
+  // Exactly one immutable source version (NET-001-AC01). Required — an
+  // instance without a source version cannot exist.
+  networkVersionId String
+  // Optional human-readable deployment label. NOT identity — identity is the
+  // durable `id`; the label is descriptive metadata only.
+  label            String?
+  // Owned by the Network Lifecycle subsystem (NET-001-AC02):
+  // planned | provisioning | validating | active | paused | draining | terminated | archived
+  lifecycleState   String    @default("planned")
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  networkVersion NetworkVersion @relation(fields: [networkVersionId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, lifecycleState])
+  @@index([networkVersionId])
 }
 
 // -----------------------------------------------------------------------------
