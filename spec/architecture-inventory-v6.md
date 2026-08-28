@@ -50,7 +50,7 @@
 | Observability | Telemetry/Metric/Log/Trace | PROPOSED | implementation-specific | promote as distinct contracts | Observability | runtime/execution |
 | Evidence | Evidence | CONFIRMED conceptually | distributed | clarify as verification input, not raw telemetry | Verification | observations |
 | SDK | SDK | CONFIRMED historical future + PROPOSED | absent | consumer boundary, not core primitive | API/SDK | canonical contracts |
-| Federation | Federation | CONFIRMED historical future + PROPOSED | absent | keep OPEN/RESEARCH | future federation boundary | trust/economics/network |
+| Federation | Federation | CONFIRMED historical future + PROPOSED | absent | **OPEN / RESEARCH** — do not freeze a production federation contract in V6 | future federation boundary | trust/economics/network |
 | Reference | Reference networks | OBSERVED docs | conceptual coverage | formalize as conformance fixtures | Conformance suite | generic substrate |
 
 ## Architecture-Quality Findings
@@ -81,7 +81,7 @@ The existing architecture already says Marketplace must not execute extensions. 
 
 ### Finding F6 — Federation lacks enough evidence for freeze
 
-There is no demonstrated cross-installation trust, failure, jurisdiction, or settlement contract in the live architecture. V6 therefore records the seam and explicitly keeps it research/open instead of inventing semantics.
+There is no demonstrated cross-installation trust, failure, jurisdiction, or settlement contract in the live architecture. V6 therefore records the seam and explicitly keeps it OPEN / RESEARCH instead of inventing semantics.
 
 ## Universalism Test Matrix
 
