@@ -157,6 +157,7 @@ NetworkComposition ✗-> private runtime state
 NetworkInstance ✗-> published NetworkVersion mutation
 
 Observability ✗-> automatic attestation
+Telemetry ✗-> automatic attestation
 Telemetry ✗-> economic settlement without verification
 
 Federation ✗-> local authority replacement
