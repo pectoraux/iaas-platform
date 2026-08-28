@@ -1,19 +1,17 @@
 # IAAS V6 Implementation Dependency Graph — Candidate
 
 - Target architecture: `IAAS-DOM-ARCH-6` (CANDIDATE / UNDER REVIEW)
-- No item below is implementation-eligible until V6 is frozen.
+- No production item below is implementation-eligible until V6 is frozen.
 
 ## Governance / Architecture Gate
 
 ```text
-WORK-022 (V5 sandbox lifecycle; BLOCKED pending architecture completion)
-          ↓
 WORK-023 (V6 architecture completion candidate)
           ↓
 WORK-024 (V6 freeze and governance release)
 ```
 
-`WORK-023` and `WORK-024` are specification/governance Work Items, not production feature work.
+`WORK-022` is a V5 production item and is intentionally held by `spec/work-state/V6-ARCHITECTURE-HOLD.md`. It is not a prerequisite for completing V6 architecture because architecture completion must precede further production implementation.
 
 ## Post-Freeze Implementation DAG
 
@@ -63,7 +61,6 @@ WORK-026 + WORK-027 + WORK-028 + WORK-029 + WORK-034 + WORK-035 + WORK-036
 ## Exact Dependency Edges
 
 ```text
-WORK-022 → WORK-023
 WORK-023 → WORK-024
 WORK-024 → WORK-025
 WORK-025 → WORK-026
@@ -107,7 +104,7 @@ WORK-038 → WORK-041
 
 ### Implemented / prerequisite edges
 
-All edges through WORK-022 are historical implementation/governance edges already present on main. They are not rewritten here.
+All edges through WORK-022 are historical/current implementation-state evidence in the main graph. They are not rewritten by the V6 architecture package.
 
 ### Planned edges
 
@@ -146,4 +143,4 @@ A candidate Work Item is `READY` only after:
 4. no open ACR blocks its scope;
 5. objective verification requirements are defined.
 
-Until V6 freeze, W023-W041 MUST remain `DRAFT` and W022 is intentionally BLOCKED for production implementation.
+Until V6 freeze, W023-W041 MUST remain `DRAFT` and no production implementation Work Item may be assigned or opened.
