@@ -68,6 +68,14 @@ export interface VersionConfiguration {
   capabilities: Array<{ type: string; unit: string; schema_version: number; fields: Record<string, string> }>
   verification: { checks: string[]; numeric_ranges?: Record<string, { min?: number; max?: number }>; timestamp_window_seconds?: number }
   reward: { type: string; rate: string; unit: string; currency: string; platform_fee_pct?: number }
+  // WORK-026 (IAAS-DOM-ARCH-6 §3.5 / NET-003): the DECLARED canonical
+  // dependency contract of the definition — { from } REQUIRES { to }, both
+  // referencing capability types declared by this same configuration. This is
+  // the intra-definition declaration surface consumed by the Network-as-Code
+  // compiler (network-compiler.service.ts); publication persists it into
+  // configurationJson untouched (it is inert to publication semantics and to
+  // every pre-WORK-026 consumer).
+  dependencies?: Array<{ from: string; to: string }>
 }
 
 /** Create a new DRAFT version (mutable until published). */

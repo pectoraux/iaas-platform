@@ -111,6 +111,10 @@ model Tenant {
   // WORK-025 (IAAS-DOM-ARCH-6 / NET-001): NetworkInstance — tenant-scoped
   // realized deployments of immutable published NetworkVersions.
   networkInstances NetworkInstance[]
+  // WORK-026 (IAAS-DOM-ARCH-6 / NET-003, NET-004): NetworkPlan — tenant-scoped
+  // immutable deterministic resolution artifacts (launch plans) compiled from
+  // published NetworkVersions by the Network-as-Code compiler.
+  networkPlans NetworkPlan[]
 
   @@index([slug])
 }
@@ -190,6 +194,11 @@ model NetworkVersion {
   // version. Many instances MAY derive from the same published version; the
   // version itself is NEVER mutated by instance lifecycle.
   instances      NetworkInstance[]
+  // WORK-026 (IAAS-DOM-ARCH-6 §3.5): deterministic resolution artifacts
+  // (launch plans) compiled from this immutable published version. Plans are
+  // READ-ONLY projections of the version + authoritative repository state;
+  // compilation never mutates the version.
+  plans          NetworkPlan[]
 
   @@unique([networkId, version])
   @@index([networkId])
@@ -243,6 +252,59 @@ model NetworkInstance {
 
   @@index([tenantId])
   @@index([tenantId, lifecycleState])
+  @@index([networkVersionId])
+}
+
+// -----------------------------------------------------------------------------
+// WORK-026 (IAAS-DOM-ARCH-6 §3.5 / NET-003, NET-004) — NetworkPlan
+// -----------------------------------------------------------------------------
+// The deterministic, immutable resolution artifact ("launch plan") produced by
+// the Network-as-Code compiler (src/lib/services/network-compiler.service.ts)
+// from one immutable PUBLISHED NetworkVersion + the authoritative repository
+// state at resolution time.
+//
+// Architectural boundaries (frozen by IAAS-DOM-ARCH-6):
+//   - The plan is a COMPILED PROJECTION, not a new lifecycle authority: it has
+//     NO lifecycle state machine of its own (no status column, no updatedAt —
+//     the row is write-once). Lifecycle authority stays with NetworkInstance
+//     (WORK-025); the plan never mutates instance state (NET-004-AC02).
+//   - planJson is the CANONICAL deterministic serialization of the resolution
+//     result (recursively key-sorted; every array in a canonical order). The
+//     same declarative input under the same authoritative repository state
+//     produces a byte-identical planJson (NET-004-AC01).
+//   - planChecksum is sha256(planJson) — the durable identity of the canonical
+//     result. The unique constraint on (tenantId, networkVersionId,
+//     planChecksum) makes re-resolution under unchanged repository state
+//     IDEMPOTENT (the existing artifact is returned, never duplicated).
+//   - A changed repository state (e.g. new resource assignments) yields a
+//     DIFFERENT checksum → a NEW plan row; prior plans are retained as
+//     immutable point-in-time resolution evidence.
+//   - Compilation NEVER mutates the source NetworkVersion (NET-003-AC01) and
+//     performs no allocation/reservation/commitment/provisioning/activation
+//     (NET-004-AC02 — those are later pipeline stages owned elsewhere).
+//   - Tenant scope is mandatory (NET-004-AC04).
+//   - No composition/federation semantics: no export/import binding columns,
+//     no cross-network references. Dependencies here are the DECLARED
+//     INTERNAL dependency contracts of one definition (NET-003-AC03).
+// -----------------------------------------------------------------------------
+model NetworkPlan {
+  id               String   @id @default(cuid())
+  tenantId         String
+  // The immutable PUBLISHED source version this plan compiles (required).
+  networkVersionId String
+  // Canonical deterministic serialization of the resolution result.
+  planJson         String
+  // sha256(planJson) — identity of the canonical result under repo state.
+  planChecksum     String
+  // Write-once artifact: createdAt only (NO updatedAt — no update path).
+  createdAt        DateTime @default(now())
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  networkVersion NetworkVersion @relation(fields: [networkVersionId], references: [id], onDelete: Restrict)
+
+  // Idempotent re-resolution under unchanged repository state.
+  @@unique([tenantId, networkVersionId, planChecksum])
+  @@index([tenantId])
   @@index([networkVersionId])
 }
 
