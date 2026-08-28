@@ -110,7 +110,7 @@ for (const id of expectedWorkIds) {
   const next = workItems.indexOf('\n## WORK-', start + 4)
   const section = workItems.slice(start, next < 0 ? workItems.length : next)
   if (!section.includes('Status: `DRAFT`')) fail(`${id} is not DRAFT during V6 review`)
-  const fields = ['Architecture Version:', 'Requirements:', 'Acceptance Criteria:', 'Dependencies:', 'Architecture Constraints:', 'Repository Scope:', 'Out of Scope:', 'Required Verification:', 'Definition of Done:']
+  const fields = ['Architecture Version:', 'Requirements:', 'Dependencies:', 'Architecture Constraints:', 'Repository Scope:', 'Out of Scope:', 'Acceptance Criteria:', 'Required Verification:', 'Definition of Done:']
   for (const field of fields) if (!section.includes(field)) fail(`${id} missing required Work Item field ${field}`)
 }
 
@@ -132,6 +132,7 @@ for (const id of expectedWorkIds) visit(id)
 
 for (const forbidden of [
   'Kernel ✗-> vertical services',
+  'Kernel ✗-> Marketplace',
   'Kernel ✗-> EconomicPipeline',
   'Kernel ✗-> DataPlane services',
   'EconomicPipeline ✗-> DataPlane',
@@ -149,6 +150,6 @@ if (!hold.includes('no production Work Order may be assigned, implemented, or op
 if (!workItems.includes('Status: `DRAFT`')) fail('V6 Work Item program is not draft-gated')
 if (!inventory.includes('Federation') || !inventory.includes('OPEN / RESEARCH')) fail('federation research classification missing')
 if (!inventory.includes('NodeAgent') || !inventory.includes('reject mandatory')) fail('NodeAgent rejection decision missing')
-if (!v6.includes('No component may own another component')) fail('V6 authority rule missing')
+if (!v6.includes('No component may silently acquire a second ownership role for a listed responsibility') && !acr.includes("No component may own another component's authoritative state merely because it consumes it.")) fail('V6 authority ownership rule missing')
 
 process.stdout.write('V6 ARCHITECTURE VALIDATOR: PASS — candidate package is internally consistent and implementation-gated.\n')
