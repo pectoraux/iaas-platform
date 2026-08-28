@@ -38,10 +38,10 @@ describe('WORK-008 — No unrelated promotion (W008-AC04)', () => {
 })
 
 describe('WORK-008 — Cross-document consistency (W008-AC05)', () => {
-  test('architecture.md registers V5 as current and V4/V3/V2/V1 as superseded', () => {
-    const src = readSpec('architecture.md'); expect(src).toContain('`IAAS-DOM-ARCH-5` | FROZEN / CURRENT CANONICAL'); expect(src).toContain('`IAAS-DOM-ARCH-4` | SUPERSEDED / IMMUTABLE'); expect(src).toContain('`IAAS-DOM-ARCH-3` | SUPERSEDED / IMMUTABLE'); expect(src).toContain('`IAAS-DOM-ARCH-1` | SUPERSEDED / IMMUTABLE')
+  test('architecture.md registers V6 as current and V5/V4/V3/V2/V1 as superseded', () => {
+    const src = readSpec('architecture.md'); expect(src).toContain('`IAAS-DOM-ARCH-6` | FROZEN / CURRENT CANONICAL'); expect(src).toContain('`IAAS-DOM-ARCH-5` | SUPERSEDED / IMMUTABLE'); expect(src).toContain('`IAAS-DOM-ARCH-4` | SUPERSEDED / IMMUTABLE'); expect(src).toContain('`IAAS-DOM-ARCH-3` | SUPERSEDED / IMMUTABLE'); expect(src).toContain('`IAAS-DOM-ARCH-1` | SUPERSEDED / IMMUTABLE')
   })
-  test('architecture-lock.md registers V5 as current frozen domain version', () => { const src = readSpec('architecture-lock.md'); expect(src).toContain('IAAS-DOM-ARCH-5'); expect(src).toContain('FROZEN'); expect(src).toContain('CURRENT') })
+  test('architecture-lock.md registers V6 as current frozen domain version', () => { const src = readSpec('architecture-lock.md'); expect(src).toContain('Domain Architecture Version: `IAAS-DOM-ARCH-6`'); expect(src).toContain('FROZEN'); expect(src).toContain('CURRENT') })
   test('dependency-graph.md states WORK-008 is VERIFIED and WORK-009 is historically verified', () => { const src = readSpec('dependency-graph.md'); expect(src).toContain('WORK-008'); expect(src).toContain('WORK-009'); expect(src).toContain('VERIFIED') })
   test('work-items.md records WORK-008 and WORK-009 as VERIFIED', () => { const src = readSpec('work-items.md'); const w008 = src.split('## WORK-008')[1]?.split('## WORK-009')[0] ?? ''; expect(w008).toContain('Status: `VERIFIED`'); const w009 = src.split('## WORK-009')[1]?.split('## WORK-010')[0] ?? ''; expect(w009).toContain('Status: `VERIFIED`'); expect(w009).toContain('BASE-016') })
 })

@@ -1,7 +1,7 @@
-# IAAS V6 Architectural Inventory — Candidate
+# IAAS V6 Architectural Inventory
 
-- Target: `IAAS-DOM-ARCH-6` (CANDIDATE / UNDER REVIEW)
-- Evidence rule: repository facts are classified as `OBSERVED`; prior frozen rules are `CONFIRMED`; conclusions from evidence are `INFERRED`; new architecture is `PROPOSED` until ACR-005 approval.
+- Target: `IAAS-DOM-ARCH-6` (FROZEN)
+- Evidence rule: repository facts are classified as `OBSERVED`; prior frozen rules are `CONFIRMED`; conclusions from evidence are `INFERRED`; new architecture is `PROPOSED` until ACR-005 approval (ACR-005 is APPROVED).
 
 | Domain | Concept | Truth | Current status | V6 decision | Authority | Key dependencies |
 |---|---|---|---|---|---|---|

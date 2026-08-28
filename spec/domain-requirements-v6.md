@@ -1,12 +1,12 @@
 # IAAS Domain Requirements — IAAS-DOM-ARCH-6
 
-- Architecture Version: `IAAS-DOM-ARCH-6` (CANDIDATE / UNDER REVIEW)
-- Domain Architecture: `IAAS-DOM-ARCH-6` (CANDIDATE / UNDER REVIEW)
+- Architecture Version: `IAAS-DOM-ARCH-6` (FROZEN)
+- Domain Architecture: `IAAS-DOM-ARCH-6` (FROZEN)
 - Governing Architecture: `IAAS-GOV-ARCH-1` (FROZEN)
-- Change Request: `ACR-005` (UNDER_REVIEW)
-- Supersedes for future planning: V5 requirements only after V6 freeze; V1-V5 remain immutable historical records
+- Change Request: `ACR-005` (APPROVED)
+- Supersedes for future planning: V5 requirements (V6 frozen via WORK-024); V1-V5 remain immutable historical records
 
-> These requirements are acceptance-bearing only after ACR-005 approval and V6 freeze. Until then they are the proposed completion baseline and must not authorize production implementation.
+> These requirements became acceptance-bearing with ACR-005 approval and the V6 freeze (WORK-024). Implementation Work Items are released strictly according to `spec/dependency-graph-v6.md`.
 
 ## ARCH-001 — V6 Candidate Governance Gate
 Architecture Version: `IAAS-DOM-ARCH-6`

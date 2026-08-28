@@ -73,6 +73,7 @@ const required = [
   'spec/work-orders/WORK-023.md',
   'spec/work-orders/WORK-024.md',
   'spec/work-state/V6-ARCHITECTURE-HOLD.md',
+  'spec/work-state/V6-FROZEN-WORK-025-READY.md',
 ]
 required.forEach(read)
 
@@ -88,13 +89,21 @@ const workItems = read('spec/work-items-v6.md')
 const workGraph = read('spec/dependency-graph-v6.md')
 const hold = read('spec/work-state/V6-ARCHITECTURE-HOLD.md')
 
-if (!/IAAS-DOM-ARCH-5` \| FROZEN \/ CURRENT CANONICAL/.test(architecture)) fail('V5 is not current canonical in architecture.md')
-if (!/IAAS-DOM-ARCH-6` \| CANDIDATE \/ UNDER REVIEW/.test(architecture)) fail('V6 candidate row missing')
-if (!lock.includes('IAAS-DOM-ARCH-5` (FROZEN')) fail('architecture-lock does not identify V5 as frozen')
-if (!lock.includes('IAAS-DOM-ARCH-6` (CANDIDATE / UNDER REVIEW — ACR-005)')) fail('architecture-lock does not identify V6 candidate')
+// WORK-024 freeze gate: these checks durably validate the FROZEN state.
+// V6 is FROZEN / CURRENT CANONICAL; V5 is SUPERSEDED / IMMUTABLE; ACR-005 is
+// APPROVED; WORK-025 is the sole dependency-eligible READY item; the V6
+// architecture-completion hold is LIFTED. The candidate-era pins (V5 current,
+// V6 candidate, all items DRAFT) were the pre-freeze contract; the freeze
+// transition re-pins them to the frozen contract recorded in
+// spec/work-state/V6-FROZEN-WORK-025-READY.md.
+if (!/IAAS-DOM-ARCH-6` \| FROZEN \/ CURRENT CANONICAL/.test(architecture)) fail('V6 is not frozen/current canonical in architecture.md')
+if (!/IAAS-DOM-ARCH-5` \| SUPERSEDED \/ IMMUTABLE/.test(architecture)) fail('V5 is not superseded/immutable in architecture.md')
+if (!lock.includes('Domain Architecture Version: `IAAS-DOM-ARCH-6` (FROZEN — approved through ACR-005 / WORK-024)')) fail('architecture-lock does not identify V6 as the frozen current domain architecture')
+if (/Candidate Domain Architecture: `IAAS-DOM-ARCH-6`/.test(lock)) fail('architecture-lock still declares a V6 candidate line after freeze')
 if (!acr.includes('- ACR-ID: `ACR-005`')) fail('ACR-005 identity missing')
-if (!acr.includes('- Status: `UNDER_REVIEW`')) fail('ACR-005 must remain under review')
-if (!v6.includes('IAAS-DOM-ARCH-6') || !v6.includes('CANDIDATE / UNDER REVIEW')) fail('V6 architecture status invalid')
+if (!acr.includes('- Status: `APPROVED`')) fail('ACR-005 must be APPROVED after the freeze gate')
+if (!v6.includes('IAAS-DOM-ARCH-6') || !v6.includes('**FROZEN / CURRENT CANONICAL**')) fail('V6 architecture status invalid')
+if (/\*\*CANDIDATE \/ UNDER REVIEW\*\*/.test(v6)) fail('V6 architecture still declares candidate status after freeze')
 if (!v5.includes('IAAS-DOM-ARCH-5')) fail('V5 architecture missing')
 
 const frozenBlobSha: Record<string, string> = {
@@ -124,17 +133,36 @@ if (!req.includes('Dependencies:')) fail('V6 requirements must declare dependenc
 if (!req.includes('Acceptance Criteria:')) fail('V6 requirements must declare acceptance criteria')
 if (!req.includes('Verification:')) fail('V6 requirements must declare verification requirements')
 
+// WORK-024 freeze-gate status contract: WORK-023 is VERIFIED (the candidate
+// package completed independent review through ACR-005); WORK-024 is the
+// freeze item itself — `PR_OPEN` in the freeze PR, `VERIFIED` after the
+// post-merge VERIFIED bookkeeping (repository convention), both being
+// post-release lifecycle states; WORK-025 is the sole READY item; every other
+// item remains DRAFT until its dependencies are VERIFIED. The readySet check
+// below durably enforces the exactly-one-release rule (W024-FZ-AC09).
+const expectedStatus: Record<string, readonly string[]> = {
+  'WORK-023': ['VERIFIED'],
+  'WORK-024': ['PR_OPEN', 'VERIFIED'],
+  'WORK-025': ['READY'],
+}
 const workItemIds = [...workItems.matchAll(/^## (WORK-\d+) —/gm)].map((m) => m[1])
 const expectedWorkIds = Array.from({ length: 19 }, (_, i) => `WORK-${String(i + 23).padStart(3, '0')}`)
 if (workItemIds.length !== expectedWorkIds.length) fail(`expected 19 V6 Work Items, found ${workItemIds.length}`)
+const readyItems: string[] = []
 for (const id of expectedWorkIds) {
   if (!workItemIds.includes(id)) fail(`missing V6 Work Item ${id}`)
   const start = workItems.indexOf(`## ${id} —`)
   const next = workItems.indexOf('\n## WORK-', start + 4)
   const section = workItems.slice(start, next < 0 ? workItems.length : next)
-  if (!section.includes('Status: `DRAFT`')) fail(`${id} is not DRAFT during V6 review`)
+  const statusMatch = section.match(/^Status: `([A-Z_]+)`$/m)
+  const status = statusMatch?.[1] ?? ''
+  if (!status) fail(`${id} is missing a Status field`)
+  const allowed = expectedStatus[id] ?? ['DRAFT']
+  if (!allowed.includes(status)) fail(`${id} has status ${status}; the frozen program contract requires ${allowed.join(' or ')}`)
+  if (status === 'READY') readyItems.push(id)
   for (const field of ['Architecture Version:','Requirements:','Dependencies:','Architecture Constraints:','Repository Scope:','Out of Scope:','Acceptance Criteria:','Required Verification:','Definition of Done:']) if (!section.includes(field)) fail(`${id} missing required Work Item field ${field}`)
 }
+if (readyItems.length !== 1 || readyItems[0] !== 'WORK-025') fail(`exactly one V6 Work Item (WORK-025) may be READY; found: ${readyItems.join(', ') || 'none'}`)
 
 const edgeMatches = [...workGraph.matchAll(/^(WORK-\d+) → (WORK-\d+)$/gm)].map((m) => [m[1], m[2]] as const)
 const graph = new Map<string, string[]>()
@@ -145,10 +173,12 @@ for (const id of expectedWorkIds) visit(id)
 
 for (const forbidden of ['Kernel ✗-> vertical services','Kernel ✗-> Marketplace','Kernel ✗-> EconomicPipeline','Kernel ✗-> DataPlane services','EconomicPipeline ✗-> DataPlane','DataPlane ✗-> EconomicPipeline','InfrastructureRuntime ✗-> ProtocolRuntime','ProtocolRuntime ✗-> InfrastructureRuntime','Marketplace ✗-> Extension execution','SDK ✗-> private persistence semantics','Telemetry ✗-> automatic attestation']) if (!domainGraph.includes(forbidden) && !v6.includes(forbidden)) fail(`missing forbidden dependency invariant: ${forbidden}`)
 
-if (!hold.includes('no production Work Order may be assigned, implemented, or opened as an active PR')) fail('implementation hold is missing')
-if (!workItems.includes('Status: `DRAFT`')) fail('V6 Work Item program is not draft-gated')
+if (!hold.includes('Status: `LIFTED`')) fail('the V6 architecture-completion hold must be LIFTED after the freeze gate')
+if (!hold.includes('no production Work Order may be assigned, implemented, or opened as an active PR')) fail('implementation hold terms are missing from the historical hold record')
+if (!hold.includes('WORK-025 (NetworkInstance and Network Lifecycle) is the sole dependency-eligible released item')) fail('hold lift record does not name the sole released item')
+if (!read('spec/work-state/V6-FROZEN-WORK-025-READY.md').includes('WORK-025 (NetworkInstance and Network Lifecycle): `READY`')) fail('freeze/release work-state record missing the WORK-025 READY release')
 if (!inventory.includes('Federation') || !inventory.includes('OPEN / RESEARCH')) fail('federation research classification missing')
 if (!inventory.includes('NodeAgent') || !inventory.includes('reject mandatory')) fail('NodeAgent rejection decision missing')
 if (!v6.includes('No component may silently acquire a second ownership role for a listed responsibility') && !acr.includes("No component may own another component's authoritative state merely because it consumes it.")) fail('V6 authority ownership rule missing')
 
-process.stdout.write('V6 ARCHITECTURE VALIDATOR: PASS — immutable main baseline and candidate package are internally consistent and implementation-gated.\n')
+process.stdout.write('V6 ARCHITECTURE VALIDATOR: PASS — IAAS-DOM-ARCH-6 is FROZEN / CURRENT CANONICAL; V1-V5 immutable; WORK-025 is the sole READY item; the frozen state is durably validated.\n')

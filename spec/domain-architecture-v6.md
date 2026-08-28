@@ -3,12 +3,12 @@
 ## Status
 
 - Architecture Version: `IAAS-DOM-ARCH-6`
-- Status: **CANDIDATE / UNDER REVIEW**
+- Status: **FROZEN / CURRENT CANONICAL**
 - Governing Governance Architecture: `IAAS-GOV-ARCH-1` (FROZEN)
-- Change Request: `ACR-005` (UNDER_REVIEW)
-- Supersedes: none yet; V5 remains canonical until this version is frozen.
+- Change Request: `ACR-005` (APPROVED)
+- Supersedes: `IAAS-DOM-ARCH-5` (frozen through ACR-004 / WORK-020; now SUPERSEDED / IMMUTABLE).
 
-> This document is the proposed completion architecture. It is not an authorization for production implementation. Historical V1-V5 architecture documents remain immutable and authoritative for their historical scopes.
+> This document is the frozen architecture-completion baseline, approved through ACR-005 and frozen by WORK-024 (the dedicated V6 freeze gate). Historical V1-V5 architecture documents remain immutable and authoritative for their historical scopes.
 
 ## 1. Architectural Purpose
 

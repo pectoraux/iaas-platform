@@ -1,7 +1,8 @@
-# IAAS V6 Implementation Dependency Graph — Candidate
+# IAAS V6 Implementation Dependency Graph
 
-- Target architecture: `IAAS-DOM-ARCH-6` (CANDIDATE / UNDER REVIEW)
-- No production item below is implementation-eligible until V6 is frozen.
+- Target architecture: `IAAS-DOM-ARCH-6` (FROZEN)
+- The architecture gate is complete: items become implementation-eligible strictly per the Eligibility Rule below.
+- WORK-025 is the sole released (`READY`) item; every other item remains `DRAFT` until its dependencies are `VERIFIED`.
 
 ## Governance / Architecture Gate
 
@@ -108,7 +109,7 @@ All edges through WORK-022 are historical/current implementation-state evidence 
 
 ### Planned edges
 
-All V6 candidate edges above are planned. They become implementation dependencies only after WORK-024 freezes V6.
+All V6 edges above became implementation dependencies when WORK-024 froze V6. Items are released (`READY`) only per the Eligibility Rule below, one dependency-eligible item at a time.
 
 ### Optional edges
 
@@ -143,4 +144,4 @@ A candidate Work Item is `READY` only after:
 4. no open ACR blocks its scope;
 5. objective verification requirements are defined.
 
-Until V6 freeze, W023-W041 MUST remain `DRAFT` and no production implementation Work Item may be assigned or opened.
+V6 is FROZEN. WORK-025 is the sole `READY` item (released by WORK-024); WORK-026 through WORK-041 remain `DRAFT` until their dependencies are `VERIFIED`. No production implementation Work Item may be assigned or opened except a released (`READY`) item.

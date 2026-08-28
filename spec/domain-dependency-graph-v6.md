@@ -1,8 +1,8 @@
 # IAAS Domain Dependency Graph — IAAS-DOM-ARCH-6
 
-- Architecture Version: `IAAS-DOM-ARCH-6` (CANDIDATE / UNDER REVIEW)
+- Architecture Version: `IAAS-DOM-ARCH-6` (FROZEN)
 - Governing Architecture: `IAAS-GOV-ARCH-1` (FROZEN)
-- Change Request: `ACR-005` (UNDER_REVIEW)
+- Change Request: `ACR-005` (APPROVED)
 
 Edges mean `A depends on B` unless marked otherwise.
 

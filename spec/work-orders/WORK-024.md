@@ -1,10 +1,12 @@
 # WORK-024 — IAAS-DOM-ARCH-6 Freeze and Governance Release
 
-Status: `DRAFT`
+Status: `READY`
 Architecture Version: `IAAS-GOV-ARCH-1`
-Target Domain Architecture: `IAAS-DOM-ARCH-6` (CANDIDATE)
-Dependency: WORK-023
-Implementer: Chief Architect / Architecture Custodian
+Target Domain Architecture: `IAAS-DOM-ARCH-6` (FROZEN)
+Dependency: `WORK-023` VERIFIED
+Implementer: Z.ai (execution delegated by the Chief Architect via GitHub Issue #40)
+
+Release note: ACR-005 and the V6 package completed independent architecture review; the Chief Architect issued the freeze-gate Work Order (GitHub Issue #40) to Z.ai. The freeze PR records ACR-005 APPROVED, V6 FROZEN / CURRENT CANONICAL, and the release of WORK-025 as the sole dependency-eligible next Work Item.
 
 ## Objective
 Freeze V6 only after ACR-005 approval, independent review, and specification consistency evidence.

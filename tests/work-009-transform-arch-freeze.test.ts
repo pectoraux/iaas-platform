@@ -33,14 +33,15 @@ describe('WORK-009 — ACR-002 traceability (W009-AC01)', () => {
 })
 
 describe('WORK-009 — IAAS-DOM-ARCH-3 registration (W009-AC02)', () => {
-  test('architecture.md keeps V3 as immutable historical architecture while V5 is current', () => {
+  test('architecture.md keeps V3 as immutable historical architecture while V6 is current (V5 superseded by the WORK-024 freeze)', () => {
     const src = readSpec('architecture.md')
-    expect(src).toContain('`IAAS-DOM-ARCH-5` | FROZEN / CURRENT CANONICAL')
+    expect(src).toContain('`IAAS-DOM-ARCH-6` | FROZEN / CURRENT CANONICAL')
+    expect(src).toContain('`IAAS-DOM-ARCH-5` | SUPERSEDED / IMMUTABLE')
     expect(src).toContain('`IAAS-DOM-ARCH-3` | SUPERSEDED / IMMUTABLE')
   })
-  test('architecture-lock.md registers V5 as current FROZEN domain version', () => {
+  test('architecture-lock.md registers V6 as current FROZEN domain version', () => {
     const src = readSpec('architecture-lock.md')
-    expect(src).toContain('IAAS-DOM-ARCH-5')
+    expect(src).toContain('Domain Architecture Version: `IAAS-DOM-ARCH-6`')
     expect(src).toContain('FROZEN')
     expect(src).toContain('CURRENT')
   })

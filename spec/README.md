@@ -17,15 +17,15 @@ This directory is the persistent planning and governance layer for IAAS implemen
 - `architecture-change-requests/ACR-002.md` — approved promotion of Transform Stack boundary.
 - `architecture-change-requests/ACR-003.md` — approved promotion of Extension Stack boundary.
 - `architecture-change-requests/ACR-004.md` — approved V5 WASI capability-sandbox contract.
-- `architecture-change-requests/ACR-005.md` — V6 architecture-completion candidate under review.
+- `architecture-change-requests/ACR-005.md` — approved V6 architecture-completion baseline (APPROVED; V6 frozen via WORK-024).
 - `verification.md` — evidence and verification protocol.
 - `architecture-inventory-v6.md` — V6 architectural inventory and truth classification.
 - `domain-architecture.md` — immutable Domain Architecture V1 (`IAAS-DOM-ARCH-1`, SUPERSEDED).
 - `domain-architecture-v2.md` — immutable Domain Architecture V2 (`IAAS-DOM-ARCH-2`, SUPERSEDED).
 - `domain-architecture-v3.md` — immutable Domain Architecture V3 (`IAAS-DOM-ARCH-3`, SUPERSEDED).
 - `domain-architecture-v4.md` — immutable Domain Architecture V4 (`IAAS-DOM-ARCH-4`, SUPERSEDED).
-- `domain-architecture-v5.md` — current canonical Domain Architecture V5 (`IAAS-DOM-ARCH-5`, FROZEN).
-- `domain-architecture-v6.md` — candidate Domain Architecture V6 (`IAAS-DOM-ARCH-6`, UNDER REVIEW).
+- `domain-architecture-v5.md` — superseded immutable Domain Architecture V5 (`IAAS-DOM-ARCH-5`, FROZEN; superseded by V6).
+- `domain-architecture-v6.md` — current canonical Domain Architecture V6 (`IAAS-DOM-ARCH-6`, FROZEN).
 - `domain-requirements.md` — immutable V1 domain requirements.
 - `domain-requirements-v2.md` — immutable V2 requirements.
 - `domain-requirements-v3.md` — immutable V3 requirements.
@@ -63,8 +63,8 @@ The specification layer does not replace repository truth. It governs how reposi
 
 ## V6 Status
 
-`IAAS-DOM-ARCH-5` remains the current frozen architecture on main. `IAAS-DOM-ARCH-6` is a candidate under ACR-005 and is not yet an implementation authority. No V6 production Work Item may become READY until the V6 freeze gate passes.
+`IAAS-DOM-ARCH-6` is the current canonical frozen architecture on main (ACR-005 APPROVED; frozen by WORK-024). V6 production Work Items are released strictly according to `spec/dependency-graph-v6.md`; WORK-025 is the sole released item. `IAAS-DOM-ARCH-5` is superseded and immutable.
 
 ## V6 Validation Gate
 
-The candidate branch exposes `bun run v6:validate` and includes `tests/v6-architecture-completion.test.ts`. These checks are part of CI and validate candidate-document presence, historical V1-V5 immutability, V6 status, Work Item completeness, DAG acyclicity, forbidden dependency invariants, WorkflowOS exclusion, and implementation gating. A V6 freeze cannot rely on agent assertion alone.
+The repository exposes `bun run v6:validate` and includes `tests/v6-architecture-completion.test.ts`. These checks are part of CI and validate frozen-state markers, historical V1-V5 immutability (git blob SHAs), V6 status, Work Item completeness, DAG acyclicity, forbidden dependency invariants, WorkflowOS exclusion, and the sole-READY release state. The freeze cannot rely on agent assertion alone.
