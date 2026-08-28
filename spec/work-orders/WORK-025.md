@@ -11,7 +11,7 @@ Required architecture: NetworkInstance references one immutable NetworkVersion; 
 
 Scope: schema/model, network-lifecycle service, transitions, authorization, audit, PostgreSQL tests, architecture tests.
 
-Acceptance: NET-001-AC01..04; NET-002-AC01..04.
+Acceptance: NET-001-AC01..04; NET-003-AC01..04.
 
 Constraints: no mutation of published NetworkVersion; no vertical-specific lifecycle owner; no composition or federation semantics in this item.
 

@@ -9,7 +9,7 @@ Objective: compile declarative NetworkDefinition into a deterministic launch pla
 
 Scope: manifest/definition validation, dependency/capability/resource resolution contracts, launch stage orchestration, tests.
 
-Acceptance: NET-003-AC01..04; NET-004-AC01..04.
+Acceptance: NET-002-AC01..04.
 
 Constraints: NetworkManifest is only a representation; NetworkDefinition remains source of intent; no concrete vendor/runtime imports; no vertical-specific compiler branches.
 

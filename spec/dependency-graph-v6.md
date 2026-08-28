@@ -20,7 +20,7 @@ WORK-024 (V6 freeze and governance release)
 WORK-024
    ├──────────────→ WORK-025 NetworkInstance + lifecycle
    │                    ↓
-   │                WORK-026 Network-as-Code + launch
+   │                WORK-026 Network-as-Code validation/resolution
    │                    ↓
    │             ┌──────┴────────┐
    │             ↓               ↓

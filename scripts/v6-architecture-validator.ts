@@ -63,6 +63,7 @@ const required = [
   'spec/architecture.md',
   'spec/architecture-lock.md',
   'spec/architecture-change-requests/ACR-005.md',
+  'spec/architecture-change-requests/ACR-006.md',
   'spec/architecture-inventory-v6.md',
   'spec/domain-architecture-v5.md',
   'spec/domain-architecture-v6.md',
@@ -80,6 +81,7 @@ required.forEach(read)
 const architecture = read('spec/architecture.md')
 const lock = read('spec/architecture-lock.md')
 const acr = read('spec/architecture-change-requests/ACR-005.md')
+const acr6 = read('spec/architecture-change-requests/ACR-006.md')
 const inventory = read('spec/architecture-inventory-v6.md')
 const v5 = read('spec/domain-architecture-v5.md')
 const v6 = read('spec/domain-architecture-v6.md')
@@ -102,6 +104,15 @@ if (!lock.includes('Domain Architecture Version: `IAAS-DOM-ARCH-6` (FROZEN — a
 if (/Candidate Domain Architecture: `IAAS-DOM-ARCH-6`/.test(lock)) fail('architecture-lock still declares a V6 candidate line after freeze')
 if (!acr.includes('- ACR-ID: `ACR-005`')) fail('ACR-005 identity missing')
 if (!acr.includes('- Status: `APPROVED`')) fail('ACR-005 must be APPROVED after the freeze gate')
+
+// ACR-006 traceability correction: the frozen V6 package's requirement-to-
+// Work-Item assignment layer was corrected (NET-002/NET-003 transposition fix;
+// NET-004 sole ownership at WORK-040). The ACR itself is UNDER_REVIEW while its
+// PR awaits independent Architect review and becomes APPROVED through that
+// review (same lifecycle pattern as WORK-024's PR_OPEN → VERIFIED contract).
+if (!acr6.includes('- ACR-ID: `ACR-006`')) fail('ACR-006 identity missing')
+if (!/- Status: `(UNDER_REVIEW|APPROVED)`/.test(acr6)) fail('ACR-006 must be UNDER_REVIEW or APPROVED')
+if (!acr6.includes('GitHub Issue #45')) fail('ACR-006 must cite its issuing work order (GitHub Issue #45)')
 if (!v6.includes('IAAS-DOM-ARCH-6') || !v6.includes('**FROZEN / CURRENT CANONICAL**')) fail('V6 architecture status invalid')
 if (/\*\*CANDIDATE \/ UNDER REVIEW\*\*/.test(v6)) fail('V6 architecture still declares candidate status after freeze')
 if (!v5.includes('IAAS-DOM-ARCH-5')) fail('V5 architecture missing')
@@ -121,7 +132,7 @@ for (const [path, expected] of Object.entries(frozenBlobSha)) {
   if (actual !== expected) fail(`historical architecture changed: ${path}`)
 }
 
-const v6Corpus = [architecture, lock, acr, inventory, v6, req, domainGraph, workItems, workGraph, hold]
+const v6Corpus = [architecture, lock, acr, acr6, inventory, v6, req, domainGraph, workItems, workGraph, hold]
 if (v6Corpus.some((content) => /WorkflowOS/.test(content))) fail('WorkflowOS vocabulary detected in V6 architecture package')
 
 const requirementIds = [...req.matchAll(/^## ([A-Z]+-\d+) —/gm)].map((m) => m[1])
@@ -145,6 +156,19 @@ const expectedStatus: Record<string, readonly string[]> = {
   'WORK-024': ['PR_OPEN', 'VERIFIED'],
   'WORK-025': ['READY'],
 }
+// ACR-006 corrected requirement-to-Work-Item mapping. The frozen package
+// transposed NET-002/NET-003 between WORK-025/WORK-026 and double-assigned
+// NET-004 (WORK-026 + WORK-040). The correction (see
+// spec/architecture-change-requests/ACR-006.md): WORK-025 owns NET-001 +
+// NET-003 (matching its merged lifecycle-authority implementation); WORK-026
+// owns NET-002 (deterministic validation/resolution, matching its issued
+// scope and prohibitions); WORK-040 solely owns NET-004 (the end-to-end
+// launch property, matching NET-004's universal-launch-proof verification).
+const correctedRequirements: Record<string, string> = {
+  'WORK-025': '`NET-001`, `NET-003`',
+  'WORK-026': '`NET-002`',
+  'WORK-040': '`NET-004`, `REF-001`, `CONF-001`',
+}
 const workItemIds = [...workItems.matchAll(/^## (WORK-\d+) —/gm)].map((m) => m[1])
 const expectedWorkIds = Array.from({ length: 19 }, (_, i) => `WORK-${String(i + 23).padStart(3, '0')}`)
 if (workItemIds.length !== expectedWorkIds.length) fail(`expected 19 V6 Work Items, found ${workItemIds.length}`)
@@ -161,8 +185,23 @@ for (const id of expectedWorkIds) {
   if (!allowed.includes(status)) fail(`${id} has status ${status}; the frozen program contract requires ${allowed.join(' or ')}`)
   if (status === 'READY') readyItems.push(id)
   for (const field of ['Architecture Version:','Requirements:','Dependencies:','Architecture Constraints:','Repository Scope:','Out of Scope:','Acceptance Criteria:','Required Verification:','Definition of Done:']) if (!section.includes(field)) fail(`${id} missing required Work Item field ${field}`)
+  const corrected = correctedRequirements[id]
+  if (corrected) {
+    const reqMatch = section.match(/^Requirements: (.+)$/m)
+    if ((reqMatch?.[1] ?? '') !== corrected) fail(`${id} Requirements must match the ACR-006 corrected mapping: expected ${corrected}`)
+  }
 }
 if (readyItems.length !== 1 || readyItems[0] !== 'WORK-025') fail(`exactly one V6 Work Item (WORK-025) may be READY; found: ${readyItems.join(', ') || 'none'}`)
+
+// ACR-006 single-authority rule: each NET requirement is owned by exactly one
+// Work Item, and the pre-correction contradiction signature (a Requirements
+// line co-assigning NET-003 and NET-004) must not reappear.
+const requirementsLines = [...workItems.matchAll(/^Requirements: (.+)$/gm)].map((m) => m[1])
+for (const id of ['NET-001', 'NET-002', 'NET-003', 'NET-004']) {
+  const owners = requirementsLines.filter((line) => line.includes(id))
+  if (owners.length !== 1) fail(`ACR-006 single-authority rule violated for ${id}: ${owners.length} Requirements lines reference it`)
+}
+if (requirementsLines.some((line) => line.includes('NET-003') && line.includes('NET-004'))) fail('the pre-ACR-006 contradiction signature (NET-003 and NET-004 co-assigned to one Work Item) is present')
 
 const edgeMatches = [...workGraph.matchAll(/^(WORK-\d+) → (WORK-\d+)$/gm)].map((m) => [m[1], m[2]] as const)
 const graph = new Map<string, string[]>()
@@ -181,4 +220,4 @@ if (!inventory.includes('Federation') || !inventory.includes('OPEN / RESEARCH'))
 if (!inventory.includes('NodeAgent') || !inventory.includes('reject mandatory')) fail('NodeAgent rejection decision missing')
 if (!v6.includes('No component may silently acquire a second ownership role for a listed responsibility') && !acr.includes("No component may own another component's authoritative state merely because it consumes it.")) fail('V6 authority ownership rule missing')
 
-process.stdout.write('V6 ARCHITECTURE VALIDATOR: PASS — IAAS-DOM-ARCH-6 is FROZEN / CURRENT CANONICAL; V1-V5 immutable; WORK-025 is the sole READY item; the frozen state is durably validated.\n')
+process.stdout.write('V6 ARCHITECTURE VALIDATOR: PASS — IAAS-DOM-ARCH-6 is FROZEN / CURRENT CANONICAL; V1-V5 immutable; WORK-025 is the sole READY item; the ACR-006 corrected NET requirement-to-Work-Item traceability is durably validated.\n')

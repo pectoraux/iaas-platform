@@ -2,7 +2,7 @@
 
 - Target Architecture: `IAAS-DOM-ARCH-6` (FROZEN)
 - Governing Governance Architecture: `IAAS-GOV-ARCH-1` (FROZEN)
-- Change Request: `ACR-005` (APPROVED; V6 frozen via WORK-024)
+- Change Request: `ACR-005` (APPROVED; V6 frozen via WORK-024); requirement-to-Work-Item traceability corrected by `ACR-006`
 - Status rule: the architecture gate is complete. Items follow the standard lifecycle — `DRAFT` → `READY` (only when dependency-eligible per `spec/dependency-graph-v6.md`) → implementation → `VERIFIED`. WORK-025 is the sole `READY` item; every other item remains `DRAFT` until its dependencies are `VERIFIED`.
 
 ## Program Rule
@@ -41,12 +41,12 @@ Execution record: released to Z.ai by the Chief Architect via GitHub Issue #40 (
 Status: `READY`
 Architecture Version: `IAAS-DOM-ARCH-6`
 Dependencies: `WORK-024`
-Requirements: `NET-001`, `NET-002`
+Requirements: `NET-001`, `NET-003`
 Objective: implement durable NetworkInstance identity and lifecycle authority.
 Repository Scope: network lifecycle service, schema/migration, tests.
 Out of Scope: composition, marketplace, federation.
 Architecture Constraints: NetworkDefinition/NetworkVersion remain authoritative for intent; instance lifecycle cannot mutate published versions.
-Acceptance Criteria: NET-001-AC01..04 and NET-002-AC01..04.
+Acceptance Criteria: NET-001-AC01..04 and NET-003-AC01..04.
 Required Verification: PostgreSQL lifecycle tests, tenant isolation, immutability, audit.
 Definition of Done: lifecycle behavior verified and merged.
 Release record: released by WORK-024 (the V6 freeze gate) as the sole dependency-eligible next Work Item — `WORK-024 → WORK-025` is the only dependency edge from WORK-024 and WORK-024 is WORK-025's only dependency; every other V6 item depends on at least one non-`VERIFIED` item. Release takes effect with the merge of the WORK-024 freeze PR (which completes WORK-024 through Architect approval).
@@ -55,12 +55,12 @@ Release record: released by WORK-024 (the V6 freeze gate) as the sole dependency
 Status: `DRAFT`
 Architecture Version: `IAAS-DOM-ARCH-6`
 Dependencies: `WORK-025`
-Requirements: `NET-003`, `NET-004`
+Requirements: `NET-002`
 Objective: provide deterministic validation/resolution/launch planning from declarative NetworkDefinition.
 Repository Scope: network compiler/validator, launch planning, tests.
 Out of Scope: vertical-specific launch implementations.
 Architecture Constraints: no kernel modification; no direct concrete-runtime imports; existing NetworkVersion publication semantics preserved.
-Acceptance Criteria: NET-003-AC01..04, NET-004-AC01..04.
+Acceptance Criteria: NET-002-AC01..04.
 Required Verification: deterministic fixtures, negative ordering tests, static dependency tests.
 Definition of Done: launch planning verified against reference definitions.
 
