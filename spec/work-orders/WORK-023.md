@@ -3,7 +3,7 @@
 Status: `DRAFT`
 Architecture Version: `IAAS-GOV-ARCH-1`
 Target Domain Architecture: `IAAS-DOM-ARCH-6` (CANDIDATE)
-Dependency: WORK-022 (implementation held by V6 architecture gate)
+Dependency: none
 Implementer: Chief Architect / Architecture Custodian
 
 ## Objective
