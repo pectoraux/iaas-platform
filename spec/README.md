@@ -64,3 +64,7 @@ The specification layer does not replace repository truth. It governs how reposi
 ## V6 Status
 
 `IAAS-DOM-ARCH-5` remains the current frozen architecture on main. `IAAS-DOM-ARCH-6` is a candidate under ACR-005 and is not yet an implementation authority. No V6 production Work Item may become READY until the V6 freeze gate passes.
+
+## V6 Validation Gate
+
+The candidate branch exposes `bun run v6:validate` and includes `tests/v6-architecture-completion.test.ts`. These checks are part of CI and validate candidate-document presence, historical V1-V5 immutability, V6 status, Work Item completeness, DAG acyclicity, forbidden dependency invariants, WorkflowOS exclusion, and implementation gating. A V6 freeze cannot rely on agent assertion alone.
