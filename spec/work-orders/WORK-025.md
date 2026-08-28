@@ -1,6 +1,6 @@
 # WORK-025 — NetworkInstance and Network Lifecycle
 
-Status: `DRAFT`
+Status: `READY`
 Architecture Version: `IAAS-DOM-ARCH-6`
 Dependency: WORK-024
 Implementer: Z.ai
