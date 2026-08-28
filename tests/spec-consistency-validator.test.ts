@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 
 const ROOT = process.cwd()
 const VALIDATOR = join(ROOT, 'scripts', 'spec-validator.ts')
+const GATE = join(ROOT, 'scripts', 'spec-validation-gate.ts')
 const SPEC = join(ROOT, 'spec')
 const tempDirs: string[] = []
 
@@ -27,6 +28,11 @@ function run(specDir: string) {
   return { code: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
 }
 
+function runGate() {
+  const result = spawnSync(process.execPath, [GATE], { encoding: 'utf8', env: process.env })
+  return { code: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+}
+
 function rewrite(specDir: string, file: string, fn: (text: string) => string) {
   const path = join(specDir, file)
   writeFileSync(path, fn(readFileSync(path, 'utf8')))
@@ -39,15 +45,14 @@ function expectFailure(specDir: string, check: string) {
   expect(result.stderr).toContain(`[${check}]`)
 }
 
-describe('spec validator — current repository', () => {
-  test('passes deterministically with the V5 / 22-item specification', () => {
-    const a = run(SPEC)
-    const b = run(SPEC)
+describe('spec validation gate — current repository', () => {
+  test('passes deterministically for the current V5 baseline while V6 remains candidate', () => {
+    const a = runGate()
+    const b = runGate()
     expect(a.code).toBe(0)
     expect(b.code).toBe(0)
     expect(a.stderr).toBe('')
-    expect(a.stdout).toContain('SPEC VALIDATION PASSED')
-    expect(a.stdout).toContain('domain-architecture=IAAS-DOM-ARCH-4')
+    expect(a.stdout).toContain('SPEC VALIDATION GATE: PASS')
     expect(a.stdout).toContain('work-items=22')
     expect(a.stdout).toContain('dependency-edges=21')
     expect(a.stdout).toBe(b.stdout)
@@ -60,47 +65,26 @@ describe('spec validator — mandatory negative cases', () => {
     unlinkSync(join(s, 'requirements.md'))
     expectFailure(s, 'SC-01')
   })
-
   test('unresolved dependency is rejected', () => {
-    const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('Dependencies: `WORK-017`', 'Dependencies: `WORK-999`'))
-    expectFailure(s, 'SC-09')
+    const s = copySpec(); rewrite(s, 'work-items.md', x => x.replace('Dependencies: `WORK-017`', 'Dependencies: `WORK-999`')); expectFailure(s, 'SC-09')
   })
-
   test('malformed architecture version is rejected', () => {
-    const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('Architecture Version: `IAAS-GOV-ARCH-1`', 'Architecture Version: broken'))
-    expectFailure(s, 'SC-05')
+    const s = copySpec(); rewrite(s, 'work-items.md', x => x.replace('Architecture Version: `IAAS-GOV-ARCH-1`', 'Architecture Version: broken')); expectFailure(s, 'SC-05')
   })
-
   test('missing WORK-001 acceptance criterion is rejected', () => {
-    const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('- `W001-AC07` verification evidence maps to acceptance criteria.\n', ''))
-    expectFailure(s, 'SC-07')
+    const s = copySpec(); rewrite(s, 'work-items.md', x => x.replace('- `W001-AC07` verification evidence maps to acceptance criteria.\n', '')); expectFailure(s, 'SC-07')
   })
-
   test('WORK-001 production scope is rejected', () => {
-    const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('Repository Scope: `spec/` governance documents and its executable consistency gate.', 'Repository Scope: `spec/` plus production services and prisma migrations.'))
-    expectFailure(s, 'SC-15')
+    const s = copySpec(); rewrite(s, 'work-items.md', x => x.replace('Repository Scope: `spec/` governance documents and its executable consistency gate.', 'Repository Scope: `spec/` plus production services and prisma migrations.')); expectFailure(s, 'SC-15')
   })
-
   test('dependency cycle is rejected', () => {
-    const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('Dependencies: none', 'Dependencies: `WORK-017`'))
-    expectFailure(s, 'SC-10')
+    const s = copySpec(); rewrite(s, 'work-items.md', x => x.replace('Dependencies: none', 'Dependencies: `WORK-017`')); expectFailure(s, 'SC-10')
   })
-
   test('WORK-022 cannot hold an active status when its dependency is not VERIFIED', () => {
-    const s = copySpec()
-    rewrite(s, 'work-items.md', x => x.replace('## WORK-021 — WASI Sandbox Host Foundation\nStatus: `VERIFIED`', '## WORK-021 — WASI Sandbox Host Foundation\nStatus: `READY`'))
-    expectFailure(s, 'SC-11')
+    const s = copySpec(); rewrite(s, 'work-items.md', x => x.replace('## WORK-021 — WASI Sandbox Host Foundation\nStatus: `VERIFIED`', '## WORK-021 — WASI Sandbox Host Foundation\nStatus: `READY`')); expectFailure(s, 'SC-11')
   })
-
   test('truth classification is required', () => {
-    const s = copySpec()
-    rewrite(s, 'requirements.md', x => x.replace(/OBSERVED/g, ''))
-    expectFailure(s, 'SC-12')
+    const s = copySpec(); rewrite(s, 'requirements.md', x => x.replace(/OBSERVED/g, '')); expectFailure(s, 'SC-12')
   })
 })
 
@@ -108,6 +92,8 @@ describe('V5 / WORK-021 and WORK-022 governance invariants', () => {
   test('V5 is frozen, WORK-021 and WORK-022 are verified, and no successor is released', () => {
     const items = readFileSync(join(SPEC, 'work-items.md'), 'utf8')
     const order = readFileSync(join(SPEC, 'work-orders', 'WORK-022.md'), 'utf8')
+    const v5 = readFileSync(join(SPEC, 'domain-architecture-v5.md'), 'utf8')
+    expect(v5).toMatch(/Status:\s*\*\*FROZEN\*\*/)
     expect(items).toContain('## WORK-021 — WASI Sandbox Host Foundation')
     expect(items).toContain('Status: `VERIFIED`')
     expect(items).toContain('Dependencies: `WORK-020`')
