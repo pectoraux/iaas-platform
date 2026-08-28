@@ -2,7 +2,7 @@
 
 - Governance Architecture Version: `IAAS-GOV-ARCH-1`
 - Status: **FROZEN**
-- Current Domain Architecture: `IAAS-DOM-ARCH-5` (FROZEN — approved through ACR-004 / WORK-020).
+- Domain Architecture Version: `IAAS-DOM-ARCH-5` (FROZEN — approved through ACR-004 / WORK-020).
 - Candidate Domain Architecture: `IAAS-DOM-ARCH-6` (CANDIDATE / UNDER REVIEW — ACR-005).
 - Historical Domain Versions: `IAAS-DOM-ARCH-1` through `IAAS-DOM-ARCH-4` — immutable historical records.
 
@@ -20,7 +20,8 @@
 10. Implementers may not silently redefine frozen architecture.
 11. Corrections remain attached to the same Work Item unless architecture changes.
 12. The implementation agent does not choose the next Work Item.
-13. Architecture-completion changes are specification/governance changes until the new architecture is frozen; they do not authorize production implementation merely by existing.
+13. WORK-001 authorizes no production feature implementation.
+14. Architecture-completion changes are specification/governance changes until the new architecture is frozen; they do not authorize production implementation merely by existing.
 
 ## Current Governance State
 

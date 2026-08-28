@@ -2,15 +2,15 @@
 // IAAS-DOM-ARCH-6 — Architecture Completion Validator
 // =============================================================================
 // Dependency-free validator for the candidate V6 architecture package.
-// It validates the immutable main specification baseline and the V6 candidate;
-// it does not execute production code or authorize implementation.
+// It validates the complete specification tree under test with the immutable
+// V1-era legacy validator, then validates the V6 candidate package; it does
+// not execute production code or authorize implementation.
 // =============================================================================
 
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { execFileSync, spawnSync } from 'node:child_process'
-import { dirname, join } from 'node:path'
-import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
+import { join } from 'node:path'
 
 const root = process.cwd()
 
@@ -25,41 +25,38 @@ const read = (path: string): string => {
   return readFileSync(full, 'utf8')
 }
 
+// WORK-024 repair: the legacy V1-era validator is the immutable specification
+// regression gate and runs against the COMPLETE specification tree under test
+// — on main this is main itself; on a PR branch it is exactly the tree the PR
+// would land on main. The original implementation instead validated a
+// snapshot of `origin/main`, which after the V6 candidate merge became
+// self-referential and unsatisfiable: a repair PR could never prove its own
+// specification tree green (the gate validated the already-regressed merged
+// snapshot instead of the tree under review), while main's own push gate
+// validated the same broken tree it had just accepted — PR #35 passed every
+// check pre-merge, then push run 33142040478 on merge commit ea3268a failed
+// SC-04/SC-15. Validating the tree under test restores the intended invariant
+// (the tree that would land on main MUST satisfy the complete V1-era
+// specification contract) and makes the gate self-consistent at every commit:
+// green on a PR head is green on the resulting main, because it is the same
+// tree. V1-V5 immutability remains independently enforced by the frozen
+// git-blob SHA checks below and by the legacy validator's own checks.
 function runLegacyBaselineValidation(): void {
-  const temp = mkdtempSync(join(tmpdir(), 'iaas-v6-baseline-'))
-  const baselineSpec = join(temp, 'spec')
-  try {
-    let ref = 'origin/main'
-    try { execFileSync('git', ['rev-parse', '--verify', ref], { cwd: root, stdio: 'ignore' }) }
-    catch { ref = 'main'; execFileSync('git', ['rev-parse', '--verify', ref], { cwd: root, stdio: 'ignore' }) }
-
-    const files = execFileSync('git', ['ls-tree', '-r', '--name-only', ref, 'spec'], { cwd: root, encoding: 'utf8' }).trim().split('\n').filter(Boolean)
-    for (const path of files) {
-      const target = join(temp, path)
-      mkdirSync(dirname(target), { recursive: true })
-      const content = execFileSync('git', ['show', `${ref}:${path}`], { cwd: root, encoding: 'utf8' })
-      writeFileSync(target, content)
-    }
-
-    const validator = join(root, 'scripts', 'spec-validator.ts')
-    const result = spawnSync(process.execPath, [validator, '--spec-dir', baselineSpec], {
-      cwd: root,
-      env: process.env,
-      encoding: 'utf8',
-    })
-    process.stdout.write(result.stdout ?? '')
-    process.stderr.write(result.stderr ?? '')
-    if (result.status !== 0) fail(`immutable main specification baseline rejected by legacy validator (exit ${result.status ?? 1})`)
-  } catch (error) {
-    fail(`unable to validate immutable main specification baseline: ${error instanceof Error ? error.message : String(error)}`)
-  } finally {
-    rmSync(temp, { recursive: true, force: true })
-  }
+  const validator = join(root, 'scripts', 'spec-validator.ts')
+  const specDir = join(root, 'spec')
+  const result = spawnSync(process.execPath, [validator, '--spec-dir', specDir], {
+    cwd: root,
+    env: process.env,
+    encoding: 'utf8',
+  })
+  process.stdout.write(result.stdout ?? '')
+  process.stderr.write(result.stderr ?? '')
+  if (result.status !== 0) fail(`specification tree under test rejected by legacy validator (exit ${result.status ?? 1})`)
 }
 
-// The V1-era validator remains a historical regression gate; execute it only
-// against the complete immutable main specification snapshot. V6 is validated
-// independently below against the candidate tree.
+// The V1-era validator remains a historical regression gate; execute it over
+// the complete specification tree under test. V6 is validated independently
+// below against the candidate tree.
 runLegacyBaselineValidation()
 
 const required = [
