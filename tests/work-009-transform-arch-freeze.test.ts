@@ -17,17 +17,12 @@ function readSpec(file: string): string {
   return readFileSync(join(REPO_ROOT, 'spec', file), 'utf8')
 }
 
-// ---------------------------------------------------------------------------
-// W009-AC01 — ACR-002 traceability
-// ---------------------------------------------------------------------------
-
 describe('WORK-009 — ACR-002 traceability (W009-AC01)', () => {
   test('domain-architecture-v3.md references ACR-002', () => {
     const src = readSpec('domain-architecture-v3.md')
     expect(src).toContain('ACR-002')
     expect(src).toContain('APPROVED')
   })
-
   test('ACR-002 exists and is APPROVED', () => {
     const src = readSpec('architecture-change-requests/ACR-002.md')
     expect(src).toContain('APPROVED')
@@ -37,183 +32,65 @@ describe('WORK-009 — ACR-002 traceability (W009-AC01)', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// W009-AC02 — IAAS-DOM-ARCH-3 is complete, consistent, and registered
-// ---------------------------------------------------------------------------
-
 describe('WORK-009 — IAAS-DOM-ARCH-3 registration (W009-AC02)', () => {
-  test('architecture.md registers V4 as FROZEN', () => {
+  test('architecture.md keeps V3 as immutable historical architecture while V5 is current', () => {
     const src = readSpec('architecture.md')
-    expect(src).toContain('`IAAS-DOM-ARCH-4` | FROZEN')
+    expect(src).toContain('`IAAS-DOM-ARCH-5` | FROZEN / CURRENT CANONICAL')
+    expect(src).toContain('`IAAS-DOM-ARCH-3` | SUPERSEDED / IMMUTABLE')
   })
-
-  test('architecture-lock.md registers V4 as current FROZEN domain version', () => {
+  test('architecture-lock.md registers V5 as current FROZEN domain version', () => {
     const src = readSpec('architecture-lock.md')
-    expect(src).toContain('IAAS-DOM-ARCH-4')
+    expect(src).toContain('IAAS-DOM-ARCH-5')
     expect(src).toContain('FROZEN')
+    expect(src).toContain('CURRENT')
   })
-
   test('domain-architecture-v3.md is FROZEN and supersedes V2', () => {
     const src = readSpec('domain-architecture-v3.md')
     expect(src).toContain('IAAS-DOM-ARCH-3')
     expect(src).toContain('FROZEN')
     expect(src).toContain('Supersedes: `IAAS-DOM-ARCH-2`')
   })
-
   test('domain-requirements-v3.md exists with DOM-014..DOM-017', () => {
     const src = readSpec('domain-requirements-v3.md')
-    expect(src).toContain('DOM-014')
-    expect(src).toContain('DOM-015')
-    expect(src).toContain('DOM-016')
-    expect(src).toContain('DOM-017')
+    expect(src).toContain('DOM-014'); expect(src).toContain('DOM-015'); expect(src).toContain('DOM-016'); expect(src).toContain('DOM-017')
   })
-
   test('domain-dependency-graph-v3.md exists with Transform Stack DAG', () => {
     const src = readSpec('domain-dependency-graph-v3.md')
-    expect(src).toContain('Transform')
-    expect(src).toContain('TransformRegistry')
-    expect(src).toContain('TransformRuntime')
-    expect(src).toContain('TransformRecord')
+    expect(src).toContain('Transform'); expect(src).toContain('TransformRegistry'); expect(src).toContain('TransformRuntime'); expect(src).toContain('TransformRecord')
   })
-
   test('README.md indexes the V3 documents', () => {
     const src = readSpec('README.md')
-    expect(src).toContain('domain-architecture-v3.md')
-    expect(src).toContain('domain-requirements-v3.md')
-    expect(src).toContain('domain-dependency-graph-v3.md')
-    expect(src).toContain('ACR-002.md')
+    expect(src).toContain('domain-architecture-v3.md'); expect(src).toContain('domain-requirements-v3.md'); expect(src).toContain('domain-dependency-graph-v3.md'); expect(src).toContain('ACR-002.md')
   })
 })
-
-// ---------------------------------------------------------------------------
-// W009-AC03 — Transform/Registry/Runtime responsibilities are non-overlapping
-// ---------------------------------------------------------------------------
 
 describe('WORK-009 — Transform Stack responsibility separation (W009-AC03)', () => {
   const src = readSpec('domain-architecture-v3.md')
-
-  test('Transform is the abstract operation contract (not a service/registry/runtime)', () => {
-    expect(src).toContain('Transform — Abstract Operation Contract')
-    expect(src).toContain('execute')
-    expect(src).toContain('reverse')
-    expect(src).toContain('estimateCost')
-    expect(src).toContain('verify')
-  })
-
-  test('TransformRegistry owns discovery/catalog (NOT execution)', () => {
-    expect(src).toContain('TransformRegistry — Discovery and Catalog')
-    expect(src).toContain('Discovery')
-    expect(src).toContain('Version compatibility')
-    expect(src).toContain('Certification metadata')
-    expect(src).toContain('Revocation metadata')
-    // Must NOT execute transforms — the document says "is NOT: ... an execution engine"
-    expect(src).toContain('an execution engine (that is `TransformRuntime`)')
-  })
-
-  test('TransformRuntime owns execution (NOT catalog/discovery)', () => {
-    expect(src).toContain('TransformRuntime — Execution Engine')
-    expect(src).toContain('Execute')
-    expect(src).toContain('Provenance emission')
-    expect(src).toContain('Idempotency')
-    // Must NOT own catalog/discovery — the document says "is NOT: ... own catalog/discovery"
-    expect(src).toContain('does NOT own catalog/discovery')
-  })
-
-  test('TransformRecord remains immutable provenance (NOT executor/registry)', () => {
-    expect(src).toContain('TransformRecord — Immutable Provenance')
-    expect(src).toContain('IMPLEMENTED')
-    // The document says "does NOT: become an execution primitive ... become a registry entry"
-    expect(src).toContain('become an execution primitive')
-    expect(src).toContain('become a registry entry')
-  })
+  test('Transform is the abstract operation contract (not a service/registry/runtime)', () => { expect(src).toContain('Transform — Abstract Operation Contract'); expect(src).toContain('execute'); expect(src).toContain('reverse'); expect(src).toContain('estimateCost'); expect(src).toContain('verify') })
+  test('TransformRegistry owns discovery/catalog (NOT execution)', () => { expect(src).toContain('TransformRegistry — Discovery and Catalog'); expect(src).toContain('Discovery'); expect(src).toContain('Version compatibility'); expect(src).toContain('Certification metadata'); expect(src).toContain('Revocation metadata'); expect(src).toContain('an execution engine (that is `TransformRuntime`)') })
+  test('TransformRuntime owns execution (NOT catalog/discovery)', () => { expect(src).toContain('TransformRuntime — Execution Engine'); expect(src).toContain('Execute'); expect(src).toContain('Provenance emission'); expect(src).toContain('Idempotency'); expect(src).toContain('does NOT own catalog/discovery') })
+  test('TransformRecord remains immutable provenance (NOT executor/registry)', () => { expect(src).toContain('TransformRecord — Immutable Provenance'); expect(src).toContain('IMPLEMENTED'); expect(src).toContain('become an execution primitive'); expect(src).toContain('become a registry entry') })
 })
-
-// ---------------------------------------------------------------------------
-// W009-AC04 — TransformRecord remains immutable provenance, service-layer only
-// ---------------------------------------------------------------------------
 
 describe('WORK-009 — TransformRecord integrity (W009-AC04)', () => {
   const src = readSpec('domain-architecture-v3.md')
-
-  test('TransformRecord is service-layer, not kernel', () => {
-    // The document states TransformRecord is service-layer (in §2.6 and §2.8)
-    expect(src).toMatch(/Service-layer/i)
-    expect(src).toContain('NOT a kernel primitive')
-  })
-
-  test('TransformRecord has the 7-element provenance', () => {
-    expect(src).toContain('inputHash')
-    expect(src).toContain('outputHash')
-    expect(src).toContain('transformType')
-    expect(src).toContain('transformVersion')
-    expect(src).toContain('parametersJson')
-    expect(src).toContain('nodeIdentity')
-    expect(src).toContain('resultStatus')
-  })
+  test('TransformRecord is service-layer, not kernel', () => { expect(src).toMatch(/Service-layer/i); expect(src).toContain('NOT a kernel primitive') })
+  test('TransformRecord has the 7-element provenance', () => { expect(src).toContain('inputHash'); expect(src).toContain('outputHash'); expect(src).toContain('transformType'); expect(src).toContain('transformVersion'); expect(src).toContain('parametersJson'); expect(src).toContain('nodeIdentity'); expect(src).toContain('resultStatus') })
 })
-
-// ---------------------------------------------------------------------------
-// W009-AC05 — all dependency and anti-dependency directions are explicit
-// ---------------------------------------------------------------------------
 
 describe('WORK-009 — dependency + anti-dependency directions (W009-AC05)', () => {
   const src = readSpec('domain-architecture-v3.md')
-
-  test('frozen dependency direction is explicit', () => {
-    expect(src).toContain('Transform (abstract contract)')
-    expect(src).toContain('TransformRegistry (catalog/discovery)')
-    expect(src).toContain('TransformRuntime (execution engine)')
-    expect(src).toContain('TransformRecord (immutable provenance fact')
-  })
-
-  test('anti-dependency prohibitions are explicit', () => {
-    expect(src).toContain('Vertical services')
-    expect(src).toContain('Economic Pipeline')
-    expect(src).toContain('Route/Transport')
-    expect(src).toContain('RuntimeRegistry')
-    expect(src).toContain('Kernel')
-  })
+  test('frozen dependency direction is explicit', () => { expect(src).toContain('Transform (abstract contract)'); expect(src).toContain('TransformRegistry (catalog/discovery)'); expect(src).toContain('TransformRuntime (execution engine)'); expect(src).toContain('TransformRecord (immutable provenance fact') })
+  test('anti-dependency prohibitions are explicit', () => { expect(src).toContain('Vertical services'); expect(src).toContain('Economic Pipeline'); expect(src).toContain('Route/Transport'); expect(src).toContain('RuntimeRegistry'); expect(src).toContain('Kernel') })
 })
-
-// ---------------------------------------------------------------------------
-// W009-AC07 — production implementation prohibited
-// ---------------------------------------------------------------------------
 
 describe('WORK-009 — no production implementation (W009-AC07)', () => {
-  test('domain-architecture-v3.md classifies TransformRegistry/TransformRuntime as IMPLEMENTED (updated by WORK-012)', () => {
-    const src = readSpec('domain-architecture-v3.md')
-    // WORK-012 truth sync: TransformRegistry (WORK-010 VERIFIED) and
-    // TransformRuntime (WORK-011 VERIFIED) are now IMPLEMENTED, not FROZEN-CONTRACT.
-    expect(src).toContain('Classification: **IMPLEMENTED**')
-  })
-
-  test('no src/ files changed by WORK-009 (spec-only)', () => {
-    // Static reminder: diff-scope guard enforces this in CI.
-    expect(true).toBe(true)
-  })
+  test('domain-architecture-v3.md classifies TransformRegistry/TransformRuntime as IMPLEMENTED (updated by WORK-012)', () => { expect(readSpec('domain-architecture-v3.md')).toContain('Classification: **IMPLEMENTED**') })
+  test('no src/ files changed by WORK-009 (spec-only)', () => { expect(true).toBe(true) })
 })
 
-// ---------------------------------------------------------------------------
-// W009-AC08 — V2 immutability + zero production scope
-// ---------------------------------------------------------------------------
-
 describe('WORK-009 — V2 immutability + version integrity (W009-AC08)', () => {
-  test('V2 domain-architecture-v2.md is not modified (still references V2 as its version)', () => {
-    const src = readSpec('domain-architecture-v2.md')
-    expect(src).toContain('IAAS-DOM-ARCH-2')
-  })
-
-  test('V1 domain-requirements.md DOM-P02 and DOM-P03 are marked SUPERSEDED by V3', () => {
-    const src = readSpec('domain-requirements-v3.md')
-    expect(src).toContain('DOM-P02')
-    expect(src).toContain('SUPERSEDED by DOM-015')
-    expect(src).toContain('DOM-P03')
-    expect(src).toContain('SUPERSEDED by DOM-016')
-  })
-
-  test('DOM-P04..P08 remain FUTURE/OPEN/RESEARCH (not promoted by V3)', () => {
-    const src = readSpec('domain-requirements-v3.md')
-    expect(src).toContain('DOM-P04..DOM-P08')
-    expect(src).toContain('not promoted by V3')
-  })
+  test('V2 domain-architecture-v2.md is not modified (still references V2 as its version)', () => { expect(readSpec('domain-architecture-v2.md')).toContain('IAAS-DOM-ARCH-2') })
+  test('V1 domain-requirements.md DOM-P02 and DOM-P03 are marked SUPERSEDED by V3', () => { const src=readSpec('domain-requirements-v3.md'); expect(src).toContain('DOM-P02'); expect(src).toContain('SUPERSEDED by DOM-015'); expect(src).toContain('DOM-P03'); expect(src).toContain('SUPERSEDED by DOM-016') })
+  test('DOM-P04..P08 remain FUTURE/OPEN/RESEARCH (not promoted by V3)', () => { const src=readSpec('domain-requirements-v3.md'); expect(src).toContain('DOM-P04..DOM-P08'); expect(src).toContain('not promoted by V3') })
 })
