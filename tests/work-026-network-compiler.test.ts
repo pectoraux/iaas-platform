@@ -2,24 +2,28 @@
 // =============================================================================
 // WORK-026 — Network-as-Code Validation and Resolution unit + architecture tests
 // =============================================================================
-// Verifies the architecture/static halves of NET-003-AC01..04 and
-// NET-004-AC01..04 (IAAS-DOM-ARCH-6 §3.5, spec/work-orders/WORK-026.md):
-//   - validation is deterministic, fail-closed, and never mutates published
-//     NetworkVersion state (NET-003-AC01)
-//   - invalid definitions/versions are rejected BEFORE resolution side
-//     effects (NET-003-AC02)
+// Verifies the architecture/static halves of NET-002-AC01..04
+// (IAAS-DOM-ARCH-6 §3.5, spec/work-orders/WORK-026.md — WORK-026's sole
+// requirement per approved ACR-006):
+//   - validation is deterministic, fail-closed, never mutates published
+//     NetworkVersion state, and invalid definitions/versions are rejected
+//     BEFORE resolution side effects (NET-002-AC01)
 //   - dependency resolution is deterministic, acyclic, and based only on the
-//     declared canonical dependency contracts of the definition (NET-003-AC03)
-//   - capability/resource requirements are resolved through canonical
-//     interfaces without vertical-specific branches (NET-003-AC04)
-//   - the same declarative input produces the same canonical resolution
-//     result under the same authoritative repository state (NET-004-AC01)
-//   - resolution does not allocate, reserve, commit, provision, activate, or
-//     mutate NetworkInstance lifecycle state (NET-004-AC02)
-//   - the resolution output is explicit for the next provisioning/launch
-//     stage and contains no hidden implementation state (NET-004-AC03)
+//     declared canonical dependency contracts of the definition; capability/
+//     resource requirements are resolved through canonical interfaces
+//     (NET-002-AC02)
+//   - allocation, provisioning, activation, verification, and deployment are
+//     REPRESENTED in the plan output as one lifecycle but never executed:
+//     resolution does not allocate, reserve, commit, provision, activate, or
+//     mutate NetworkInstance lifecycle state, and the output is explicit for
+//     the next provisioning/launch stage with no hidden implementation state
+//     (NET-002-AC03)
+//   - simple and complex networks use the same model: the same declarative
+//     input produces the same canonical resolution result under the same
+//     authoritative repository state, with no vertical-specific branches
+//     (NET-002-AC04)
 //   - tenant isolation and authorization boundaries are preserved
-//     (NET-004-AC04)
+//     (platform tenant-scope invariant)
 //
 // NOTE (CI contract): this suite runs in the Specification Consistency
 // Validator job, which has NO node_modules by design — every check here is a
@@ -79,10 +83,10 @@ function parseFrozenPipeline(arch: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// NET-003-AC01 — architecture + fail-closed validation authority
+// NET-002-AC01 — architecture + fail-closed validation authority
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — Network-as-Code Compiler architecture (NET-003-AC01)', () => {
+describe('WORK-026 — Network-as-Code Compiler architecture (NET-002-AC01)', () => {
   test('Network-as-Code Compiler service is in the service layer (NOT kernel)', () => {
     const path = join(REPO_ROOT, 'src', 'lib', 'services', 'network-compiler.service.ts')
     expect(path).toContain('src/lib/services/')
@@ -118,7 +122,7 @@ describe('WORK-026 — Network-as-Code Compiler architecture (NET-003-AC01)', ()
   test('Network-as-Code Compiler imports NO vertical service (no vertical-specific resolver/compiler branch)', () => {
     const verticalPattern = /(?:vpp|compute|storage|wireless|manufacturing|der-adapter|der-simulator|energy)\.service/
     expect(verticalPattern.test(SERVICE_SRC)).toBe(false)
-    // NET-003-AC04: no vertical-specific branches — the compiler never
+    // NET-002-AC04: no vertical-specific branches — the compiler never
     // switches behavior on the vertical.
     expect(SERVICE_SRC).not.toMatch(/vertical\s*===/)
     expect(SERVICE_SRC).not.toMatch(/vertical\s*==/)
@@ -150,7 +154,7 @@ describe('WORK-026 — Network-as-Code Compiler architecture (NET-003-AC01)', ()
     expect(SERVICE_SRC).not.toContain('scheduler')
   })
 
-  test('Network-as-Code Compiler imports NO Network Lifecycle service and NEVER mutates NetworkInstance (NET-004-AC02 static half)', () => {
+  test('Network-as-Code Compiler imports NO Network Lifecycle service and NEVER mutates NetworkInstance (NET-002-AC03 static half)', () => {
     // The compiler is a resolution authority, NOT a lifecycle authority:
     // resolution must never create, transition, or delete instances.
     expect(SERVICE_SRC).not.toContain('network-lifecycle.service')
@@ -159,7 +163,7 @@ describe('WORK-026 — Network-as-Code Compiler architecture (NET-003-AC01)', ()
   })
 
   test('Network-as-Code Compiler NEVER mutates NetworkVersion (immutable published source)', () => {
-    // NET-003-AC01: "does not mutate published NetworkVersion state". The
+    // NET-002-AC01: "does not mutate published NetworkVersion state". The
     // compiler may only READ the version (findFirst) — no write paths.
     expect(SERVICE_SRC).toMatch(/networkVersion\.findFirst/)
     expect(SERVICE_SRC).not.toMatch(/networkVersion\.(update|create|upsert|delete|deleteMany|updateMany)\s*\(/)
@@ -179,7 +183,7 @@ describe('WORK-026 — Network-as-Code Compiler architecture (NET-003-AC01)', ()
   })
 
   test('Network-as-Code Compiler performs NO allocation / reservation / commitment / provisioning / activation', () => {
-    // NET-004-AC02 static half: the §3.5 stages after Resource Discovery are
+    // NET-002-AC03 static half: the §3.5 stages after Resource Discovery are
     // owned by later Work Items — the compiler must not touch their state.
     expect(SERVICE_SRC).not.toContain('capacityReservation')
     expect(SERVICE_SRC).not.toContain('portfolioReservation')
@@ -220,7 +224,7 @@ describe('WORK-026 — Network-as-Code Compiler architecture (NET-003-AC01)', ()
     expect(firstWriteIdx).toBeGreaterThan(-1)
     expect(throwIdx).toBeLessThan(firstWriteIdx)
     // The rejection names the AC it enforces.
-    expect(resolveBody).toContain('rejected before resolution side effects (NET-003-AC02)')
+    expect(resolveBody).toContain('rejected before resolution side effects (NET-002-AC01)')
   })
 
   test('the publication gate rejects unpublished versions before resolution', () => {
@@ -235,10 +239,10 @@ describe('WORK-026 — Network-as-Code Compiler architecture (NET-003-AC01)', ()
 })
 
 // ---------------------------------------------------------------------------
-// NET-003-AC02 — fail-closed negative ordering (static half)
+// NET-002-AC01 — fail-closed negative ordering (static half)
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — fail-closed rejection ordering (NET-003-AC02)', () => {
+describe('WORK-026 — fail-closed rejection ordering (NET-002-AC01)', () => {
   test('resolveNetworkPlan stage order: authorize → load → publication gate → validate → resolve → persist', () => {
     const body = extractFunctionBody(SERVICE_SRC, 'export async function resolveNetworkPlan')
     const order = [
@@ -288,10 +292,10 @@ describe('WORK-026 — fail-closed rejection ordering (NET-003-AC02)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// NET-003-AC03 — declared canonical dependency contracts (static half)
+// NET-002-AC02 — declared canonical dependency contracts (static half)
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — dependency resolution contract (NET-003-AC03)', () => {
+describe('WORK-026 — dependency resolution contract (NET-002-AC02)', () => {
   test('the declared dependency contract is intra-definition (NOT composition)', () => {
     // Dependencies bind declared capability nodes of ONE manifest. No
     // cross-network / export / import / composition semantics — the check
@@ -317,7 +321,7 @@ describe('WORK-026 — dependency resolution contract (NET-003-AC03)', () => {
     expect(body).toBeTruthy()
     expect(body).toContain('order.length !== nodes.length')
     expect(body).toContain('Dependency graph contains a cycle')
-    expect(body).toContain('must be acyclic (NET-003-AC03)')
+    expect(body).toContain('must be acyclic (NET-002-AC02)')
     // The cycle path is deterministic: DFS starts from the lexicographically
     // smallest remaining node with sorted adjacency.
     expect(body).toContain('.sort()')
@@ -340,10 +344,10 @@ describe('WORK-026 — dependency resolution contract (NET-003-AC03)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// NET-003-AC04 — canonical capability/resource resolution (static half)
+// NET-002-AC02 — canonical capability/resource resolution (static half)
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — canonical capability/resource resolution (NET-003-AC04)', () => {
+describe('WORK-026 — canonical capability/resource resolution (NET-002-AC02)', () => {
   test('capability requirements resolve against the materialized Capability catalog', () => {
     // The canonical interface for capability truth is the Capability
     // catalog materialized at publication (V6 §15) — scoped to the tenant
@@ -354,7 +358,7 @@ describe('WORK-026 — canonical capability/resource resolution (NET-003-AC04)',
     )
     // Mismatch between the declared manifest and the materialized catalog is
     // a fail-closed integrity rejection.
-    expect(body).toContain('fail-closed, NET-003-AC04')
+    expect(body).toContain('fail-closed, NET-002-AC02')
   })
 
   test('resource requirements resolve against the authoritative AssetNetworkAssignment truth', () => {
@@ -362,9 +366,10 @@ describe('WORK-026 — canonical capability/resource resolution (NET-003-AC04)',
     expect(body).toMatch(
       /db\.assetNetworkAssignment\.findMany\(\{\s*\n\s*where: \{ tenantId, networkId: version\.networkId, status: 'active' \}/,
     )
-    // Discovery is an inventory, not an allocation (NET-004-AC02).
+    // Discovery is an inventory, not an allocation (NET-002-AC03 — the
+    // represented-not-executed boundary holds inside the discovery stage).
     expect(SERVICE_SRC).toContain('Discovery is an INVENTORY')
-    expect(SERVICE_SRC).toContain('not an allocation (NET-004-AC02)')
+    expect(SERVICE_SRC).toContain('not an allocation (NET-002-AC03)')
   })
 
   test('capability catalog and resource discovery are the ONLY cross-subsystem reads', () => {
@@ -377,10 +382,10 @@ describe('WORK-026 — canonical capability/resource resolution (NET-003-AC04)',
 })
 
 // ---------------------------------------------------------------------------
-// NET-004-AC01 — deterministic canonical resolution (static half)
+// NET-002-AC04 — deterministic canonical resolution (static half)
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — deterministic canonical resolution (NET-004-AC01)', () => {
+describe('WORK-026 — deterministic canonical resolution (NET-002-AC04)', () => {
   test('the canonical serialization is recursively key-sorted', () => {
     const body = extractFunctionBody(SERVICE_SRC, 'export function canonicalJsonStringify')
     expect(body).toBeTruthy()
@@ -425,10 +430,10 @@ describe('WORK-026 — deterministic canonical resolution (NET-004-AC01)', () =>
 })
 
 // ---------------------------------------------------------------------------
-// NET-004-AC03 — explicit output, no hidden implementation state (static half)
+// NET-002-AC03 — explicit output, no hidden implementation state (static half)
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — explicit resolution output (NET-004-AC03)', () => {
+describe('WORK-026 — explicit resolution output (NET-002-AC03)', () => {
   test('the plan content interface enumerates EXACTLY the documented sections', () => {
     const iface = extractInterfaceBody(SERVICE_SRC, 'export interface ResolvedNetworkPlan')
     const fields = [
@@ -484,10 +489,10 @@ describe('WORK-026 — explicit resolution output (NET-004-AC03)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// NET-004-AC04 — tenant isolation + authorization (static half)
+// Platform tenant-scope invariant — tenant isolation + authorization (static half)
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — tenant isolation + authorization (NET-004-AC04)', () => {
+describe('WORK-026 — tenant isolation + authorization (tenant-scope platform invariant)', () => {
   test('every cross-subsystem read is tenant-scoped', () => {
     expect(SERVICE_SRC).toMatch(/where: \{ id: versionId, network: \{ tenantId \} \}/)
     expect(SERVICE_SRC).toMatch(/where: \{ tenantId, networkVersionId: version\.id \}/)
@@ -540,7 +545,7 @@ describe('WORK-026 — tenant isolation + authorization (NET-004-AC04)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Schema contract — the NetworkPlan artifact (NET-004-AC01/AC02/AC04)
+// Schema contract — the NetworkPlan artifact (NET-002-AC03/AC04 + tenant-scope invariant)
 // ---------------------------------------------------------------------------
 
 describe('WORK-026 — NetworkPlan schema contract', () => {
@@ -568,7 +573,7 @@ describe('WORK-026 — NetworkPlan schema contract', () => {
   test('NetworkPlan is write-once: createdAt only, NO updatedAt, NO lifecycle/status column', () => {
     // The plan is a compiled projection, NOT a lifecycle authority — it must
     // not carry a state machine that could compete with NetworkInstance
-    // lifecycle (NET-004-AC02 / V6 §15). Field-position patterns (2-space
+    // lifecycle (NET-002-AC03 / V6 §15). Field-position patterns (2-space
     // indent) so boundary COMMENTS do not collide with the check.
     const section = modelSection('NetworkPlan')
     expect(section).toMatch(/createdAt\s+DateTime\s+@default\(now\(\)\)/)
@@ -624,10 +629,10 @@ describe('WORK-026 — NetworkPlan schema contract', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Manifest validation contract completeness (NET-003-AC01 static half)
+// Manifest validation contract completeness (NET-002-AC01 static half)
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — manifest validation contract (NET-003-AC01)', () => {
+describe('WORK-026 — manifest validation contract (NET-002-AC01)', () => {
   test('every canonical constraint has a deterministic error code', () => {
     expect(DECLARED_ERROR_CODES).toEqual([
       'M001_MANIFEST_NOT_OBJECT',

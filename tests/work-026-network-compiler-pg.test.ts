@@ -2,27 +2,31 @@
 /**
  * WORK-026 — Network-as-Code Validation and Resolution PostgreSQL Integration Tests
  *
- * Proves the persistence halves of NET-003-AC01..04 and NET-004-AC01..04
- * (IAAS-DOM-ARCH-6 §3.5) against real PostgreSQL:
+ * Proves the persistence halves of NET-002-AC01..04
+ * (IAAS-DOM-ARCH-6 §3.5 — WORK-026's sole requirement per approved ACR-006)
+ * against real PostgreSQL:
  *
  *   - deterministic fail-closed validation; published NetworkVersion
- *     byte-immutability before/after resolution (NET-003-AC01)
+ *     byte-immutability before/after resolution (NET-002-AC01)
  *   - invalid/unpublished/cross-tenant versions rejected with NO plan row and
- *     NO audit row (rejected before resolution side effects, NET-003-AC02)
+ *     NO audit row (rejected before resolution side effects, NET-002-AC01)
  *   - dependency resolution: acyclic enforcement with the exact cycle,
- *     deterministic canonical topological order (NET-003-AC03)
+ *     deterministic canonical topological order (NET-002-AC02)
  *   - capability resolution against the materialized catalog (incl. tamper
  *     fail-closure) + resource discovery through the authoritative verified
- *     assignments, identical mechanics across verticals (NET-003-AC04)
+ *     assignments (NET-002-AC02), identical mechanics across verticals
+ *     (NET-002-AC04)
  *   - determinism: idempotent re-resolution, checksum stability under
  *     unchanged repository state, repo-state sensitivity, canonical resource
- *     ordering independent of creation order (NET-004-AC01)
+ *     ordering independent of creation order (NET-002-AC04)
  *   - resolution never allocates/reserves/commits/provisions/activates and
- *     never mutates NetworkInstance lifecycle state (NET-004-AC02)
+ *     never mutates NetworkInstance lifecycle state — the later lifecycle
+ *     stages are represented, not executed (NET-002-AC03)
  *   - explicit plan output: exact section set, independently verified
- *     sha256(planJson) checksum, explicit empty discovery (NET-004-AC03)
+ *     sha256(planJson) checksum, explicit empty discovery (NET-002-AC03)
  *   - tenant isolation + actor authorization + atomic audit + racing
- *     resolutions converging to exactly one artifact (NET-004-AC04)
+ *     resolutions converging to exactly one artifact (platform tenant-scope
+ *     invariant; the determinism half is NET-002-AC04)
  *
  * Run: bun test tests/work-026-network-compiler-pg.test.ts --timeout 120000
  */
@@ -153,10 +157,10 @@ beforeAll(async () => {
 })
 
 // ---------------------------------------------------------------------------
-// NET-003-AC01 — deterministic fail-closed validation; version immutability
+// NET-002-AC01 — deterministic fail-closed validation; version immutability
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — deterministic fail-closed validation (NET-003-AC01)', () => {
+describe('WORK-026 — deterministic fail-closed validation (NET-002-AC01)', () => {
   it('resolves a valid published version into a plan artifact', async () => {
     const { version } = await createVersion(tenantA, 'generic', TEST_CONFIG)
     const plan = await resolveNetworkPlan(tenantA, version.id, ownerActor)
@@ -239,10 +243,10 @@ describe('WORK-026 — deterministic fail-closed validation (NET-003-AC01)', () 
 })
 
 // ---------------------------------------------------------------------------
-// NET-003-AC02 — rejected BEFORE resolution side effects
+// NET-002-AC01 — rejected BEFORE resolution side effects
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — fail-closed rejection before side effects (NET-003-AC02)', () => {
+describe('WORK-026 — fail-closed rejection before side effects (NET-002-AC01)', () => {
   it('rejects an UNPUBLISHED version with NO plan row and NO audit row', async () => {
     const { version } = await createVersion(tenantA, 'generic', TEST_CONFIG, { publish: false })
     const auditsBefore = await db.auditLog.count({ where: { resourceType: 'network_plan' } })
@@ -326,10 +330,10 @@ describe('WORK-026 — fail-closed rejection before side effects (NET-003-AC02)'
 })
 
 // ---------------------------------------------------------------------------
-// NET-003-AC03 — deterministic acyclic dependency resolution
+// NET-002-AC02 — deterministic acyclic dependency resolution
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — dependency resolution (NET-003-AC03)', () => {
+describe('WORK-026 — dependency resolution (NET-002-AC02)', () => {
   it('rejects a dependency CYCLE with the exact cycle path and no side effects', async () => {
     const cyclic: VersionConfiguration = {
       ...TEST_CONFIG,
@@ -396,10 +400,10 @@ describe('WORK-026 — dependency resolution (NET-003-AC03)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// NET-003-AC04 — canonical capability/resource resolution, no vertical branches
+// NET-002-AC02 — canonical capability/resource resolution (vertical universality: NET-002-AC04)
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — capability + resource resolution (NET-003-AC04)', () => {
+describe('WORK-026 — capability + resource resolution (NET-002-AC02)', () => {
   it('capability resolution matches the materialized Capability catalog rows exactly', async () => {
     const { version } = await createVersion(tenantA, 'generic', TEST_CONFIG)
     const catalog = await db.capability.findMany({ where: { networkVersionId: version.id } })
@@ -524,10 +528,10 @@ describe('WORK-026 — capability + resource resolution (NET-003-AC04)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// NET-004-AC01 — deterministic canonical resolution result
+// NET-002-AC04 — deterministic canonical resolution result
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — deterministic resolution (NET-004-AC01)', () => {
+describe('WORK-026 — deterministic resolution (NET-002-AC04)', () => {
   it('re-resolution under UNCHANGED repository state returns the SAME artifact (idempotent)', async () => {
     const { version } = await createVersion(tenantA, 'generic', TEST_CONFIG)
     const first = await resolveNetworkPlan(tenantA, version.id, ownerActor)
@@ -595,10 +599,10 @@ describe('WORK-026 — deterministic resolution (NET-004-AC01)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// NET-004-AC02 — no allocation / provisioning / activation / lifecycle mutation
+// NET-002-AC03 — no allocation / provisioning / activation / lifecycle mutation
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — resolution owns no later pipeline stage (NET-004-AC02)', () => {
+describe('WORK-026 — resolution owns no later pipeline stage (NET-002-AC03)', () => {
   it('resolution creates NO NetworkInstance rows', async () => {
     const { version } = await createVersion(tenantA, 'generic', TEST_CONFIG)
     const before = await db.networkInstance.count({ where: { tenantId: tenantA } })
@@ -638,10 +642,10 @@ describe('WORK-026 — resolution owns no later pipeline stage (NET-004-AC02)', 
 })
 
 // ---------------------------------------------------------------------------
-// NET-004-AC03 — explicit output for the next provisioning/launch stage
+// NET-002-AC03 — explicit output for the next provisioning/launch stage
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — explicit resolution output (NET-004-AC03)', () => {
+describe('WORK-026 — explicit resolution output (NET-002-AC03)', () => {
   it('the plan content has EXACTLY the documented sections (no hidden state)', async () => {
     const { version } = await createVersion(tenantA, 'generic', DEPENDENCY_CONFIG)
     const plan = await resolveNetworkPlan(tenantA, version.id, ownerActor)
@@ -707,10 +711,10 @@ describe('WORK-026 — explicit resolution output (NET-004-AC03)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// NET-004-AC04 — tenant isolation + authorization + audit + concurrency
+// Platform tenant-scope invariant — tenant isolation + authorization + audit + concurrency
 // ---------------------------------------------------------------------------
 
-describe('WORK-026 — tenant isolation + authorization + audit (NET-004-AC04)', () => {
+describe('WORK-026 — tenant isolation + authorization + audit (tenant-scope platform invariant)', () => {
   it('viewers are DENIED the persisting resolve operation', async () => {
     const { version } = await createVersion(tenantA, 'generic', TEST_CONFIG)
     await expect(resolveNetworkPlan(tenantA, version.id, viewerActor)).rejects.toThrow(ForbiddenError)

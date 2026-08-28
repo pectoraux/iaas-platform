@@ -12,7 +12,8 @@
 // NetworkManifest is only a representation; NetworkDefinition remains source
 // of intent), §3.5 (the canonical launch pipeline), §15 (authority matrix),
 // §16 (forbidden generic dependencies), spec/domain-requirements-v6.md
-// NET-003 / NET-004, spec/work-orders/WORK-026.md.
+// NET-002 (WORK-026's sole acceptance-bearing requirement per approved
+// ACR-006), spec/work-orders/WORK-026.md (Acceptance: NET-002-AC01..04).
 //
 // The frozen V6 §3.5 launch pipeline, with the stages THIS compiler owns:
 //
@@ -26,41 +27,41 @@
 //   Commitment            │ as the explicit remaining stages for the next
 //   Provisioning          │ provisioning/launch Work Item. This service
 //   Runtime Activation    │ NEVER allocates, reserves, commits, provisions,
-//   Verification          │ activates, or executes anything (NET-004-AC02).
+//   Verification          │ activates, or executes anything (NET-002-AC03).
 //   DEPLOYED              ┘
 //
 // ARCHITECTURAL BOUNDARIES (frozen by IAAS-DOM-ARCH-6):
 //   - Service-layer, NOT kernel (this module is in src/lib/services/).
-//   - Deterministic and fail-closed (NET-003-AC01): validation runs BEFORE
+//   - Deterministic and fail-closed (NET-002-AC01): validation runs BEFORE
 //     any side effect; invalid definitions/versions are rejected with NO plan
-//     row and NO audit row (NET-003-AC02).
+//     row and NO audit row (NET-002-AC01).
 //   - The source NetworkVersion is READ-ONLY here: compilation never writes
-//     NetworkVersion rows (NET-003-AC01 — published versions are immutable).
+//     NetworkVersion rows (NET-002-AC01 — published versions are immutable).
 //   - Dependency resolution is deterministic, acyclic, and based ONLY on the
 //     declared canonical dependency contracts of the definition itself
-//     (NET-003-AC03). This is NOT cross-network composition: no
+//     (NET-002-AC02). This is NOT cross-network composition: no
 //     export/import bindings, no federation semantics (later Work Items).
 //   - Capability/resource requirements are resolved through canonical
 //     interfaces (the Capability catalog materialized at publication + the
 //     authoritative AssetNetworkAssignment resource truth) with NO
-//     vertical-specific branches (NET-003-AC04): every vertical compiles
+//     vertical-specific branches (NET-002-AC04): every vertical compiles
 //     through the identical code path.
 //   - The same declarative input under the same authoritative repository
-//     state produces the SAME canonical resolution result (NET-004-AC01):
+//     state produces the SAME canonical resolution result (NET-002-AC04):
 //     planJson is a canonical serialization (recursively key-sorted, arrays
 //     in canonical order) and planChecksum = sha256(planJson); the unique
 //     constraint (tenantId, networkVersionId, planChecksum) makes
 //     re-resolution idempotent.
 //   - Resolution does NOT allocate, reserve, commit, provision, activate, or
-//     mutate NetworkInstance lifecycle state (NET-004-AC02): this service
+//     mutate NetworkInstance lifecycle state (NET-002-AC03): this service
 //     never writes NetworkInstance, CapacityReservation, or commitment rows
 //     and never imports the Network Lifecycle service.
-//   - The plan output is fully EXPLICIT (NET-004-AC03): a documented set of
+//   - The plan output is fully EXPLICIT (NET-002-AC03): a documented set of
 //     plain-data sections — source, declared manifest, dependency order,
 //     capability resolution, resource discovery, and the pipeline stage
 //     lists — with no hidden implementation state.
 //   - Tenant isolation and authorization boundaries are preserved
-//     (NET-004-AC04): every query is tenant-scoped (cross-tenant ids are
+//     (platform tenant-scope invariant): every query is tenant-scoped (cross-tenant ids are
 //     uniformly NOT_FOUND) and the persisting operation is actor-authorized
 //     (viewers are denied).
 //
@@ -87,7 +88,7 @@ import type { UserRole } from '@/lib/domain/auth'
 
 /**
  * The declared dependency contract between two nodes of ONE network
- * definition (NET-003-AC03). `from` REQUIRES `to` (`from` depends on `to`);
+ * definition (NET-002-AC02). `from` REQUIRES `to` (`from` depends on `to`);
  * both endpoints MUST reference capability types declared by the same
  * manifest. This is the INTERNAL dependency surface of a definition — it is
  * NOT a cross-network composition binding (WORK-027 owns those).
@@ -117,7 +118,7 @@ export interface NetworkCompilerActor {
 }
 
 // ---------------------------------------------------------------------------
-// Deterministic canonical serialization (NET-004-AC01 / NET-004-AC03)
+// Deterministic canonical serialization (NET-002-AC04 / NET-002-AC03)
 // ---------------------------------------------------------------------------
 
 /**
@@ -143,7 +144,7 @@ export function computePlanChecksum(planJson: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// The frozen V6 §3.5 launch pipeline stage lists (NET-004-AC03)
+// The frozen V6 §3.5 launch pipeline stage lists (NET-002-AC03)
 // ---------------------------------------------------------------------------
 
 /** The complete frozen §3.5 launch pipeline, in canonical order. */
@@ -171,7 +172,7 @@ export const REMAINING_LAUNCH_STAGES: readonly string[] = LAUNCH_PIPELINE_STAGES
 export const PLAN_SCHEMA_VERSION = 1
 
 // ---------------------------------------------------------------------------
-// Pure manifest validation (NET-003-AC01: deterministic, fail-closed)
+// Pure manifest validation (NET-002-AC01: deterministic, fail-closed)
 // ---------------------------------------------------------------------------
 //
 // The manifest is the serialized declarative configuration of a
@@ -398,7 +399,7 @@ export function validateNetworkManifest(manifest: unknown): ManifestIssue[] {
 }
 
 // ---------------------------------------------------------------------------
-// Pure dependency resolution (NET-003-AC03: deterministic + acyclic)
+// Pure dependency resolution (NET-002-AC02: deterministic + acyclic)
 // ---------------------------------------------------------------------------
 
 /**
@@ -478,7 +479,7 @@ export function resolveDependencyOrder(
     }
     dfs(start)
     throw new ValidationError(
-      `Dependency graph contains a cycle: ${cycle.join(' → ')} — dependency resolution must be acyclic (NET-003-AC03)`,
+      `Dependency graph contains a cycle: ${cycle.join(' → ')} — dependency resolution must be acyclic (NET-002-AC02)`,
     )
   }
 
@@ -486,7 +487,7 @@ export function resolveDependencyOrder(
 }
 
 // ---------------------------------------------------------------------------
-// Plan content types (NET-004-AC03: explicit output, no hidden state)
+// Plan content types (NET-002-AC03: explicit output, no hidden state)
 // ---------------------------------------------------------------------------
 
 /** A discovered verified resource binding candidate (pre-allocation). */
@@ -551,7 +552,7 @@ export interface VersionValidationResult {
 }
 
 // ---------------------------------------------------------------------------
-// Actor authorization (NET-004-AC04)
+// Actor authorization (platform tenant-scope invariant)
 // ---------------------------------------------------------------------------
 
 const MUTATING_ROLES: readonly UserRole[] = ['admin', 'owner', 'operator']
@@ -566,7 +567,7 @@ function authorizeMutatingOperation(actor: NetworkCompilerActor, operation: stri
 }
 
 // ---------------------------------------------------------------------------
-// Validation entry point (read-only; NET-003-AC01 / NET-003-AC02)
+// Validation entry point (read-only; NET-002-AC01)
 // ---------------------------------------------------------------------------
 
 /**
@@ -607,7 +608,7 @@ export async function validateNetworkVersion(
 }
 
 // ---------------------------------------------------------------------------
-// Resolution (the compiler entry point; NET-003 + NET-004)
+// Resolution (the compiler entry point; NET-002)
 // ---------------------------------------------------------------------------
 
 /**
@@ -616,17 +617,17 @@ export async function validateNetworkVersion(
  *
  * Stage order (frozen V6 §3.5 — a later stage can never bypass an earlier
  * authority, and NOTHING persists until every resolution stage succeeds):
- *   1. authorization (NET-004-AC04)
+ *   1. authorization (platform tenant-scope invariant)
  *   2. tenant-scoped source-version load (uniform NOT_FOUND)
  *   3. publication gate (only PUBLISHED versions compile)
- *   4. Validation          — pure, fail-closed (NET-003-AC01/AC02)
- *   5. Dependency Resolution — pure, acyclic, canonical order (NET-003-AC03)
- *   6. Capability Resolution — read-only, canonical catalog (NET-003-AC04)
+ *   4. Validation          — pure, fail-closed (NET-002-AC01)
+ *   5. Dependency Resolution — pure, acyclic, canonical order (NET-002-AC02)
+ *   6. Capability Resolution — read-only, canonical catalog (NET-002-AC02)
  *   7. Resource Discovery    — read-only, authoritative verified capacity
- *   8. canonical plan assembly + sha256 checksum (NET-004-AC01/AC03)
+ *   8. canonical plan assembly + sha256 checksum (NET-002-AC04/AC03)
  *   9. idempotent write-once persistence + atomic audit (the ONLY writes)
  *
- * Idempotency (NET-004-AC01): if a plan with the same canonical checksum
+ * Idempotency (NET-002-AC04): if a plan with the same canonical checksum
  * already exists for this (tenant, version), the EXISTING artifact is
  * returned — re-resolution under unchanged repository state never
  * duplicates or mutates anything.
@@ -655,14 +656,14 @@ export async function resolveNetworkPlan(
     manifest = JSON.parse(version.configurationJson) as Record<string, unknown>
   } catch {
     throw new ValidationError(
-      `NetworkVersion ${version.id} configuration is not valid JSON — rejected before resolution side effects (NET-003-AC02)`,
+      `NetworkVersion ${version.id} configuration is not valid JSON — rejected before resolution side effects (NET-002-AC01)`,
     )
   }
   const issues = validateNetworkManifest(manifest)
   if (issues.length > 0) {
     throw new ValidationError(
       `NetworkVersion ${version.id} (v${version.version}) failed canonical Network-as-Code validation — ` +
-        `rejected before resolution side effects (NET-003-AC02). Issues (${issues.length}): ` +
+        `rejected before resolution side effects (NET-002-AC01). Issues (${issues.length}): ` +
         issues.map((i) => `${i.code} at ${i.path}: ${i.message}`).join('; '),
     )
   }
@@ -700,14 +701,14 @@ export async function resolveNetworkPlan(
     if (!row) {
       throw new ValidationError(
         `Capability '${declared.type}' is declared by NetworkVersion ${version.id} but has no ` +
-          `materialized catalog row — the published artifact is inconsistent (fail-closed, NET-003-AC04)`,
+          `materialized catalog row — the published artifact is inconsistent (fail-closed, NET-002-AC02)`,
       )
     }
     if (row.unit !== declared.unit || row.schemaVersion !== declared.schemaVersion) {
       throw new ValidationError(
         `Capability '${declared.type}' does not match its materialized catalog row ` +
           `(declared unit='${declared.unit}' schema_version=${declared.schemaVersion} vs catalog ` +
-          `unit='${row.unit}' schema_version=${row.schemaVersion}) — the published artifact is inconsistent (fail-closed, NET-003-AC04)`,
+          `unit='${row.unit}' schema_version=${row.schemaVersion}) — the published artifact is inconsistent (fail-closed, NET-002-AC02)`,
       )
     }
     capabilityResolution.push({
@@ -723,7 +724,7 @@ export async function resolveNetworkPlan(
   // Discover VERIFIED resource binding candidates for each declared
   // capability: the ACTIVE AssetNetworkAssignment rows of this tenant + this
   // network carrying a verified quantity + unit. Discovery is an INVENTORY,
-  // not an allocation (NET-004-AC02): nothing is reserved, committed, or
+  // not an allocation (NET-002-AC03): nothing is reserved, committed, or
   // bound; the next stage (allocation) owns those decisions. Entries are
   // included even when ZERO verified resources exist — the plan is explicit
   // about availability rather than hiding it.
@@ -826,7 +827,7 @@ export async function resolveNetworkPlan(
 }
 
 // ---------------------------------------------------------------------------
-// Plan reads (tenant-scoped; NET-004-AC04)
+// Plan reads (tenant-scoped; platform tenant-scope invariant)
 // ---------------------------------------------------------------------------
 
 export async function getNetworkPlan(tenantId: string, planId: string): Promise<NetworkPlanResult> {

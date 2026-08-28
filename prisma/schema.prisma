@@ -111,7 +111,7 @@ model Tenant {
   // WORK-025 (IAAS-DOM-ARCH-6 / NET-001): NetworkInstance — tenant-scoped
   // realized deployments of immutable published NetworkVersions.
   networkInstances NetworkInstance[]
-  // WORK-026 (IAAS-DOM-ARCH-6 / NET-003, NET-004): NetworkPlan — tenant-scoped
+  // WORK-026 (IAAS-DOM-ARCH-6 / NET-002): NetworkPlan — tenant-scoped
   // immutable deterministic resolution artifacts (launch plans) compiled from
   // published NetworkVersions by the Network-as-Code compiler.
   networkPlans NetworkPlan[]
@@ -256,7 +256,7 @@ model NetworkInstance {
 }
 
 // -----------------------------------------------------------------------------
-// WORK-026 (IAAS-DOM-ARCH-6 §3.5 / NET-003, NET-004) — NetworkPlan
+// WORK-026 (IAAS-DOM-ARCH-6 §3.5 / NET-002) — NetworkPlan
 // -----------------------------------------------------------------------------
 // The deterministic, immutable resolution artifact ("launch plan") produced by
 // the Network-as-Code compiler (src/lib/services/network-compiler.service.ts)
@@ -267,11 +267,11 @@ model NetworkInstance {
 //   - The plan is a COMPILED PROJECTION, not a new lifecycle authority: it has
 //     NO lifecycle state machine of its own (no status column, no updatedAt —
 //     the row is write-once). Lifecycle authority stays with NetworkInstance
-//     (WORK-025); the plan never mutates instance state (NET-004-AC02).
+//     (WORK-025); the plan never mutates instance state (NET-002-AC03).
 //   - planJson is the CANONICAL deterministic serialization of the resolution
 //     result (recursively key-sorted; every array in a canonical order). The
 //     same declarative input under the same authoritative repository state
-//     produces a byte-identical planJson (NET-004-AC01).
+//     produces a byte-identical planJson (NET-002-AC04).
 //   - planChecksum is sha256(planJson) — the durable identity of the canonical
 //     result. The unique constraint on (tenantId, networkVersionId,
 //     planChecksum) makes re-resolution under unchanged repository state
@@ -279,13 +279,13 @@ model NetworkInstance {
 //   - A changed repository state (e.g. new resource assignments) yields a
 //     DIFFERENT checksum → a NEW plan row; prior plans are retained as
 //     immutable point-in-time resolution evidence.
-//   - Compilation NEVER mutates the source NetworkVersion (NET-003-AC01) and
+//   - Compilation NEVER mutates the source NetworkVersion (NET-002-AC01) and
 //     performs no allocation/reservation/commitment/provisioning/activation
-//     (NET-004-AC02 — those are later pipeline stages owned elsewhere).
-//   - Tenant scope is mandatory (NET-004-AC04).
+//     (NET-002-AC03 — those are later pipeline stages owned elsewhere).
+//   - Tenant scope is mandatory (platform tenant-scope invariant).
 //   - No composition/federation semantics: no export/import binding columns,
 //     no cross-network references. Dependencies here are the DECLARED
-//     INTERNAL dependency contracts of one definition (NET-003-AC03).
+//     INTERNAL dependency contracts of one definition (NET-002-AC02).
 // -----------------------------------------------------------------------------
 model NetworkPlan {
   id               String   @id @default(cuid())

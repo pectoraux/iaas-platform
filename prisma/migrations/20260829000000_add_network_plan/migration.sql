@@ -1,4 +1,4 @@
--- WORK-026 (IAAS-DOM-ARCH-6 §3.5 / NET-003, NET-004): NetworkPlan
+-- WORK-026 (IAAS-DOM-ARCH-6 §3.5 / NET-002): NetworkPlan
 --
 -- Adds the durable immutable resolution artifact ("launch plan") produced by
 -- the Network-as-Code compiler from one immutable PUBLISHED NetworkVersion +
@@ -9,16 +9,16 @@
 --     is NO lifecycle-state column and NO updatedAt — the row is write-once
 --     (created by resolution, never updated). Lifecycle authority stays with
 --     NetworkInstance (WORK-025); compilation never mutates instance state
---     (NET-004-AC02) and never mutates the source NetworkVersion
---     (NET-003-AC01).
+--     (NET-002-AC03) and never mutates the source NetworkVersion
+--     (NET-002-AC01).
 --   - planJson is the CANONICAL deterministic serialization of the resolution
 --     result (recursively key-sorted; every array in a canonical order);
 --     planChecksum is sha256(planJson). The unique constraint on
 --     (tenantId, networkVersionId, planChecksum) makes re-resolution under
---     unchanged repository state idempotent (NET-004-AC01).
+--     unchanged repository state idempotent (NET-002-AC04).
 --   - A changed repository state yields a different checksum → a NEW plan
 --     row; prior plans are retained as immutable point-in-time evidence.
---   - Tenant scope is mandatory (NET-004-AC04).
+--   - Tenant scope is mandatory (platform tenant-scope invariant).
 --   - No composition/federation semantics: no export/import columns, no
 --     cross-network references (those are later Work Items).
 --
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS "NetworkPlan" (
 -- (tenant, source version, canonical checksum).
 CREATE UNIQUE INDEX IF NOT EXISTS "NetworkPlan_tenantId_networkVersionId_planChecksum_key"
     ON "NetworkPlan"("tenantId", "networkVersionId", "planChecksum");
--- Tenant-scoped reads (NET-004-AC04).
+-- Tenant-scoped reads (platform tenant-scope invariant).
 CREATE INDEX IF NOT EXISTS "NetworkPlan_tenantId_idx"
     ON "NetworkPlan"("tenantId");
 -- Plan-per-version listing.
