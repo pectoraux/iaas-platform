@@ -5,26 +5,26 @@
 | Artifact | Version | Status |
 |---|---|---|
 | Governance Architecture | `IAAS-GOV-ARCH-1` | FROZEN |
-| Domain Architecture | `IAAS-DOM-ARCH-5` | FROZEN / CURRENT CANONICAL |
+| Domain Architecture | `IAAS-DOM-ARCH-6` | FROZEN / CURRENT CANONICAL |
+| Domain Architecture | `IAAS-DOM-ARCH-5` | SUPERSEDED / IMMUTABLE |
 | Domain Architecture | `IAAS-DOM-ARCH-4` | SUPERSEDED / IMMUTABLE |
 | Domain Architecture | `IAAS-DOM-ARCH-3` | SUPERSEDED / IMMUTABLE |
 | Domain Architecture | `IAAS-DOM-ARCH-2` | SUPERSEDED / IMMUTABLE |
 | Domain Architecture | `IAAS-DOM-ARCH-1` | SUPERSEDED / IMMUTABLE |
-| Domain Architecture | `IAAS-DOM-ARCH-6` | CANDIDATE / UNDER REVIEW |
 
-`IAAS-DOM-ARCH-5` is the current canonical domain architecture on main. It is frozen through approved `ACR-004` and WORK-020.
+`IAAS-DOM-ARCH-6` is the current canonical domain architecture on main. It was approved through `ACR-005` and frozen by WORK-024 (the dedicated V6 freeze gate).
 
-`IAAS-DOM-ARCH-6` is a candidate architecture under `ACR-005` in branch `architect/v6-completion-candidate`. It is NOT frozen and MUST NOT authorize production implementation until independently reviewed and released by a V6 freeze Work Item.
+`IAAS-DOM-ARCH-5` is superseded and immutable. It remains the authoritative frozen record for the V5-era program (`WORK-001`..`WORK-022`) and its sandbox contract remains implemented and verified on main.
 
 ## Current Canonical Architecture
 
-The current canonical Domain Architecture is `IAAS-DOM-ARCH-5`, published in `spec/domain-architecture-v5.md`.
+The current canonical Domain Architecture is `IAAS-DOM-ARCH-6`, published in `spec/domain-architecture-v6.md`.
 
-V5 inherits V4 and freezes the WASI Component Model / capability-sandbox contract for untrusted extensions. The contract fixes trust boundaries, capability enforcement, resource-measurement semantics, lifecycle/termination semantics, tenant isolation, and deny-by-default fallback without freezing a specific WASI revision or concrete runtime.
+V6 is the architecture-completion baseline: it preserves every V1-V5 frozen invariant and adds the missing generic contracts (NetworkInstance/lifecycle, Network-as-Code launch, composition/export/import, allocation strategy and temporal coordination, fragmentation/reassembly, generic trust/signature semantics, unified package architecture, distribution/marketplace separation, economic metering/attribution/pricing boundaries, operations lifecycle, observability/evidence contracts, and the canonical SDK boundary) so that further implementation is a realization of already-decided architecture.
 
-## V6 Candidate
+## V6 Architecture
 
-`IAAS-DOM-ARCH-6` is the proposed architecture-completion baseline. It does not rewrite V1-V5. It adds the missing generic contracts required to make implementation mechanical: NetworkInstance/lifecycle, Network-as-Code launch, composition/export/import, allocation strategy and temporal coordination, fragmentation/reassembly, generic trust/signature semantics, unified package architecture, distribution/marketplace separation, economic metering/attribution/pricing boundaries, operations lifecycle, observability/evidence contracts, canonical SDK boundary, and a formal reference-network conformance program.
+`IAAS-DOM-ARCH-6` was proposed as the architecture-completion baseline, independently reviewed with `ACR-005`, approved, and frozen by WORK-024. It does not rewrite V1-V5; the historical documents remain the immutable records of their eras.
 
 Federation remains OPEN / RESEARCH and is explicitly not promoted to a frozen V6 production primitive.
 

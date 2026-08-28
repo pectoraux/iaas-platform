@@ -1,10 +1,12 @@
 # WORK-023 — IAAS-DOM-ARCH-6 Architecture Completion Candidate
 
-Status: `DRAFT`
+Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
-Target Domain Architecture: `IAAS-DOM-ARCH-6` (CANDIDATE)
+Target Domain Architecture: `IAAS-DOM-ARCH-6` (FROZEN)
 Dependency: none
 Implementer: Chief Architect / Architecture Custodian
+
+Completion note: the V6 candidate package was authored and merged to main by the Chief Architect / Architecture Custodian (merge `ea3268a`), passed the full specification gate after the WORK-024 lock repair (PR #37) and the WORK-022 evidence restoration (PR #39), and completed independent architecture review through ACR-005 (APPROVED). Dependency for WORK-024 satisfied.
 
 ## Objective
 Complete the V6 architecture-completion package from live repository evidence without changing production code.

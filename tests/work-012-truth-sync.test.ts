@@ -23,8 +23,8 @@ describe('WORK-012 — Historical V1/V2 preserved (W012-AC03)', () => {
 })
 
 describe('WORK-012 — Cross-document consistency (W012-AC04)', () => {
-  test('architecture.md registers V5 as current canonical', () => { const src = readSpec('architecture.md'); expect(src).toContain('`IAAS-DOM-ARCH-5` | FROZEN / CURRENT CANONICAL') })
-  test('architecture-lock.md registers V5 as current', () => { const src = readSpec('architecture-lock.md'); expect(src).toContain('IAAS-DOM-ARCH-5'); expect(src).toContain('FROZEN') })
+  test('architecture.md registers V6 as current canonical after the WORK-024 freeze', () => { const src = readSpec('architecture.md'); expect(src).toContain('`IAAS-DOM-ARCH-6` | FROZEN / CURRENT CANONICAL'); expect(src).toContain('`IAAS-DOM-ARCH-5` | SUPERSEDED / IMMUTABLE') })
+  test('architecture-lock.md registers V6 as current frozen', () => { const src = readSpec('architecture-lock.md'); expect(src).toContain('Domain Architecture Version: `IAAS-DOM-ARCH-6`'); expect(src).toContain('FROZEN') })
   test('dependency-graph.md records WORK-011 and WORK-012 historical verification', () => { const src = readSpec('dependency-graph.md'); expect(src).toContain('WORK-011'); expect(src).toContain('WORK-012'); expect(src).toContain('VERIFIED') })
   test('work-items.md records WORK-010 and WORK-011 as VERIFIED', () => { const src = readSpec('work-items.md'); const w010 = src.split('## WORK-010')[1]?.split('## WORK-011')[0] ?? ''; expect(w010).toContain('Status: `VERIFIED`'); const w011 = src.split('## WORK-011')[1]?.split('## WORK-012')[0] ?? ''; expect(w011).toContain('Status: `VERIFIED`') })
 })

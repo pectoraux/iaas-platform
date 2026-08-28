@@ -2,9 +2,8 @@
 
 - Governance Architecture Version: `IAAS-GOV-ARCH-1`
 - Status: **FROZEN**
-- Domain Architecture Version: `IAAS-DOM-ARCH-5` (FROZEN — approved through ACR-004 / WORK-020).
-- Candidate Domain Architecture: `IAAS-DOM-ARCH-6` (CANDIDATE / UNDER REVIEW — ACR-005).
-- Historical Domain Versions: `IAAS-DOM-ARCH-1` through `IAAS-DOM-ARCH-4` — immutable historical records.
+- Domain Architecture Version: `IAAS-DOM-ARCH-6` (FROZEN — approved through ACR-005 / WORK-024).
+- Historical Domain Versions: `IAAS-DOM-ARCH-1` through `IAAS-DOM-ARCH-5` — immutable historical records. `IAAS-DOM-ARCH-5` was approved through ACR-004 / WORK-020 and is superseded by `IAAS-DOM-ARCH-6`.
 
 ## Frozen Rules
 
@@ -26,16 +25,15 @@
 ## Current Governance State
 
 ```text
-IAAS-DOM-ARCH-5 = CURRENT CANONICAL / FROZEN
-IAAS-DOM-ARCH-6 = CANDIDATE / UNDER REVIEW
+IAAS-DOM-ARCH-6 = CURRENT CANONICAL / FROZEN
+IAAS-DOM-ARCH-5 = SUPERSEDED / IMMUTABLE
 ```
 
-While ACR-005 is under review:
+V6 was frozen by WORK-024 (the dedicated V6 freeze gate) after ACR-005 was APPROVED and the independent architecture review completed:
 
-- V5 remains immutable.
-- V6 Work Items MUST remain `DRAFT`.
-- No production Work Item may be released against V6.
-- Existing V5 implementation work may be explicitly BLOCKED by the architecture-completion gate when continuing it would violate the Architect's instruction to finish architecture first.
+- V1-V5 historical architecture documents remain immutable.
+- V6 production Work Items are released strictly according to `spec/dependency-graph-v6.md`.
+- WORK-025 (NetworkInstance and Network Lifecycle) is the sole dependency-eligible released V6 Work Item; all later items remain `DRAFT` until their dependencies are `VERIFIED`.
 
 ## Workflow
 
@@ -62,4 +60,4 @@ ARCHITECT_REVIEW -> APPROVED -> MERGED -> VERIFIED
 6. An independent Architect Review explicitly approves V6.
 7. A dedicated V6 freeze Work Item is VERIFIED.
 
-Until all seven conditions are met, V6 is not a governing architecture for production work.
+EXECUTED: all seven conditions were satisfied and the gate was executed by WORK-024 (GitHub Issue #40; freeze PR reviewed and approved by the Chief Architect / Architecture Custodian). The gate conditions above remain the durable authorization record for the V6 freeze; `bun run v6:validate` durably re-verifies the frozen state.

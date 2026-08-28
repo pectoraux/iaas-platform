@@ -1,16 +1,16 @@
-# IAAS V6 Work Items — Candidate Program
+# IAAS V6 Work Items — Implementation Program
 
-- Target Architecture: `IAAS-DOM-ARCH-6` (CANDIDATE / UNDER REVIEW)
+- Target Architecture: `IAAS-DOM-ARCH-6` (FROZEN)
 - Governing Governance Architecture: `IAAS-GOV-ARCH-1` (FROZEN)
-- Change Request: `ACR-005` (UNDER_REVIEW)
-- Status rule: every item below is `DRAFT` until V6 is frozen. No item below is implementation-eligible on this branch.
+- Change Request: `ACR-005` (APPROVED; V6 frozen via WORK-024)
+- Status rule: the architecture gate is complete. Items follow the standard lifecycle — `DRAFT` → `READY` (only when dependency-eligible per `spec/dependency-graph-v6.md`) → implementation → `VERIFIED`. WORK-025 is the sole `READY` item; every other item remains `DRAFT` until its dependencies are `VERIFIED`.
 
 ## Program Rule
 
 A Work Item exists only where an architectural obligation must become implemented, verified, or governed. Work Items do not add unapproved product ideas. Every implementation item must cite exactly one frozen architecture version before it may become READY.
 
 ## WORK-023 — IAAS-DOM-ARCH-6 Architecture Completion Candidate
-Status: `DRAFT`
+Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
 Dependencies: none
 Requirements: `ACR-005`, `ARCH-001`
@@ -21,9 +21,10 @@ Architecture Constraints: V5 immutable; ACR-005 remains under review; no V6 item
 Acceptance Criteria: ACR-005 complete; universal-primitive test complete; authority matrix complete; dependency directions explicit; open/rejected decisions explicit; V1-V5 files untouched.
 Required Verification: spec validator, cross-document consistency, historical-file immutability check, independent architecture review.
 Definition of Done: candidate package is internally consistent and ready for independent review.
+Verification record: VERIFIED — the V6 candidate package was authored and merged to main by the Chief Architect / Architecture Custodian (merge `ea3268a`, PR #35 lineage), validated by the full specification gate, and completed independent architecture review through ACR-005 (APPROVED). Dependency for WORK-024 satisfied.
 
 ## WORK-024 — V6 Freeze and Governance Release
-Status: `DRAFT`
+Status: `PR_OPEN`
 Architecture Version: `IAAS-GOV-ARCH-1`
 Dependencies: `WORK-023`
 Requirements: `ARCH-001`, `CONF-001`
@@ -34,9 +35,10 @@ Architecture Constraints: V5 remains immutable; V6 candidate may be corrected on
 Acceptance Criteria: ACR-005 APPROVED; V6 marked FROZEN; current canonical index/lock point to V6; V1-V5 historical files remain unchanged; post-freeze validator pins the new version.
 Required Verification: independent Architect Review + validator + immutable-history regression tests.
 Definition of Done: V6 FROZEN and released as the governing architecture for W025+.
+Execution record: released to Z.ai by the Chief Architect via GitHub Issue #40 (Work Order — V6 Freeze Gate). This freeze PR executes the gate: ACR-005 recorded APPROVED, V6 recorded FROZEN / CURRENT CANONICAL, WORK-025 released as the sole dependency-eligible next item, V1-V5 immutability re-proven by the frozen-blob checks, and `bun run v6:validate` re-pinned to durably validate the frozen state. WORK-024's `VERIFIED` record follows the merge per repository convention.
 
 ## WORK-025 — NetworkInstance and Network Lifecycle
-Status: `DRAFT`
+Status: `READY`
 Architecture Version: `IAAS-DOM-ARCH-6`
 Dependencies: `WORK-024`
 Requirements: `NET-001`, `NET-002`
@@ -47,6 +49,7 @@ Architecture Constraints: NetworkDefinition/NetworkVersion remain authoritative 
 Acceptance Criteria: NET-001-AC01..04 and NET-002-AC01..04.
 Required Verification: PostgreSQL lifecycle tests, tenant isolation, immutability, audit.
 Definition of Done: lifecycle behavior verified and merged.
+Release record: released by WORK-024 (the V6 freeze gate) as the sole dependency-eligible next Work Item — `WORK-024 → WORK-025` is the only dependency edge from WORK-024 and WORK-024 is WORK-025's only dependency; every other V6 item depends on at least one non-`VERIFIED` item. Release takes effect with the merge of the WORK-024 freeze PR (which completes WORK-024 through Architect approval).
 
 ## WORK-026 — Network-as-Code Validation and Launch Compiler
 Status: `DRAFT`
