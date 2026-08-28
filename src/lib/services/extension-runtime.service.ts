@@ -520,24 +520,13 @@ export async function executeExtension(
       idempotencyKey: input.idempotencyKey,
     })
     if (!begin.ok) {
-      // The extension became durably revoked OR durably deactivated between the
-      // catalog read (step 1) and this registration. V5 §2.5: future execution
-      // denied. Emit failed provenance and deny — no sandbox is spawned.
-      //
-      // WORK-022: the deactivation race-refusal maps to the EXISTING
-      // 'lifecycle_not_activated' denial vocabulary (the extension is not
-      // activated — it is deactivated); no new denial kind is introduced and
-      // the provenance schema semantics are unchanged. The revocation
-      // refusal keeps its specific 'revoked' denial kind (AR-021-17).
-      const refusalDenial: ExtensionDenialReason = begin.refusalReason === 'extension_deactivated'
-        ? {
-            kind: 'lifecycle_not_activated',
-            reason: begin.reason,
-          }
-        : {
-            kind: 'revoked',
-            reason: begin.reason,
-          }
+      // The extension became durably revoked between the catalog read (step 1)
+      // and this registration. V5 §2.5: future execution denied. Emit failed
+      // provenance and deny — no sandbox is spawned.
+      const refusalDenial: ExtensionDenialReason = {
+        kind: 'revoked',
+        reason: begin.reason,
+      }
       await emitFailedProvenance(tenantId, input, registryEntry, inputHash, ceiling, refusalDenial)
       throw new ValidationError(
         `Extension ${input.extensionType}@${input.extensionVersion} execution denied: ${refusalDenial.reason}`,

@@ -178,28 +178,6 @@ export interface SandboxExecutionResult {
 }
 
 // ---------------------------------------------------------------------------
-// WORK-022 — validate-only result (V5 §2.5 "installed: module
-// validation/compilation may occur without execution")
-// ---------------------------------------------------------------------------
-
-/**
- * Result of a validate-only pass (WORK-022). Classification + the binary's
- * statically declared imports, produced WITHOUT spawning a sandbox and
- * WITHOUT executing the module.
- */
-export interface SandboxValidationResult {
-  /** Binary classification: WASI Component Model component vs core module. */
-  classification: 'component' | 'core-module'
-  /**
-   * The statically declared imports that were verified against the provided
-   * capability set. Components: imported interface names (version-stripped);
-   * core modules: "module.field" pairs. Empty when the binary imports
-   * nothing (e.g. a pure-computation loop component).
-   */
-  declaredImports: string[]
-}
-
-// ---------------------------------------------------------------------------
 // Sandbox errors (V5 §2.5, §2.7)
 // ---------------------------------------------------------------------------
 
@@ -671,23 +649,6 @@ export interface SandboxHost {
     input: Buffer,
     ceiling: SandboxCeiling,
   ): SandboxExecutionHandle
-  /**
-   * WORK-022 (V5 §2.5 "installed"): validate a binary WITHOUT spawning a
-   * sandbox and WITHOUT executing it — classification + AR-021-18 import
-   * verification against the provided capability set (the caller supplies the
-   * DECLARED capabilities at install time). Throws
-   * SandboxCapabilityDeniedError when any declared import is not granted by
-   * the capability set (or the binary is unverifiable — fail-closed), and
-   * SandboxUnavailableError when the host cannot validate (deny-by-default,
-   * V5 §2.7).
-   *
-   * OPTIONAL so existing SandboxHost implementations (including test fakes)
-   * remain valid; callers MUST treat its absence as deny-by-default.
-   */
-  validateOnly?(
-    wasmModule: Buffer,
-    capabilities: Iterable<string>,
-  ): SandboxValidationResult
 }
 
 // ---------------------------------------------------------------------------
@@ -790,57 +751,6 @@ export class WasmtimeSandboxHost implements SandboxHost {
   ): Promise<SandboxExecutionResult> {
     const handle = this.executeWithHandle(wasmModule, input, ceiling)
     return handle.result
-  }
-
-  /**
-   * WORK-022 (V5 §2.5 "installed") — validate-only path: classification +
-   * AR-021-18 import verification, with NO sandbox spawn and NO execution of
-   * the module.
-   *
-   * Implementation note: the only subprocess this path may run is
-   * `wasm-tools component wit` (binary PARSING for component import
-   * extraction — the same mechanism executeWithHandle uses for pre-spawn
-   * verification). wasm-tools parses the component's type information; it
-   * NEVER executes the guest module. Core-module import extraction is pure
-   * in-process buffer parsing (no subprocess at all).
-   *
-   * Deny-by-default (V5 §2.7): when the host cannot validate (wasmtime /
-   * wasm-tools unavailable), validation is DENIED — there is no silent
-   * unvalidated pass.
-   */
-  validateOnly(
-    wasmModule: Buffer,
-    capabilities: Iterable<string>,
-  ): SandboxValidationResult {
-    if (!this.isAvailable()) {
-      throw new SandboxUnavailableError(
-        'WasmtimeSandboxHost.validateOnly: sandbox tooling unavailable — validation denied by default ' +
-        '(V5 §2.7); the transition must not proceed without validation',
-      )
-    }
-    const capabilitySet = capabilities instanceof Set ? capabilities : new Set(capabilities)
-    // Component import extraction requires wasm-tools to read the binary from
-    // a path — write it to a FRESH temporary directory (never executed, parsed
-    // only; removed immediately afterwards).
-    const tmpDir = mkdtempSync(join(tmpdir(), 'wasmtime-validate-only-'))
-    const wasmPath = join(tmpDir, 'module.wasm')
-    writeFileSync(wasmPath, wasmModule)
-    try {
-      const imports = verifySandboxImports(wasmModule, capabilitySet, wasmPath)
-      // SandboxBinaryImports (internal type): kind + the declared imports.
-      if (imports.kind === 'component') {
-        return {
-          classification: 'component',
-          declaredImports: [...imports.componentInterfaces],
-        }
-      }
-      return {
-        classification: 'core-module',
-        declaredImports: imports.coreImports.map(imp => `${imp.module}.${imp.field}`),
-      }
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true })
-    }
   }
 
   executeWithHandle(
@@ -1175,19 +1085,6 @@ export function setSandboxHostForTesting(host: SandboxHost | null): void {
 export class DenyByDefaultSandboxHost implements SandboxHost {
   isAvailable(): boolean {
     return false
-  }
-
-  /**
-   * WORK-022: validate-only is denied by default like every other operation
-   * of this host (V5 §2.7) — an unavailable sandbox never validates either.
-   */
-  validateOnly(
-    _wasmModule: Buffer,
-    _capabilities: Iterable<string>,
-  ): SandboxValidationResult {
-    throw new SandboxUnavailableError(
-      'Sandbox is unavailable: deny-by-default policy (V5 §2.7). No validation is permitted without a sandbox host.',
-    )
   }
 
   async execute(
