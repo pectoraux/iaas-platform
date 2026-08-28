@@ -18,6 +18,7 @@ This directory is the persistent planning and governance layer for IAAS implemen
 - `architecture-change-requests/ACR-003.md` — approved promotion of Extension Stack boundary.
 - `architecture-change-requests/ACR-004.md` — approved V5 WASI capability-sandbox contract.
 - `architecture-change-requests/ACR-005.md` — approved V6 architecture-completion baseline (APPROVED; V6 frozen via WORK-024).
+- `architecture-change-requests/ACR-006.md` — V6 requirement-to-Work-Item traceability correction for NET-002/NET-003/NET-004 (UNDER_REVIEW; issued as GitHub Issue #45).
 - `verification.md` — evidence and verification protocol.
 - `architecture-inventory-v6.md` — V6 architectural inventory and truth classification.
 - `domain-architecture.md` — immutable Domain Architecture V1 (`IAAS-DOM-ARCH-1`, SUPERSEDED).
