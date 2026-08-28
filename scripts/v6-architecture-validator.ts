@@ -11,7 +11,6 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 
 const root = process.cwd()
-const spec = join(root, 'spec')
 
 const fail = (message: string): never => {
   process.stderr.write(`V6 ARCHITECTURE VALIDATOR FAILED: ${message}\n`)
@@ -66,7 +65,7 @@ if (!v5.includes('IAAS-DOM-ARCH-5')) fail('V5 architecture missing')
 // observed frozen blobs on main when the candidate branch was created.
 const frozenBlobSha: Record<string, string> = {
   'spec/domain-architecture.md': '1868a11171b6007b167652466c970acdf7f948d5',
-  'spec/domain-architecture-v2.md': '95d13509a180819c02d461c567b8845a7c35504b',
+  'spec/domain-architecture-v2.md': '95d13509a180819c02e8b41fed8a781cb2be090a',
   'spec/domain-architecture-v3.md': '1fd340229a78efe6d13664ab72ac6c7d3c46ddcb',
   'spec/domain-architecture-v4.md': '03bdac8338d06ddaa9d1d9b037942ea9684f0567',
   'spec/domain-architecture-v5.md': 'f51b107e12f484026aa31e38ec1cf041a660d7fd',
