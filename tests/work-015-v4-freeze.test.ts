@@ -44,7 +44,7 @@ describe('WORK-015/016/017/018 — frozen V4 state and next-work release', () =>
   test('DOM-P05..P08 remain future/open/research', () => {
     expect(req).toContain('DOM-P05..DOM-P08: remain FUTURE/OPEN/RESEARCH')
   })
-  test('WORK-015/016/017/018/019/020/021 are VERIFIED and WORK-022 is READY', () => {
+  test('WORK-015/016/017/018/019/020/021/022 are VERIFIED and no successor is READY', () => {
     for (const id of [
       '## WORK-015 — IAAS-DOM-ARCH-4 Freeze and DOM-P04 Truth Promotion',
       '## WORK-016 — ExtensionRegistry Implementation',
@@ -56,7 +56,7 @@ describe('WORK-015/016/017/018 — frozen V4 state and next-work release', () =>
       '## WORK-022 — Sandbox Lifecycle Completion',
     ]) expect(items).toContain(id)
     expect(items).toContain('Status: `VERIFIED`')
-    expect(items).toContain('Status: `READY`')
+    expect(items).not.toContain('Status: `READY`')
     expect(deps).toContain('WORK-014 -> WORK-015')
     expect(deps).toContain('WORK-015 -> WORK-016')
     expect(deps).toContain('WORK-016 -> WORK-017')
@@ -65,7 +65,7 @@ describe('WORK-015/016/017/018 — frozen V4 state and next-work release', () =>
     expect(deps).toContain('WORK-019 -> WORK-020')
     expect(deps).toContain('WORK-020 -> WORK-021')
     expect(deps).toContain('WORK-021 -> WORK-022')
-    expect(deps).toContain('WORK-022 is READY')
+    expect(deps).toContain('WORK-022 is VERIFIED')
   })
   test('WORK-016 is released only against frozen V4', () => {
     const order = read('work-orders/WORK-016.md')

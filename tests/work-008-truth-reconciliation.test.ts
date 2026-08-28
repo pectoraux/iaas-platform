@@ -132,15 +132,15 @@ describe('WORK-008 — Cross-document consistency (W008-AC05)', () => {
     expect(src).toContain('WORK-009')
   })
 
-  test('work-items.md records WORK-008 as VERIFIED and WORK-009 as READY', () => {
+  test('work-items.md records WORK-008 and WORK-009 as VERIFIED', () => {
     const src = readSpec('work-items.md')
     // WORK-008 status
     const w008 = src.split('## WORK-008')[1]?.split('## WORK-009')[0] ?? ''
     expect(w008).toContain('Status: `VERIFIED`')
-    // WORK-009 exists and is READY
+    // WORK-009 exists and is VERIFIED (section scoped to WORK-009 only)
     expect(src).toContain('## WORK-009')
-    const w009 = src.split('## WORK-009')[1] ?? ''
-    expect(w009).toContain('Status: `READY`')
+    const w009 = src.split('## WORK-009')[1]?.split('## WORK-010')[0] ?? ''
+    expect(w009).toContain('Status: `VERIFIED`')
     expect(w009).toContain('BASE-016')
   })
 })
