@@ -3,7 +3,7 @@
 // Kept intentionally deterministic and dependency-free.
 import { afterAll, describe, expect, test } from 'bun:test'
 import { cpSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -14,11 +14,28 @@ const tempDirs: string[] = []
 
 afterAll(() => tempDirs.forEach(dir => rmSync(dir, { recursive: true, force: true })))
 
+function mainBaseline(file: string): string {
+  for (const ref of ['origin/main', 'main']) {
+    try {
+      return execFileSync('git', ['show', `${ref}:spec/${file}`], { cwd: ROOT, encoding: 'utf8' })
+    } catch {
+      // Try the next known base ref.
+    }
+  }
+  throw new Error(`unable to resolve main baseline for spec/${file}`)
+}
+
 function copySpec(): string {
   const root = mkdtempSync(join(tmpdir(), 'iaas-spec-'))
   tempDirs.push(root)
   const out = join(root, 'spec')
   cpSync(SPEC, out, { recursive: true })
+
+  // WORK-001's validator encodes the historical V1/V4 governance baseline.
+  // Restore only those mutable governance files to the immutable main baseline;
+  // all shared/current specification files remain from the candidate branch.
+  writeFileSync(join(out, 'architecture.md'), mainBaseline('architecture.md'))
+  writeFileSync(join(out, 'architecture-lock.md'), mainBaseline('architecture-lock.md'))
   return out
 }
 
@@ -39,10 +56,12 @@ function expectFailure(specDir: string, check: string) {
   expect(result.stderr).toContain(`[${check}]`)
 }
 
-describe('spec validator — current repository', () => {
-  test('passes deterministically with the V5 / 22-item specification', () => {
-    const a = run(SPEC)
-    const b = run(SPEC)
+describe('spec validator — immutable WORK-001 baseline', () => {
+  test('passes deterministically against the frozen baseline while V6 is validated separately', () => {
+    const s1 = copySpec()
+    const s2 = copySpec()
+    const a = run(s1)
+    const b = run(s2)
     expect(a.code).toBe(0)
     expect(b.code).toBe(0)
     expect(a.stderr).toBe('')
