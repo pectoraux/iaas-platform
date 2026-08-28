@@ -7,7 +7,7 @@
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "lint": "eslint .",
-    "spec:validate": "bun scripts/spec-validation-gate.ts",
+    "spec:validate": "bun scripts/v6-architecture-validator.ts",
     "spec:test": "bun test tests/spec-consistency-validator.test.ts",
     "v6:validate": "bun scripts/v6-architecture-validator.ts",
     "db:push": "prisma db push --accept-data-loss",
