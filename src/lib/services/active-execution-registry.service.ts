@@ -1,6 +1,5 @@
 // =============================================================================
 // ActiveExecutionRegistry — IAAS-DOM-ARCH-5 / WORK-021 (AR-021-17 fix)
-//                         + WORK-022 (V5 §2.5 deactivation semantics)
 // =============================================================================
 // The AUTHORITATIVE in-process registry of active sandbox executions. It closes
 // the AR-021-17 gap: an extension revoked in the ExtensionRegistry catalog must
@@ -9,7 +8,6 @@
 // Frozen V5 §2.5 contract:
 //   "revoked: terminal state; future execution denied and active context
 //    terminated."
-//   "deactivated: active execution context terminated/deactivated."
 //
 // AUTHORITATIVE CONTROL PATH (the AR-021-17 required correction):
 //
@@ -25,60 +23,27 @@
 //       ↓
 //   SandboxExecutionHandle.revoke()  →  subprocess termination
 //
-// WORK-022 — the SAME authoritative control path serves DEACTIVATION:
-//
-//   ExtensionRegistry.transitionLifecycle(→ deactivated)
-//       │  durable DB update, then SYNCHRONOUS termination hook
-//       ↓
-//   ActiveExecutionRegistry.deactivateActiveExecutionsForExtension(...)
-//       │   (marks the REVERSIBLE deactivation ledger + terminates every
-//       │    active SandboxExecutionHandle of this extension)
-//       ↓
-//   SandboxExecutionHandle.revoke()  →  termination
-//
-//   ExtensionRegistry.transitionLifecycle(deactivated → activated)
-//       │  durable DB update, then SYNCHRONOUS re-activation hook
-//       ↓
-//   ActiveExecutionRegistry.reactivateExtension(...)
-//       → clears the deactivation ledger mark (execution permitted again)
-//
-// Deactivation is REVERSIBLE and therefore uses a ledger of its own, DISTINCT
-// from the terminal revoked-execution ledger: the revoked ledger refuses
-// registrations forever (revocation is terminal), while the deactivation
-// ledger refuses registrations only until the durable re-activation clears
-// it. The terminal revoked-execution ledger is used ONLY by `revoked`.
-//
 // Before this registry the Runtime held the execution handle in a LOCAL
 // variable: `registry revoke → handle.revoke()` did not exist as a control
 // path, so an extension could be revoked in the catalog while an
 // already-running sandbox continued until its own timeout/resource limit.
 //
-// RACE SAFETY — the AR-021-17 guarantee (revocation):
+// RACE SAFETY — the AR-021-17 guarantee:
 //   "a revoke occurring before, during, or immediately after execution
 //    registration must never leave an active sandbox alive after the registry
 //    is durably revoked."
-//
-// RACE SAFETY — the WORK-022 symmetric guarantee (deactivation):
-//   a deactivation occurring before, during, or immediately after execution
-//   registration must never leave an active sandbox running for an extension
-//   that is durably deactivated. The deactivation ledger refuses registrations
-//   exactly like the revoked ledger — except re-activation CLEARS it (the
-//   deactivation is reversible; the revocation is not).
 //
 // Node.js executes synchronous functions atomically with respect to each other
 // (single-threaded event loop; no await inside any registry operation). The
 // three interleavings are therefore closed WITHOUT locks:
 //
-//   1. Revoke/deactivate BEFORE registration:
+//   1. Revoke BEFORE registration:
 //      revokeActiveExecutionsForExtension() marks the extension in the
 //      revoked-execution ledger; every subsequent beginSandboxExecution() for
 //      that (tenantId, extensionType, extensionVersion) is REFUSED. No sandbox
 //      is ever spawned (V5 §2.5 "future execution denied").
-//      deactivateActiveExecutionsForExtension() marks the extension in the
-//      REVERSIBLE deactivation ledger; subsequent registrations are refused
-//      with 'extension_deactivated' until re-activation clears the mark.
 //
-//   2. Revoke/deactivate DURING registration (between begin and attach):
+//   2. Revoke DURING registration (between begin and attach):
 //      The entry already exists in the registry when the hook runs, so the
 //      hook marks it `terminateRequested`. When the handle is attached
 //      (attachSandboxHandle), the registry revokes it IMMEDIATELY — the
@@ -87,23 +52,16 @@
 //      is itself synchronous, so this window is zero-length there; the defense
 //      exists for any SandboxHost implementation that defers spawning.)
 //
-//   3. Revoke/deactivate AFTER registration (execution running):
+//   3. Revoke AFTER registration (execution running):
 //      The hook finds the entry with its attached handle and calls
 //      handle.revoke() directly → SIGTERM (+ SIGKILL escalation owned by the
 //      sandbox host) → SandboxTerminatedError('revoked') → failed provenance.
-//      (The handle-revocation cause 'revoked' is the V5 §2.5 termination
-//      abstraction's recorded cause for ANY SandboxExecutionHandle.revoke()
-//      call — deactivation terminates through the SAME architectural
-//      abstraction and therefore records the SAME explicit cause. No new
-//      termination-cause vocabulary is introduced — WORK-022 leaves the
-//      provenance schema semantics untouched.)
 //
 // The hook is invoked by ExtensionRegistry synchronously AFTER the durable
-// database update that records the lifecycle transition, so any registration
-// that raced with the update either (a) is already in the registry —
-// terminated now — or (b) runs after the ledger mark — refused at registration.
-// There is no interleaving in which a sandbox survives a durable revoke or a
-// durable deactivation.
+// database update that records revocation, so any registration that raced with
+// the update either (a) is already in the registry — terminated now — or
+// (b) runs after the ledger mark — refused at registration. There is no
+// interleaving in which a sandbox survives a durable revoke.
 //
 // Architectural boundaries (frozen by IAAS-DOM-ARCH-5 / WORK-021):
 //   - Service-layer, NOT kernel (this module is in src/lib/services/).
@@ -159,10 +117,7 @@ export type BeginSandboxExecutionResult =
   | { ok: true; executionId: string }
   | {
       ok: false
-      /** 'extension_revoked' — terminal ledger (V5 §2.5 revoked); refused forever.
-       *  'extension_deactivated' — reversible ledger (V5 §2.5 deactivated);
-       *    refused until durable re-activation clears the mark (WORK-022). */
-      refusalReason: 'extension_revoked' | 'extension_deactivated'
+      refusalReason: 'extension_revoked'
       reason: string
     }
 
@@ -179,16 +134,6 @@ export interface RevokeActiveExecutionsResult {
    * attached → handle.revoke() called) or marked for termination at attach
    * (registered but not yet attached). None of these executions survives the
    * durable revocation.
-   */
-  executionIds: string[]
-}
-
-/** Result of the authoritative deactivation hook (WORK-022). */
-export interface DeactivateActiveExecutionsResult {
-  /**
-   * Every execution of the extension terminated by the deactivation (handle
-   * attached → handle.revoke() called) or marked for termination at attach.
-   * None of these executions survives the durable deactivation.
    */
   executionIds: string[]
 }
@@ -215,20 +160,6 @@ const executions = new Map<string, RegistryEntry>()
  */
 const revokedExtensionLedger = new Set<string>()
 
-/**
- * WORK-022 — the deactivation ledger: (tenantId, extensionType,
- * extensionVersion) triples whose extension is CURRENTLY durably deactivated.
- * Guards registration against the deactivate/registration race with the SAME
- * synchronous-mark pattern as the revoked ledger — but is REVERSIBLE: the
- * durable deactivated → activated transition clears the mark (via
- * reactivateExtension), after which registrations are permitted again.
- *
- * This ledger is DISTINCT from the terminal revoked-execution ledger: the
- * terminal ledger is used ONLY by `revoked` (W022-AC02). Deactivation NEVER
- * writes it.
- */
-const deactivatedExtensionLedger = new Set<string>()
-
 function extensionKey(tenantId: string, extensionType: string, extensionVersion: string): string {
   return `${tenantId}|${extensionType}|${extensionVersion}`
 }
@@ -253,8 +184,6 @@ export function beginSandboxExecution(
   descriptor: ActiveExecutionDescriptor,
 ): BeginSandboxExecutionResult {
   const key = extensionKey(descriptor.tenantId, descriptor.extensionType, descriptor.extensionVersion)
-  // Terminal ledger FIRST: a revoked extension is refused forever, regardless
-  // of any deactivation mark (revoked is terminal; deactivated is reversible).
   if (revokedExtensionLedger.has(key)) {
     return {
       ok: false,
@@ -262,21 +191,6 @@ export function beginSandboxExecution(
       reason:
         `extension ${descriptor.extensionType}@${descriptor.extensionVersion} is durably revoked ` +
         '(active-execution registry ledger; V5 §2.5 — future execution denied and active context terminated)',
-    }
-  }
-  // WORK-022 — reversible deactivation ledger: refuse registrations for a
-  // durably deactivated extension until re-activation clears the mark. This
-  // closes the deactivate/registration race symmetrically to AR-021-17: an
-  // execution whose catalog read predated the durable deactivation cannot
-  // spawn a sandbox that outlives it.
-  if (deactivatedExtensionLedger.has(key)) {
-    return {
-      ok: false,
-      refusalReason: 'extension_deactivated',
-      reason:
-        `extension ${descriptor.extensionType}@${descriptor.extensionVersion} is durably deactivated ` +
-        '(active-execution registry deactivation ledger; V5 §2.5 — active execution context terminated; ' +
-        'reversible via the deactivated → activated lifecycle transition)',
     }
   }
   const executionId = `sandbox-exec-${randomUUID()}`
@@ -413,72 +327,6 @@ function terminateEntry(entry: RegistryEntry): void {
 }
 
 // ---------------------------------------------------------------------------
-// The authoritative extension-level DEACTIVATION hook (called by
-// ExtensionRegistry.transitionLifecycle → deactivated) — WORK-022, V5 §2.5
-// ---------------------------------------------------------------------------
-
-/**
- * WORK-022 — the deactivation termination hook. Marks the extension in the
- * REVERSIBLE deactivation ledger (registrations refused until re-activation)
- * and terminates EVERY active sandbox execution of that extension —
- * synchronously, so no sandbox execution outlives the durable deactivation.
- *
- * MUST be called by ExtensionRegistry AFTER the durable database update that
- * records the deactivated lifecycle state, with NO await in between (the
- * durable deactivation and this hook must be observationally atomic with
- * respect to new registrations).
- *
- * NEVER touches the terminal revoked-execution ledger — that ledger is used
- * ONLY by `revoked` (W022-AC02). Termination goes through the SAME
- * architectural abstraction as revocation: SandboxExecutionHandle.revoke().
- */
-export function deactivateActiveExecutionsForExtension(
-  tenantId: string,
-  extensionType: string,
-  extensionVersion: string,
-): DeactivateActiveExecutionsResult {
-  // 1. Deactivation-ledger mark FIRST — atomically with the map scan below
-  //    (synchronous block). Any registration that runs after this point is
-  //    refused until re-activation.
-  deactivatedExtensionLedger.add(extensionKey(tenantId, extensionType, extensionVersion))
-
-  // 2. Terminate every registered execution of this extension.
-  const executionIds: string[] = []
-  for (const [executionId, entry] of executions) {
-    const d = entry.descriptor
-    if (
-      d.tenantId === tenantId
-      && d.extensionType === extensionType
-      && d.extensionVersion === extensionVersion
-    ) {
-      terminateEntry(entry)
-      executionIds.push(executionId)
-    }
-  }
-  return { executionIds }
-}
-
-/**
- * WORK-022 — the re-activation hook. Clears the extension's deactivation-ledger
- * mark so registrations are permitted again.
- *
- * MUST be called by ExtensionRegistry AFTER the durable database update that
- * records the deactivated → activated transition, with NO await in between —
- * the durable re-activation and this hook must be observationally atomic with
- * respect to new registrations (the mirror image of the deactivation hook).
- *
- * Idempotent: clearing an unmarked extension is a no-op. NEVER clears the
- * terminal revoked-execution ledger (revocation is irreversible).
- */
-export function reactivateExtension(
-  tenantId: string,
-  extensionType: string,
-  extensionVersion: string,
-): void {
-  deactivatedExtensionLedger.delete(extensionKey(tenantId, extensionType, extensionVersion))
-}
-
-// ---------------------------------------------------------------------------
 // Introspection (tests + operational observability)
 // ---------------------------------------------------------------------------
 
@@ -512,16 +360,6 @@ export function isExtensionMarkedRevoked(
   return revokedExtensionLedger.has(extensionKey(tenantId, extensionType, extensionVersion))
 }
 
-/** Whether the extension is currently marked deactivated (reversible) in this
- *  process's deactivation ledger (WORK-022). */
-export function isExtensionMarkedDeactivated(
-  tenantId: string,
-  extensionType: string,
-  extensionVersion: string,
-): boolean {
-  return deactivatedExtensionLedger.has(extensionKey(tenantId, extensionType, extensionVersion))
-}
-
 function toRecord(executionId: string, entry: RegistryEntry): ActiveExecutionRecord {
   return {
     executionId,
@@ -539,12 +377,11 @@ function toRecord(executionId: string, entry: RegistryEntry): ActiveExecutionRec
 // ---------------------------------------------------------------------------
 
 /**
- * Test helper: reset the registry (executions + both ledgers). Production
- * code must NEVER call this — the ledgers are safety mechanisms whose
+ * Test helper: reset the registry (executions + revoked ledger). Production
+ * code must NEVER call this — the revoked ledger is a safety mechanism whose
  * integrity must not be reset while the process lives.
  */
 export function __resetActiveExecutionRegistryForTesting(): void {
   executions.clear()
   revokedExtensionLedger.clear()
-  deactivatedExtensionLedger.clear()
 }

@@ -1,0 +1,168 @@
+import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { join } from 'node:path'
+import { describe, expect, test } from 'bun:test'
+
+const ROOT = process.cwd()
+
+function read(path: string): string {
+  return readFileSync(join(ROOT, path), 'utf8')
+}
+
+function gitBlobSha(content: string): string {
+  const body = Buffer.from(content, 'utf8')
+  const header = Buffer.from(`blob ${body.length}\0`, 'utf8')
+  return createHash('sha1').update(header).update(body).digest('hex')
+}
+
+const HISTORICAL_V1_V5: Record<string, string> = {
+  'spec/domain-architecture.md': '1868a11171b6007b167652466c970acdf7f948d5',
+  'spec/domain-architecture-v2.md': '95d13509a180819c02e8b41fed8a781cb2be090a',
+  'spec/domain-architecture-v3.md': '1fd340229a78efe6d13664ab72ac6c7d3c46ddcb',
+  'spec/domain-architecture-v4.md': '03bdac8338d06ddaa9d1d9b037942ea9684f0567',
+  'spec/domain-architecture-v5.md': 'f51b107e12f484026aa31e38ec1cf041a660d7fd',
+}
+
+describe('IAAS V6 architecture completion invariants', () => {
+  test('preserves frozen V1-V5 architecture blobs byte-for-byte', () => {
+    for (const [path, expectedSha] of Object.entries(HISTORICAL_V1_V5)) {
+      expect(gitBlobSha(read(path))).toBe(expectedSha)
+    }
+  })
+
+  test('V5 remains canonical while V6 is explicitly a candidate', () => {
+    const architecture = read('spec/architecture.md')
+    const lock = read('spec/architecture-lock.md')
+    const v6 = read('spec/domain-architecture-v6.md')
+
+    expect(architecture).toContain('IAAS-DOM-ARCH-5` | FROZEN / CURRENT CANONICAL')
+    expect(architecture).toContain('IAAS-DOM-ARCH-6` | CANDIDATE / UNDER REVIEW')
+    expect(lock).toContain('IAAS-DOM-ARCH-5` (FROZEN — approved through ACR-004 / WORK-020)')
+    expect(lock).toContain('IAAS-DOM-ARCH-6` (CANDIDATE / UNDER REVIEW — ACR-005)')
+    expect(v6).toContain('CANDIDATE / UNDER REVIEW')
+    expect(v6).not.toContain('CANDIDATE / FROZEN')
+  })
+
+  test('V6 package does not import the forbidden WorkflowOS vocabulary', () => {
+    const paths = [
+      'spec/architecture.md',
+      'spec/architecture-lock.md',
+      'spec/architecture-change-requests/ACR-005.md',
+      'spec/architecture-inventory-v6.md',
+      'spec/domain-architecture-v6.md',
+      'spec/domain-requirements-v6.md',
+      'spec/domain-dependency-graph-v6.md',
+      'spec/work-items-v6.md',
+      'spec/dependency-graph-v6.md',
+    ]
+    for (const path of paths) {
+      expect(read(path)).not.toContain('WorkflowOS')
+    }
+  })
+
+  test('V6 Work Item DAG is acyclic and all work items are draft-gated', () => {
+    const text = read('spec/work-items-v6.md')
+    const ids = [...text.matchAll(/^## (WORK-(?:0(?:2[3-9])|[34]\d)) —/gm)].map((m) => m[1])
+    expect(ids).toHaveLength(19)
+    expect(new Set(ids).size).toBe(19)
+
+    for (const id of ids) {
+      const sectionStart = text.indexOf(`## ${id} —`)
+      const nextHeading = text.indexOf('\n## ', sectionStart + 4)
+      const section = text.slice(sectionStart, nextHeading < 0 ? text.length : nextHeading)
+      expect(section).toContain('Status: `DRAFT`')
+    }
+
+    const graph = read('spec/dependency-graph-v6.md')
+    const edges = [...graph.matchAll(/^(WORK-\d+) → (WORK-\d+)$/gm)].map((m) => [m[1], m[2]] as const)
+    const adjacency = new Map<string, string[]>()
+    for (const [from, to] of edges) adjacency.set(from, [...(adjacency.get(from) ?? []), to])
+
+    const visiting = new Set<string>()
+    const visited = new Set<string>()
+    const visit = (node: string): void => {
+      if (visiting.has(node)) throw new Error(`cycle detected at ${node}`)
+      if (visited.has(node)) return
+      visiting.add(node)
+      for (const child of adjacency.get(node) ?? []) visit(child)
+      visiting.delete(node)
+      visited.add(node)
+    }
+
+    for (const id of ids) visit(id)
+  })
+
+  test('architecture DAG explicitly forbids known drift paths', () => {
+    const graph = read('spec/domain-dependency-graph-v6.md')
+    const forbidden = [
+      'Kernel ✗-> vertical services',
+      'Kernel ✗-> Marketplace',
+      'Kernel ✗-> EconomicPipeline',
+      'Kernel ✗-> DataPlane services',
+      'EconomicPipeline ✗-> DataPlane',
+      'DataPlane ✗-> EconomicPipeline',
+      'InfrastructureRuntime ✗-> ProtocolRuntime',
+      'ProtocolRuntime ✗-> InfrastructureRuntime',
+      'Marketplace ✗-> Extension execution',
+      'SDK ✗-> private persistence semantics',
+      'Telemetry ✗-> automatic attestation',
+    ]
+    for (const line of forbidden) expect(graph).toContain(line)
+  })
+
+  test('architecture completion hold prevents production implementation before V6 freeze', () => {
+    const hold = read('spec/work-state/V6-ARCHITECTURE-HOLD.md')
+    const workItems = read('spec/work-items-v6.md')
+    expect(hold).toContain('IAAS-DOM-ARCH-6 FROZEN')
+    expect(hold).toContain('no production Work Order may be assigned, implemented, or opened as an active PR')
+    expect(workItems).toContain('Status: `DRAFT`')
+  })
+
+  test('V6 requirement IDs cover each promoted universal domain', () => {
+    const requirements = read('spec/domain-requirements-v6.md')
+    for (const id of [
+      'NET-001', 'NET-002', 'NET-003', 'NET-004',
+      'COMP-001', 'COMP-002', 'COMP-003',
+      'ALLOC-001', 'ALLOC-002', 'ALLOC-003',
+      'DATA-001', 'DATA-002',
+      'TRUST-001', 'TRUST-002', 'TRUST-003',
+      'PKG-001', 'PKG-002',
+      'DIST-001', 'DIST-002',
+      'ECON-001', 'ECON-002', 'ECON-003',
+      'OPS-001', 'OBS-001', 'OBS-002', 'SDK-001', 'FED-001', 'REF-001', 'CONF-001',
+    ]) expect(requirements).toContain(`## ${id}`)
+  })
+
+  test('current candidate files are present under spec/', () => {
+    for (const path of [
+      'architecture-change-requests/ACR-005.md',
+      'architecture-inventory-v6.md',
+      'domain-architecture-v6.md',
+      'domain-requirements-v6.md',
+      'domain-dependency-graph-v6.md',
+      'work-items-v6.md',
+      'dependency-graph-v6.md',
+      'work-orders/WORK-023.md',
+      'work-orders/WORK-024.md',
+      'work-orders/WORK-025.md',
+      'work-orders/WORK-026.md',
+      'work-orders/WORK-027.md',
+      'work-orders/WORK-028.md',
+      'work-orders/WORK-029.md',
+      'work-orders/WORK-030.md',
+      'work-orders/WORK-031.md',
+      'work-orders/WORK-032.md',
+      'work-orders/WORK-033.md',
+      'work-orders/WORK-034.md',
+      'work-orders/WORK-035.md',
+      'work-orders/WORK-036.md',
+      'work-orders/WORK-037.md',
+      'work-orders/WORK-038.md',
+      'work-orders/WORK-039.md',
+      'work-orders/WORK-040.md',
+      'work-orders/WORK-041.md',
+    ]) {
+      expect(() => read(join('spec', path))).not.toThrow()
+    }
+  })
+})

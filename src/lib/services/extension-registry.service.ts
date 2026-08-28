@@ -29,12 +29,7 @@
 import { db } from '@/lib/db'
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/domain/errors'
 import { appendAudit, AuditEvents } from '@/lib/domain/audit'
-import {
-  revokeActiveExecutionsForExtension,
-  deactivateActiveExecutionsForExtension,
-  reactivateExtension,
-} from '@/lib/services/active-execution-registry.service'
-import type { SandboxHost } from '@/lib/services/sandbox-host.service'
+import { revokeActiveExecutionsForExtension } from '@/lib/services/active-execution-registry.service'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -353,10 +348,6 @@ export async function revokeExtension(
   // either already in the ActiveExecutionRegistry (revoked now) or arrive
   // after the revoked-ledger mark (refused at registration).
   const termination = revokeActiveExecutionsForExtension(tenantId, extensionType, extensionVersion)
-  // WORK-022: the extension left `deactivated` for the TERMINAL state — clear
-  // the reversible deactivation mark (NOT a re-activation: the terminal
-  // revoked ledger refuses registrations forever regardless of the mark).
-  reactivateExtension(tenantId, extensionType, extensionVersion)
 
   await appendAudit({
     tenantId, actorId,
@@ -376,59 +367,12 @@ export async function revokeExtension(
 // Lifecycle Transitions (registry-owned, authoritative)
 // ---------------------------------------------------------------------------
 
-/**
- * WORK-022 — options for {@link transitionLifecycle}.
- *
- * For the registered → installed transition, `wasmModule` supplies the
- * extension's WASM binary for install-time VALIDATION (V5 §2.5 "installed:
- * module validation/compilation may occur without execution"): classification
- * + AR-021-18 import verification against the entry's DECLARED capabilities,
- * with NO sandbox spawn and NO execution. Unauthorized or unverifiable
- * imports DENY the transition (the entry stays `registered`).
- *
- * When `wasmModule` is absent the transition proceeds WITHOUT module
- * validation (V4 in-memory extensions have no binary; V5 §2.5 says validation
- * MAY occur) and the audit records `moduleValidated: false`.
- */
-export interface LifecycleTransitionOptions {
-  /** The extension's WASM binary to validate at install time (optional). */
-  wasmModule?: Buffer
-  /** Optional SandboxHost override used for install-time validation. */
-  sandboxHost?: SandboxHost
-}
-
-/**
- * Execute an authoritative lifecycle transition (V4 §2.7 / V5 §2.5).
- *
- * WORK-022 wires the remaining §2.5 semantics (WORK-021 wired `revoked`):
- *
- *   registered → installed     install-time module VALIDATION (no spawn, no
- *                              execution) when a binary is supplied; denied
- *                              imports deny the transition BEFORE any durable
- *                              update (the entry stays `registered`).
- *
- *   activated → deactivated    durable update FIRST, then the SYNCHRONOUS
- *                              ActiveExecutionRegistry deactivation hook:
- *                              terminate every active sandbox execution of the
- *                              extension through SandboxExecutionHandle.revoke()
- *                              (the §2.5 termination abstraction) and mark the
- *                              REVERSIBLE deactivation ledger (registrations
- *                              refused until re-activation). The terminal
- *                              revoked-execution ledger is NEVER used here.
- *
- *   deactivated → activated    durable update FIRST, then the SYNCHRONOUS
- *                              re-activation hook clearing the deactivation
- *                              ledger mark — execution is permitted again
- *                              (the existing Runtime lifecycle gate re-admits
- *                              `activated` extensions).
- */
 export async function transitionLifecycle(
   tenantId: string,
   extensionType: string,
   extensionVersion: string,
   targetState: string,
   actorId?: string,
-  options?: LifecycleTransitionOptions,
 ): Promise<ExtensionRegistryEntryResult> {
   const entry = await db.extensionRegistryEntry.findUnique({
     where: {
@@ -456,32 +400,6 @@ export async function transitionLifecycle(
     )
   }
 
-  // WORK-022 (W022-AC03) — registered → installed: install-time module
-  // validation BEFORE the durable update. A denied transition must leave the
-  // entry in its current state (no partial durable effect).
-  let installAuditMetadata: Record<string, unknown> = {}
-  if (targetState === LIFECYCLE_STATE.INSTALLED) {
-    if (options?.wasmModule !== undefined) {
-      const validation = await validateModuleForInstall(
-        tenantId,
-        extensionType,
-        extensionVersion,
-        JSON.parse(entry.declaredCapabilitiesJson) as string[],
-        options.wasmModule,
-        options.sandboxHost,
-      )
-      installAuditMetadata = {
-        moduleValidated: true,
-        moduleClassification: validation.classification,
-        moduleDeclaredImports: validation.declaredImports,
-      }
-    } else {
-      // V5 §2.5 "validation MAY occur": no binary supplied (e.g. a V4
-      // in-memory extension with no WASM artifact) — nothing to validate.
-      installAuditMetadata = { moduleValidated: false }
-    }
-  }
-
   const updated = await db.extensionRegistryEntry.update({
     where: { id: entry.id },
     data: { lifecycleState: targetState },
@@ -491,27 +409,10 @@ export async function transitionLifecycle(
   // the `revoked` lifecycle state. Fire the SAME termination hook
   // synchronously after the durable update so the "revoked → active context
   // terminated" contract holds regardless of which API path reached it.
-  //
-  // WORK-022 (V5 §2.5 "deactivated: active execution context terminated/
-  // deactivated"): the SAME authoritative control path serves deactivation —
-  // durable update FIRST, then the SYNCHRONOUS deactivation hook. There is
-  // NO await between the durable update above and the hooks below.
   let activeExecutionsTerminated = 0
   if (targetState === LIFECYCLE_STATE.REVOKED) {
     const termination = revokeActiveExecutionsForExtension(tenantId, extensionType, extensionVersion)
     activeExecutionsTerminated = termination.executionIds.length
-    // The extension is no longer deactivated — it is TERMINAL. Clear the
-    // reversible deactivation mark (NOT a re-activation: the terminal revoked
-    // ledger refuses registrations forever regardless).
-    reactivateExtension(tenantId, extensionType, extensionVersion)
-  } else if (targetState === LIFECYCLE_STATE.DEACTIVATED) {
-    const termination = deactivateActiveExecutionsForExtension(tenantId, extensionType, extensionVersion)
-    activeExecutionsTerminated = termination.executionIds.length
-  } else if (targetState === LIFECYCLE_STATE.ACTIVATED) {
-    // Re-activation (deactivated → activated): clear the deactivation-ledger
-    // mark so registrations are permitted again (idempotent for the fresh
-    // installed → activated path, where no mark exists).
-    reactivateExtension(tenantId, extensionType, extensionVersion)
   }
 
   await appendAudit({
@@ -522,56 +423,11 @@ export async function transitionLifecycle(
     metadata: {
       extensionType, extensionVersion,
       from: currentState, to: targetState,
-      // W022-AC06: lifecycle transitions ALWAYS record the number of active
-      // sandbox executions terminated by the transition (0 for transitions
-      // that cannot terminate in-flight executions).
-      activeExecutionsTerminated,
-      ...installAuditMetadata,
+      ...(activeExecutionsTerminated > 0 ? { activeExecutionsTerminated } : {}),
     },
   })
 
   return toResult(updated)
-}
-
-/**
- * WORK-022 (W022-AC03) — install-time module validation: classification +
- * AR-021-18 import verification against the DECLARED capabilities, with NO
- * sandbox spawn and NO execution. Deny-by-default (V5 §2.7): an unavailable
- * host, or one without the validate-only path, DENIES the transition — there
- * is no silent unvalidated install when a binary was supplied.
- *
- * Throws ValidationError when the transition must be denied (unauthorized or
- * unverifiable imports; unavailable host) — BEFORE any durable update.
- */
-async function validateModuleForInstall(
-  tenantId: string,
-  extensionType: string,
-  extensionVersion: string,
-  declaredCapabilities: string[],
-  wasmModule: Buffer,
-  sandboxHostOverride?: SandboxHost,
-): Promise<{ classification: 'component' | 'core-module'; declaredImports: string[] }> {
-  const { getSandboxHost, SandboxCapabilityDeniedError, SandboxUnavailableError } =
-    await import('@/lib/services/sandbox-host.service')
-  const host = sandboxHostOverride ?? getSandboxHost()
-  if (!host.isAvailable() || typeof host.validateOnly !== 'function') {
-    throw new ValidationError(
-      `Extension ${extensionType}@${extensionVersion} install denied: the sandbox host cannot validate the ` +
-      `module (unavailable or no validate-only path — deny-by-default, V5 §2.7); the transition is refused`,
-    )
-  }
-  try {
-    return host.validateOnly(wasmModule, declaredCapabilities)
-  } catch (err) {
-    if (err instanceof SandboxCapabilityDeniedError || err instanceof SandboxUnavailableError) {
-      // Unauthorized (or unverifiable) imports deny the transition — the
-      // entry STAYS in its current lifecycle state (no durable update).
-      throw new ValidationError(
-        `Extension ${extensionType}@${extensionVersion} install denied: ${err.message}`,
-      )
-    }
-    throw err
-  }
 }
 
 // ---------------------------------------------------------------------------
