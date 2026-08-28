@@ -12,7 +12,7 @@ A Work Item exists only where an architectural obligation must become implemente
 ## WORK-023 — IAAS-DOM-ARCH-6 Architecture Completion Candidate
 Status: `DRAFT`
 Architecture Version: `IAAS-GOV-ARCH-1`
-Dependencies: `WORK-022`
+Dependencies: none
 Requirements: `ACR-005`, `ARCH-001`
 Objective: complete the V6 architecture package and inventory without changing production behavior.
 Repository Scope: `spec/` architecture, requirements, domain DAG, candidate Work Item DAG, governance indexes, regression specifications.
@@ -45,7 +45,7 @@ Repository Scope: network lifecycle service, schema/migration, tests.
 Out of Scope: composition, marketplace, federation.
 Architecture Constraints: NetworkDefinition/NetworkVersion remain authoritative for intent; instance lifecycle cannot mutate published versions.
 Acceptance Criteria: NET-001-AC01..04 and NET-002-AC01..04.
-Required Verification: PostgreSQL state-machine tests, tenant isolation, immutability, audit.
+Required Verification: PostgreSQL lifecycle tests, tenant isolation, immutability, audit.
 Definition of Done: lifecycle behavior verified and merged.
 
 ## WORK-026 — Network-as-Code Validation and Launch Compiler
@@ -92,7 +92,7 @@ Status: `DRAFT`
 Architecture Version: `IAAS-DOM-ARCH-6`
 Dependencies: `WORK-027`
 Requirements: `DATA-001`, `DATA-002`
-Objective: implement generic Fragment and ReassemblyState semantics.
+Objective: add generic Fragment and ReassemblyState semantics.
 Repository Scope: data-plane services/schema/tests.
 Out of Scope: new vertical transport protocols.
 Architecture Constraints: preserve Bundle/Route/Transport boundaries and at-least-once/idempotent delivery.
@@ -133,7 +133,7 @@ Dependencies: `WORK-031`, `WORK-030`
 Requirements: `PKG-002`, `DIST-001`
 Objective: verify, admit, and install packages without executing payloads.
 Repository Scope: package admission service and integration with existing registries.
-Out of Scope: marketplace pricing/licensing.
+Out of Scope: Marketplace pricing/licensing.
 Architecture Constraints: registry remains technical lifecycle authority; install never equals execute.
 Acceptance Criteria: PKG-002 and DIST-001.
 Required Verification: no-execution install tests, dependency-cycle tests, trust revocation tests.
@@ -253,5 +253,5 @@ Repository Scope: governance/specification/tests/evidence only.
 Out of Scope: new features or new architectural primitives.
 Architecture Constraints: any missing primitive or boundary contradiction routes to ACR-006+, never to silent V6 edits.
 Acceptance Criteria: all V6 invariants pass; all reference networks remain generic; no forbidden dependency; historical architecture intact; implementation DAG complete.
-Required Verification: full CI, specification validator, static import graph, PostgreSQL, independent Architect Review.
+Required Verification: full CI, specification validator, static import graph, PostgreSQL, lint, scope inspection, independent Architect Review.
 Definition of Done: IAAS implementation program is mechanically traceable to V6 with no unresolved architecture gap.
