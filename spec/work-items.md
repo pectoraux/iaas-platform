@@ -12,7 +12,7 @@ ARCHITECT_REVIEW -> ARCHITECTURE_CHANGE_REQUIRED -> ARCHITECTURE_CHANGE_REQUEST
 ARCHITECT_REVIEW -> IMPLEMENTATION_BLOCKED -> IMPLEMENTING
 ```
 
-WORK-001 is VERIFIED. WORK-001 through WORK-021 are VERIFIED in dependency order. `IAAS-DOM-ARCH-5` is the current frozen domain architecture. WORK-022 is READY and is the only eligible Work Item.
+WORK-001 is VERIFIED. WORK-001 through WORK-022 are VERIFIED in dependency order. `IAAS-DOM-ARCH-5` is the current frozen domain architecture. No Work Item is READY; the next Work Item has not been released.
 
 ## WORK-001 — WorkflowOS Specification and Governance Foundation
 Status: `VERIFIED`
@@ -307,7 +307,7 @@ Required Verification: real WASI module/component execution; capability denial; 
 Definition of Done: V5 sandbox contract implemented without drift; objective evidence recorded; PR verified and Architect-approved; merged; WORK-021 VERIFIED.
 
 ## WORK-022 — Sandbox Lifecycle Completion
-Status: `READY`
+Status: `VERIFIED`
 Architecture Version: `IAAS-GOV-ARCH-1`
 Dependencies: `WORK-021`
 Requirements: V5 sandbox contract §2.5 (lifecycle and termination); promoted `DOM-P05`
