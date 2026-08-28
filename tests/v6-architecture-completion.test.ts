@@ -4,7 +4,6 @@ import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 
 const ROOT = process.cwd()
-const SPEC = join(ROOT, 'spec')
 
 function read(path: string): string {
   return readFileSync(join(ROOT, path), 'utf8')
